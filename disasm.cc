@@ -29,10 +29,6 @@ absl::StatusOr<std::unique_ptr<Disassembler>> Disassembler::Create() {
   if (err != CS_ERR_OK) {
     return absl::InternalError(absl::StrFormat("cs_option(CS_OPT_DETAIL) failed: %s", cs_strerror(err)));
   }
-  err = cs_option(d->handle_, CS_OPT_SYNTAX, CS_OPT_SYNTAX_ATT);
-  if (err != CS_ERR_OK) {
-    return absl::InternalError(absl::StrFormat("cs_option(CS_OPT_SYNTAX) failed: %s", cs_strerror(err)));
-  }
   d->insn_ = cs_malloc(d->handle_);
   if (d->insn_ == nullptr) {
     return absl::ResourceExhaustedError("cs_malloc failed");
