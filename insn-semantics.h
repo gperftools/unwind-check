@@ -1,0 +1,64 @@
+/* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
+#ifndef INSN_SEMANTICS_H_
+#define INSN_SEMANTICS_H_
+
+#include <capstone/capstone.h>
+#include <stdint.h>
+
+#include "abs-state.h"
+
+namespace unwind_analysis {
+
+// What one instruction does to control flow, as far as a function-local
+// recursive descent cares.
+struct TransferOutcome {
+  bool falls_through = true;
+  bool has_direct_target = false;
+  uint64_t direct_target = 0;
+  bool indirect_branch = false;
+  bool is_return = false;
+  bool is_call = false;
+
+  // Set when the instruction does something to the stack we decline to
+  // model exactly. The FDE gets flagged for review rather than analysed
+  // on a guess.
+  const char* review_reason = nullptr;
+};
+
+// The stack-effect semantics table.
+//
+// Only the instructions that touch rsp/rbp and the callee-saved spill
+// slots are modelled precisely: push/pop, add/sub/and/lea on rsp,
+// mov to and from [rsp+off] / [rbp+off], call/ret/jmp/jcc, leave. That
+// is the same small set objtool, LLVM's CFIInstrInserter and Binary
+// Ninja's stack tracker each special-case; nobody lifts all of x86-64
+// for this question.
+//
+// Everything else goes through Capstone's register-access information
+// and simply drops the registers it writes to unknown, so an unmodelled
+// instruction costs us precision and never correctness.
+class InsnSemantics {
+ public:
+  explicit InsnSemantics(csh handle) : handle_(handle) {
+  }
+
+  TransferOutcome Transfer(const cs_insn& insn, AbsState* state) const;
+
+  // DWARF register number for an x86 register, or -1 if it is not one of
+  // the 16 GPRs. Sub-registers map to their 64-bit parent, which is what
+  // we want for clobbering: writing %eax makes %rax untracked too.
+  static int DwarfRegOf(unsigned reg);
+
+  // True only for the full 64-bit spelling. Reading %eax does not yield
+  // the value we are tracking in %rax, so only these count as reads.
+  static bool IsFull64(unsigned reg);
+
+ private:
+  void ClobberWrites(const cs_insn& insn, AbsState* state) const;
+
+  csh handle_;
+};
+
+}  // namespace unwind_analysis
+
+#endif  // INSN_SEMANTICS_H_

@@ -1,0 +1,266 @@
+# -*- Mode: python; -*-
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_shared_library", "cc_test")
+
+package(default_visibility = ["//visibility:private"])
+
+DEFAULT_COPTS = [
+    "-std=c++20",
+    "-Wall",
+    "-Wextra",
+    "-Wsign-compare",
+]
+
+# The locally installed libcapstone-dev. No bazel integration beyond the
+# link flag; the headers are on the default system include path.
+cc_library(
+    name = "capstone",
+    linkopts = ["-lcapstone"],
+)
+
+cc_library(
+    name = "dwarf-constants",
+    hdrs = ["dwarf-constants.h"],
+    copts = DEFAULT_COPTS,
+)
+
+cc_library(
+    name = "eh-frame-reader",
+    srcs = ["eh-frame-reader.cc"],
+    hdrs = ["eh-frame-reader.h"],
+    copts = DEFAULT_COPTS,
+    deps = [
+        ":dwarf-constants",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/functional:function_ref",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "elf-image",
+    srcs = ["elf-image.cc"],
+    hdrs = ["elf-image.h"],
+    copts = DEFAULT_COPTS,
+    deps = [
+        ":dwarf-constants",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "cfi-table",
+    srcs = ["cfi-table.cc"],
+    hdrs = ["cfi-table.h"],
+    copts = DEFAULT_COPTS,
+    deps = [
+        ":eh-frame-reader",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "disasm",
+    srcs = ["disasm.cc"],
+    hdrs = ["disasm.h"],
+    copts = DEFAULT_COPTS,
+    deps = [
+        ":capstone",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "abs-state",
+    srcs = ["abs-state.cc"],
+    hdrs = ["abs-state.h"],
+    copts = DEFAULT_COPTS,
+    deps = [
+        ":cfi-table",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "insn-semantics",
+    srcs = ["insn-semantics.cc"],
+    hdrs = ["insn-semantics.h"],
+    copts = DEFAULT_COPTS,
+    deps = [
+        ":abs-state",
+        ":capstone",
+    ],
+)
+
+cc_library(
+    name = "fde-checker",
+    srcs = ["fde-checker.cc"],
+    hdrs = ["fde-checker.h"],
+    copts = DEFAULT_COPTS,
+    deps = [
+        ":abs-state",
+        ":cfi-table",
+        ":disasm",
+        ":elf-image",
+        ":insn-semantics",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "symbolizer",
+    srcs = ["symbolizer.cc"],
+    hdrs = ["symbolizer.h"],
+    copts = DEFAULT_COPTS,
+    deps = [
+        ":elf-image",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
+    name = "report",
+    srcs = ["report.cc"],
+    hdrs = ["report.h"],
+    copts = DEFAULT_COPTS,
+    deps = [
+        ":fde-checker",
+        ":symbolizer",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_binary(
+    name = "unwind-check",
+    srcs = ["unwind-check.cc"],
+    copts = DEFAULT_COPTS,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cfi-table",
+        ":disasm",
+        ":eh-frame-reader",
+        ":elf-image",
+        ":fde-checker",
+        ":report",
+        ":symbolizer",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/flags:flag",
+        "@abseil-cpp//absl/flags:parse",
+        "@abseil-cpp//absl/flags:usage",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+# --- tests -------------------------------------------------------------
+
+# The fixture binary. Its CFI is hand-written in the .S, so the expected
+# verdicts are fixed by the fixture rather than by the toolchain.
+cc_binary(
+    name = "testdata/libfixtures.so",
+    srcs = ["testdata/fixtures.S"],
+    linkshared = True,
+    tags = ["manual"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+cc_test(
+    name = "fixtures-test",
+    srcs = ["fixtures-test.cc"],
+    copts = DEFAULT_COPTS,
+    size = "small",
+    data = ["testdata/libfixtures.so"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    deps = [
+        ":cfi-table",
+        ":disasm",
+        ":eh-frame-reader",
+        ":elf-image",
+        ":fde-checker",
+        ":symbolizer",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "abs-state-test",
+    size = "small",
+    srcs = ["abs-state-test.cc"],
+    copts = DEFAULT_COPTS,
+    deps = [
+        ":abs-state",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "insn-semantics-test",
+    size = "small",
+    srcs = ["insn-semantics-test.cc"],
+    copts = DEFAULT_COPTS,
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    deps = [
+        ":disasm",
+        ":insn-semantics",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "elf-image-test",
+    srcs = ["elf-image-test.cc"],
+    copts = DEFAULT_COPTS,
+    size = "small",
+    data = [
+        "testdata/fixtures.S",
+        "testdata/libfixtures.so",
+    ],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    deps = [
+        ":elf-image",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "cfi-table-test",
+    srcs = ["cfi-table-test.cc"],
+    copts = DEFAULT_COPTS,
+    size = "small",
+    data = ["testdata/libfixtures.so"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    deps = [
+        ":cfi-table",
+        ":eh-frame-reader",
+        ":elf-image",
+        "@googletest//:gtest_main",
+    ],
+)

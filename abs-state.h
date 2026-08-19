@@ -1,0 +1,154 @@
+/* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
+#ifndef ABS_STATE_H_
+#define ABS_STATE_H_
+
+#include <stdint.h>
+
+#include <map>
+#include <string>
+#include <vector>
+
+#include "cfi-table.h"
+
+namespace unwind_analysis {
+
+// The anchor for the whole analysis: CFA is defined, once and for all,
+// as the value rsp had on entry to the function plus 8 -- i.e. the
+// x86-64 psABI's canonical frame address. It is a fixed symbolic
+// quantity that we never redefine. Everything the analysis tracks is
+// expressed relative to it, which is what makes a declared CFI rule
+// directly checkable instead of something we have to re-derive.
+struct AbsVal {
+  enum class Kind : uint8_t {
+    kUnknown,  // top: we cannot say anything
+    kCfaRel,   // the value is CFA + delta
+    kOrigReg,  // the value is whatever DWARF register `reg` held on entry
+  };
+
+  Kind kind = Kind::kUnknown;
+  int64_t delta = 0;
+  uint8_t reg = 0;
+
+  static AbsVal Unknown() {
+    return {};
+  }
+  static AbsVal CfaRel(int64_t delta) {
+    return AbsVal{Kind::kCfaRel, delta, 0};
+  }
+  static AbsVal OrigReg(int reg) {
+    return AbsVal{Kind::kOrigReg, 0, static_cast<uint8_t>(reg)};
+  }
+
+  bool is_unknown() const {
+    return kind == Kind::kUnknown;
+  }
+  bool IsCfaRel(int64_t d) const {
+    return kind == Kind::kCfaRel && delta == d;
+  }
+  bool IsOrigReg(int r) const {
+    return kind == Kind::kOrigReg && reg == r;
+  }
+
+  bool operator==(const AbsVal&) const = default;
+  std::string ToString() const;
+};
+
+// The abstract state at one program point.
+//
+// `slots` holds only the stack locations whose contents we can name;
+// anything else is simply absent, which reads as "unknown". Keys are
+// offsets from the CFA, so a `push` at function entry writes slot -16,
+// and the return address the call put there lives at slot -8.
+struct AbsState {
+  AbsVal gpr[kNumGpRegs];
+  std::map<int64_t, AbsVal> slots;
+
+  // The state on entry to a function: rsp is CFA-8 (the call pushed the
+  // return address), every register still holds its own entry value, and
+  // the return address is on the stack at CFA-8.
+  static AbsState Entry();
+
+  // The state to start an FDE's analysis from, read off the FDE's own
+  // first CFI row.
+  //
+  // Assuming Entry() would be wrong: plenty of FDEs cover a *fragment*
+  // of a function rather than a whole one -- cold parts split out to
+  // .text.unlikely, PLT stubs -- and those begin with several registers
+  // already spilled and rsp well below the CFA. Seeding from the
+  // declared row means the analysis verifies that the rest of the CFI
+  // stays consistent with the code *relative to where the FDE starts*,
+  // which is the strongest claim available without inter-procedural
+  // information. For an FDE that really does start a function the
+  // declared row is the canonical entry state anyway, so this is a
+  // strict generalisation of Entry() -- and FdeChecker separately
+  // verifies that claim wherever a function symbol says the FDE starts
+  // one.
+  static AbsState SeedFromRow(const CfiRow& row);
+
+  const AbsVal& reg(int r) const {
+    return gpr[r];
+  }
+  void SetReg(int r, const AbsVal& v) {
+    gpr[r] = v;
+  }
+  void ClobberReg(int r) {
+    gpr[r] = AbsVal::Unknown();
+  }
+
+  // Slot lookup; absent slots read as unknown.
+  AbsVal Slot(int64_t offset) const;
+  void SetSlot(int64_t offset, const AbsVal& v);
+
+  // Drops every slot strictly below `rsp_delta`.
+  void DropSlotsBelow(int64_t rsp_delta);
+
+  // Drops the slots that moving the stack pointer to `rsp_delta` really
+  // kills, leaving the red zone alone.
+  //
+  // This matters more than it looks. GCC routinely leaves a register's
+  // `DW_CFA_offset` rule in force after the `pop` that restored it,
+  // never emitting `DW_CFA_restore` -- so at the `ret` of an ordinary
+  // function the CFI still says rbx lives at CFA-32, an address now
+  // below rsp. That is safe in practice precisely because the kernel
+  // honours the 128-byte red zone when delivering a signal, so the
+  // spilled value is still there. Dropping those slots outright would
+  // flag essentially every GCC-compiled function and bury the report.
+  //
+  // Calls are the exception and use DropSlotsBelow directly: no red zone
+  // survives a call.
+  void DropDeadSlots(int64_t rsp_delta);
+
+  // The x86-64 psABI's red zone: the 128 bytes below rsp that a signal
+  // handler must not disturb.
+  static constexpr int64_t kRedZoneBytes = 128;
+
+  bool operator==(const AbsState&) const = default;
+};
+
+// What disagreed when two paths met.
+struct JoinConflict {
+  // Register number, or kSlotConflict with `offset` set.
+  static constexpr int kSlotConflict = -1;
+  int reg = 0;
+  int64_t offset = 0;
+  AbsVal lhs;
+  AbsVal rhs;
+
+  std::string Describe() const;
+};
+
+// Meets `incoming` into `*state`. Components that agree survive;
+// components that disagree drop to unknown *and* are reported in
+// `conflicts`.
+//
+// The reporting is the point. .eh_frame declares exactly one state per
+// PC, so two edges reaching the same PC with different real stack states
+// is either a gap in this analysis or the compiler bug we are hunting.
+// Widening silently would hide both.
+//
+// Returns true when *state changed, i.e. the successor needs requeueing.
+bool Join(const AbsState& incoming, AbsState* state, std::vector<JoinConflict>* conflicts);
+
+}  // namespace unwind_analysis
+
+#endif  // ABS_STATE_H_

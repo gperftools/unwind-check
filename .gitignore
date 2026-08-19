@@ -1,0 +1,5 @@
+*.o
+/.cache
+/MODULE.bazel.lock
+/bazel-*
+/compile_commands.json
