@@ -17,7 +17,7 @@ namespace unwind_analysis {
 
 namespace {
 
-constexpr size_t kBatchSize = 256;
+constexpr size_t kBatchSize = 4096;
 
 std::string ShellQuote(const std::string& s) {
   std::string out = "'";
