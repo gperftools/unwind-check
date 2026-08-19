@@ -53,7 +53,7 @@ class FixturesTest : public testing::Test {
       starts.insert(sym.vaddr);
     }
 
-    FdeChecker checker{*image_, *disasm_, FdeChecker::Options{}};
+    FdeChecker checker{*image_, disasm_, FdeChecker::Options{}};
     by_name_ = new std::map<std::string, Checked>();
     EnumerateFDEs(static_cast<uintptr_t>(image_->eh_frame_start()) + image_->bias(),
                   static_cast<uintptr_t>(image_->eh_frame_end()) + image_->bias(), [&](uintptr_t fde_addr) {

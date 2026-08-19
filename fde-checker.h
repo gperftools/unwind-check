@@ -59,7 +59,7 @@ class FdeChecker {
     size_t max_iterations = 200000;
   };
 
-  FdeChecker(const ElfImage& image, Disassembler& disasm, const Options& options)
+  FdeChecker(const ElfImage& image, Disassembler* disasm, const Options& options)
       : image_(image), disasm_(disasm), options_(options) {
   }
 
@@ -72,7 +72,7 @@ class FdeChecker {
 
  private:
   const ElfImage& image_;
-  Disassembler& disasm_;
+  Disassembler* const disasm_;
   Options options_;
 };
 

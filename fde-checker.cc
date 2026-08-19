@@ -322,7 +322,7 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
 
   FindingSink sink{options_.max_findings_per_fde};
   RowChecker row_checker{options_, &sink};
-  InsnSemantics semantics{disasm_.handle()};
+  InsnSemantics semantics{disasm_->handle()};
 
   // Forward dataflow over the instructions reachable from pc_begin by
   // direct control flow. Per-instruction rather than per-block: simpler,
@@ -411,7 +411,7 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
     AbsState state = in_states[pc];
 
     std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
-    const cs_insn* insn = bytes.empty() ? nullptr : disasm_.DecodeOne(bytes.data(), bytes.size(), pc);
+    const cs_insn* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
     if (insn == nullptr) {
       sink.Add(Finding::Severity::kReview, pc, "cannot decode the instruction at this address", "");
       continue;
@@ -482,7 +482,7 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
       bool all_padding = true;
       while (pc < cfi.pc_end && insn_sizes.find(pc) == insn_sizes.end()) {
         std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
-        const cs_insn* insn = bytes.empty() ? nullptr : disasm_.DecodeOne(bytes.data(), bytes.size(), pc);
+        const cs_insn* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
         if (insn == nullptr) {
           all_padding = false;
           pc++;

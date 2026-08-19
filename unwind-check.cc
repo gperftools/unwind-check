@@ -189,24 +189,28 @@ void DumpCfi(const FdeCfi& cfi, const Symbolizer& symbolizer) {
 }
 
 int Run(const std::string& path) {
-  absl::StatusOr<std::unique_ptr<ElfImage>> image = ElfImage::Open(path);
-  if (!image.ok()) {
-    absl::FPrintF(stderr, "unwind-check: %s\n", image.status().message());
+  absl::StatusOr<std::unique_ptr<ElfImage>> maybe_image = ElfImage::Open(path);
+  if (!maybe_image.ok()) {
+    absl::FPrintF(stderr, "unwind-check: %s\n", maybe_image.status().message());
     return kExitFailure;
   }
-  if (!(*image)->has_eh_frame()) {
+
+  const ElfImage& image = **maybe_image;
+  if (!image.has_eh_frame()) {
     absl::FPrintF(stderr, "unwind-check: %s has no .eh_frame section; there is nothing to check\n", path);
     return kExitFailure;
   }
 
-  absl::StatusOr<std::unique_ptr<Disassembler>> disasm = Disassembler::Create();
-  if (!disasm.ok()) {
-    absl::FPrintF(stderr, "unwind-check: %s\n", disasm.status().message());
+  absl::StatusOr<std::unique_ptr<Disassembler>> maybe_disasm = Disassembler::Create();
+  if (!maybe_disasm.ok()) {
+    absl::FPrintF(stderr, "unwind-check: %s\n", maybe_disasm.status().message());
     return kExitFailure;
   }
 
+  Disassembler* disasm = maybe_disasm.value().get();
+
   std::string enumerate_error;
-  std::vector<RawFde> fdes = ReadAllFdes(**image, &enumerate_error);
+  std::vector<RawFde> fdes = ReadAllFdes(image, &enumerate_error);
   if (fdes.empty() && !enumerate_error.empty()) {
     absl::FPrintF(stderr, "unwind-check: cannot read .eh_frame of %s: %s\n", path, enumerate_error);
     return kExitFailure;
@@ -214,10 +218,10 @@ int Run(const std::string& path) {
 
   std::vector<FdeResult> results;
   std::vector<const FdeCfi*> checkable;
-  RunStructuralChecks(**image, fdes, &results, &checkable);
+  RunStructuralChecks(image, fdes, &results, &checkable);
 
   std::string tool_path;
-  Symbolizer symbolizer{**image, ParseAddr2LineMode(absl::GetFlag(FLAGS_addr2line), &tool_path), tool_path};
+  Symbolizer symbolizer{image, ParseAddr2LineMode(absl::GetFlag(FLAGS_addr2line), &tool_path), tool_path};
 
   std::optional<std::regex> name_filter;
   const std::string function_flag = absl::GetFlag(FLAGS_function);
@@ -243,7 +247,7 @@ int Run(const std::string& path) {
   options.check_unmentioned_callee_saved = absl::GetFlag(FLAGS_check_unmentioned_callee_saved);
   options.report_coverage_gaps = absl::GetFlag(FLAGS_report_coverage_gaps);
   options.max_findings_per_fde = static_cast<size_t>(std::max(1, absl::GetFlag(FLAGS_max_findings)));
-  FdeChecker checker{**image, **disasm, options};
+  FdeChecker checker{image, disasm, options};
 
   // Where a function symbol starts, the FDE's first row is checkable
   // against the canonical entry state. Elsewhere -- PLT stubs, the cold
@@ -259,7 +263,7 @@ int Run(const std::string& path) {
   // binary has dozens of them, and every one would be accused of an
   // impossible entry row.
   absl::flat_hash_set<uint64_t> function_starts;
-  for (const FuncSymbol& sym : (*image)->func_symbols()) {
+  for (const FuncSymbol& sym : image.func_symbols()) {
     if (IsEntryPointName(sym.name)) {
       function_starts.insert(sym.vaddr);
     }
