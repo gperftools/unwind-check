@@ -52,7 +52,7 @@ class Symbolizer {
   std::string DebugName(uint64_t vaddr) const;
 
   const ElfImage& image_;
-  std::string tool_path_;
+  const std::string tool_path_;
   bool use_addr2line_ = false;
   std::string disabled_reason_;
   absl::flat_hash_map<uint64_t, std::string> source_lines_;
