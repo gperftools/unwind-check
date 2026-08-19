@@ -15,7 +15,7 @@ BIN=${BIN:-./bazel-bin/unwind-check}
 COUNT=${1:-400}
 
 if [ ! -x "$BIN" ]; then
-  echo "no $BIN; run: bazel build :unwind-check" >&2
+  echo "no $BIN; run: bazel build -c opt :unwind-check" >&2
   exit 1
 fi
 
