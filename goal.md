@@ -9,6 +9,7 @@ See ../backtrace-test/AGENT.md and ../backtrace-test/doc/binary-unwind-analysis.
 * using capstone-engine (https://www.capstone-engine.org/)
 **  use libcapstone-dev installed locally. No need to invent special bazel integration, yet
 * C++ 20; with abseil-cpp; modified Google c++ style (like in the backtrace-test project referred above)
+** use abseil-cpp via bazel central repo stuff
 * "stealing" i.e. copying code from backtrace-test is allowed (e.g. for eh-frame-reader perhaps). But prefer abseil bits for e.g. stuff like FunctionRef or CHECK. Yes copying is suboptimal (code divergence), but okay for now.
 ** in any case don't make _any_ modifications outside of this directory or /tmp
 
