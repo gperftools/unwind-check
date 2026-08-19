@@ -128,7 +128,7 @@ class TableBuilder : public UnwindVisitor {
   }
 
   bool HandleRememberState() {
-    if (stack_.size() >= kMaxRememberDepth) {
+    if (stack_.size() >= 32) {
       throw EhFrameError("DW_CFA_remember_state nested deeper than 32 levels");
     }
     Saved s;
@@ -149,8 +149,6 @@ class TableBuilder : public UnwindVisitor {
   }
 
  private:
-  static constexpr size_t kMaxRememberDepth = 32;
-
   struct Saved {
     CfaRule cfa;
     RegRule regs[kNumDwarfRegs];
