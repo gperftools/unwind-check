@@ -324,6 +324,16 @@ Before any disassembly, in `unwind-check.cc`: `.eh_frame` must exist; each FDE r
 must be non-empty and inside one executable PT_LOAD; ranges must not overlap.
 Nothing else available reports any of this.
 
+Poor-man's PLT handling lives in the same pass: `ELFImage::InPLT` (`elf-image.{h,cc}`)
+records the vaddr range of every section whose name starts with `.plt` --
+`.plt`, `.plt.got`, `.plt.sec` (the IBT variant), and whatever else a linker
+invents under that prefix -- and any FDE falling entirely inside one is
+skipped and reported blessed without ever reaching `FDEChecker`. These are
+linker-generated stubs, not compiler output with CFI worth second-guessing.
+Sections are optional and this degrades to finding nothing, same as the rest
+of §4.7's symbol handling; a plain `jmp` *into* a PLT stub from ordinary code
+still goes through the regular tail-call exit-state check, unweakened.
+
 ## 5. Where it stands
 
 Measured with the tool itself:

@@ -7,6 +7,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/status/statusor.h"
@@ -105,6 +106,13 @@ class ELFImage {
   // resolved switch table may live: real data, never code.
   bool IsFileBackedNonExecutable(uint64_t vaddr, uint64_t size) const;
 
+  // True iff [vaddr, vaddr+size) lies entirely inside one section whose
+  // name starts with ".plt" -- ".plt", ".plt.got", ".plt.sec" (the IBT
+  // variant), and whatever else a linker invents under that prefix.
+  // False (never a false positive) when the binary has no such section,
+  // e.g. because it was stripped of sections entirely.
+  bool InPLT(uint64_t vaddr, uint64_t size) const;
+
   // Code (or any mapped) bytes at a vaddr. Returns a short span, or an
   // empty one, when the range runs past what is mapped.
   std::span<const uint8_t> BytesAt(uint64_t vaddr, uint64_t size) const;
@@ -135,6 +143,8 @@ class ELFImage {
   uint64_t eh_frame_start_ = 0;
   uint64_t eh_frame_end_ = 0;
   uint64_t eh_frame_hdr_ = 0;
+  // [start, end) per section whose name starts with ".plt".
+  std::vector<std::pair<uint64_t, uint64_t>> plt_ranges_;
   bool has_debug_line_ = false;
   bool has_debug_link_ = false;
 };

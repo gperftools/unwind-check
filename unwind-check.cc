@@ -153,6 +153,16 @@ void RunStructuralChecks(const ELFImage& image, const std::vector<RawFDE>& fdes,
                                                cfi.pc_begin, cfi.pc_end)));
       continue;
     }
+    // PLT stubs are linker-generated, not compiler output with CFI to
+    // second-guess; assume correct and skip analysis entirely.
+    if (image.InPLT(cfi.pc_begin, cfi.pc_end - cfi.pc_begin)) {
+      FDEResult r;
+      r.fde_addr = raw.vaddr;
+      r.pc_begin = cfi.pc_begin;
+      r.pc_end = cfi.pc_end;
+      results->push_back(std::move(r));
+      continue;
+    }
     sorted.push_back(&raw);
     checkable->push_back(&cfi);
   }

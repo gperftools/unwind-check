@@ -25,7 +25,7 @@ switch table handling. Different indexes we could either handle by
 trying to track ranges (e.g. %rax above) or just scanning from 0 until
 table is referring to "our" FDE.
 
-* poor-man's PLT handling. Grab bounds of .plt and .plt.got from
+[done] * poor-man's PLT handling. Grab bounds of .plt and .plt.got from
   sections (yes, sections are optional; but good enough for our
   needs). Tail-call jumps there are to automagically assumed to be
   normal tail calls and require corresponding state. Also FDEs

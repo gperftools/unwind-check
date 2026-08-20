@@ -148,6 +148,20 @@ bool ELFImage::IsFileBackedNonExecutable(uint64_t vaddr, uint64_t size) const {
   return false;
 }
 
+bool ELFImage::InPLT(uint64_t vaddr, uint64_t size) const {
+  for (const auto& [start, end] : plt_ranges_) {
+    if (vaddr < start) {
+      continue;
+    }
+    uint64_t off = vaddr - start;
+    uint64_t range = end - start;
+    if (off <= range && size <= range - off) {
+      return true;
+    }
+  }
+  return false;
+}
+
 std::span<const uint8_t> ELFImage::BytesAt(uint64_t vaddr, uint64_t size) const {
   for (const LoadSegment& seg : segments_) {
     if (vaddr < seg.vaddr) {
@@ -313,6 +327,8 @@ absl::StatusOr<std::unique_ptr<ELFImage>> ELFImage::Open(const std::string& path
       if (name == ".eh_frame" && sh.sh_addr != 0 && sh.sh_size != 0) {
         img->eh_frame_start_ = sh.sh_addr;
         img->eh_frame_end_ = sh.sh_addr + sh.sh_size;
+      } else if (name.starts_with(".plt") && sh.sh_addr != 0 && sh.sh_size != 0) {
+        img->plt_ranges_.emplace_back(sh.sh_addr, sh.sh_addr + sh.sh_size);
       } else if (name == ".debug_line") {
         img->has_debug_line_ = true;
       } else if (name == ".gnu_debuglink") {
