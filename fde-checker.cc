@@ -53,6 +53,7 @@ struct BoundGuard {
 std::optional<BoundGuard> FindGuardBound(uint64_t branch_pc, bool is_jae, const ELFImage& image, Disassembler* disasm,
                                          uint64_t pc_end,
                                          const absl::flat_hash_map<uint64_t, uint64_t>& fallthrough_pred) {
+  VLOG(2) << absl::StrFormat("FindGuardBound(0x%llx): called", (unsigned long long)branch_pc);
   uint64_t pc = branch_pc;
   for (int hops = 0; hops < 64; hops++) {
     auto it = fallthrough_pred.find(pc);
@@ -730,12 +731,26 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
   // backward for a switch-table bound guard (§3.2) -- see FindGuardBound.
   absl::flat_hash_map<uint64_t, uint64_t> fallthrough_pred;
   std::vector<uint64_t> worklist;
+  // Tracks which addresses currently have an entry sitting in `worklist`,
+  // so `propagate` never pushes a second entry for a pc that is already
+  // pending -- without this, several predecessors each detecting a change
+  // before the target is dequeued produces duplicate pops that redo
+  // decode/Transfer/FindGuardBound work for no new information (the state
+  // read out of in_states is already fully joined by the time any of the
+  // duplicates run). Cleared when the pc is actually popped in `drain`.
+  absl::flat_hash_map<uint64_t, size_t> pending_pushes;
+  size_t propagate_calls = 0;
+  size_t propagate_changed = 0;
+  size_t propagate_dedup_skipped = 0;
 
   auto propagate = [&](uint64_t pc, const AbsState& state) {
+    propagate_calls++;
     auto it = in_states.find(pc);
     if (it == in_states.end()) {
       in_states.emplace(pc, state);
       worklist.push_back(pc);
+      pending_pushes[pc]++;
+      VLOG(2) << absl::StrFormat("propagate(0x%llx): first sighting, enqueued", (unsigned long long)pc);
       return;
     }
     std::vector<JoinConflict> conflicts;
@@ -747,7 +762,19 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       }
     }
     if (changed) {
-      worklist.push_back(pc);
+      propagate_changed++;
+      if (pending_pushes[pc] > 0) {
+        propagate_dedup_skipped++;
+        VLOG(2) << absl::StrFormat(
+            "propagate(0x%llx): state changed but %zu entr%s already pending -- not re-enqueuing",
+            (unsigned long long)pc, pending_pushes[pc], pending_pushes[pc] == 1 ? "y" : "ies");
+      } else {
+        pending_pushes[pc]++;
+        worklist.push_back(pc);
+        VLOG(2) << absl::StrFormat("propagate(0x%llx): state changed, enqueued", (unsigned long long)pc);
+      }
+    } else {
+      VLOG(2) << absl::StrFormat("propagate(0x%llx): no change", (unsigned long long)pc);
     }
   };
 
@@ -790,36 +817,53 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
   }
 
   // Exception landing pads are reachable only through the unwinder, via
-  // the LSDA -- nothing in the function body branches to one, so the
-  // ordinary control-flow walk below would never find them, and their
-  // bytes would be reported as an unchecked coverage gap. Seed each one
-  // as its own root instead, exactly like the FDE's own start: a landing
-  // pad is jumped to, not called, so there is nothing to inherit from a
-  // caller and the declared row is trusted the same way a `.cold`
-  // fragment's is.
+  // the LSDA -- nothing in the function body branches to one directly, so
+  // the ordinary control-flow walk below would never find them on its
+  // own. The LSDA's call-site table says exactly which `call` instructions
+  // can throw into which landing pad, so each of those is wired in below
+  // as a real CFG edge, carrying the abstract state computed right after
+  // the call (callee-saved and CFA preserved, caller-saved clobbered --
+  // the same transfer function already used for the call's own
+  // fall-through edge, since that is exactly what the unwinder would
+  // restore before jumping to the pad). This is strictly more precise
+  // than trusting the pad's own declared row: the state is derived from
+  // code actually walked, so it both fixes the coverage gap and doubles
+  // as a real check that the row agrees with it -- a stale CFI on the
+  // exceptional edge now shows up as a mismatch instead of being
+  // definitionally unobservable.
+  std::vector<LSDACallSite> call_sites;
   if (cfi.lsda_addr != 0) {
-    std::vector<uint64_t> landing_pads;
     try {
-      landing_pads = ReadLSDALandingPads(image_, cfi.lsda_addr, cfi.pc_begin);
+      call_sites = ReadLSDACallSites(image_, cfi.lsda_addr, cfi.pc_begin);
     } catch (const EHFrameError& e) {
       sink.Add(Finding::Severity::kReview, cfi.pc_begin,
                absl::StrFormat("failed to parse this FDE's LSDA (.gcc_except_table) at 0x%016llx: %s",
                                static_cast<unsigned long long>(cfi.lsda_addr), e.what()),
                "");
-      landing_pads.clear();
+      call_sites.clear();
     }
-    for (uint64_t lp : landing_pads) {
-      VLOG(1) << absl::StrFormat("processing landing_pad into 0x%016zx", lp);
-      if (lp < cfi.pc_begin || lp >= cfi.pc_end) {
-        continue;  // a malformed LSDA shouldn't be able to walk us outside the FDE
-      }
-      const CFIRow* row = cfi.RowAt(lp);
-      if (row == nullptr) {
-        continue;  // reported as a missing-row finding once the walk reaches nearby code
-      }
-      propagate(lp, AbsState::SeedFromRow(*row, /*at_function_entry=*/false));
-    }
+    // A malformed LSDA shouldn't be able to walk us outside the FDE.
+    call_sites.erase(std::remove_if(call_sites.begin(), call_sites.end(),
+                                    [&](const LSDACallSite& cs) {
+                                      return cs.landing_pad < cfi.pc_begin || cs.landing_pad >= cfi.pc_end;
+                                    }),
+                     call_sites.end());
   }
+  // call_sites is sorted by start (ReadLSDACallSites) and, per the
+  // Itanium ABI, partitions the FDE without overlap, so the entry
+  // covering call_pc (if any) is the last one whose start is <= call_pc.
+  auto landing_pad_for_call = [&](uint64_t call_pc) -> std::optional<uint64_t> {
+    auto it = std::upper_bound(call_sites.begin(), call_sites.end(), call_pc,
+                               [](uint64_t pc, const LSDACallSite& cs) { return pc < cs.start; });
+    if (it == call_sites.begin()) {
+      return std::nullopt;
+    }
+    --it;
+    if (call_pc >= it->start && call_pc < it->end) {
+      return it->landing_pad;
+    }
+    return std::nullopt;
+  };
 
   // Start with "normal" instructions. Landing pads don't have known rsp
   // state. Seeded on is_canonical_entry, not at_function_entry: symbol
@@ -837,71 +881,134 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
   // Pass 1: Forward dataflow until the abstract state settles across all reached instructions.
   size_t iterations = 0;
   bool hit_cap = false;
-  while (!worklist.empty()) {
-    if (++iterations > options_.max_iterations) {
-      hit_cap = true;
-      break;
-    }
-    uint64_t pc = worklist.back();
-    worklist.pop_back();
-    AbsState state = in_states[pc];
-
-    std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
-    const cs_insn* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
-    if (insn == nullptr || pc + insn->size > cfi.pc_end) {
-      continue;
-    }
-    size_t insn_size = insn->size;
-    insn_sizes[pc] = insn_size;
-    bool is_ja_or_jae = insn->id == X86_INS_JA || insn->id == X86_INS_JAE;
-    bool is_jae = insn->id == X86_INS_JAE;
-
-    const CFIRow* row = cfi.RowAt(pc);
-    AbsVal before[kNumGPRs];
-    std::copy(std::begin(state.gpr), std::end(state.gpr), std::begin(before));
-    TransferOutcome outcome = semantics.Transfer(*insn, &state);
-    UpdateUBoundsAfterTransfer(disasm_->handle(), *insn, &state);
-
-    if (outcome.falls_through) {
-      uint64_t next = pc + insn_size;
-      if (next < cfi.pc_end && FallThroughIsReal(cfi, row, next, before, state)) {
-        AbsState fallthrough_state = state;
-        if (is_ja_or_jae) {
-          std::optional<BoundGuard> guard = FindGuardBound(pc, is_jae, image_, disasm_, cfi.pc_end, fallthrough_pred);
-          if (guard.has_value()) {
-            VLOG(1) << absl::StrFormat("0x%llx: %s taken-edge guard sets ubound[%d]=%llu on fall-through to 0x%llx",
-                                       (unsigned long long)pc, is_jae ? "jae" : "ja", guard->reg,
-                                       (unsigned long long)guard->ubound, (unsigned long long)next);
-            fallthrough_state.SetUBound(guard->reg, guard->ubound);
-          }
-        }
-        propagate(next, fallthrough_state);
-        fallthrough_pred[next] = pc;
+  auto drain = [&]() {
+    while (!worklist.empty()) {
+      if (++iterations > options_.max_iterations) {
+        hit_cap = true;
+        break;
       }
-    }
-    if (outcome.has_direct_target) {
-      uint64_t target = outcome.direct_target;
-      // A branch out of the FDE is a tail call, which is normal and not
-      // ours to follow.
-      if (target >= cfi.pc_begin && target < cfi.pc_end) {
-        propagate(target, state);
+      uint64_t pc = worklist.back();
+      worklist.pop_back();
+      if (pending_pushes[pc] > 0) {
+        pending_pushes[pc]--;
       }
-    }
-    if (outcome.has_jump_table) {
-      std::optional<std::vector<uint64_t>> targets =
-          ResolveJumpTable(outcome.jump_table_addr, outcome.jump_table_entries);
-      if (targets.has_value()) {
-        for (uint64_t target : *targets) {
-          if (target >= cfi.pc_begin && target < cfi.pc_end) {
-            propagate(target, state);
-          }
-          // A target outside our own FDE is cross-FDE dispatch (§6); that
-          // FDE gets its own walk, and pass 2 below notes it without
-          // trying to follow.
+      VLOG(2) << absl::StrFormat("drain: pop 0x%llx (iteration %zu, %zu still queued)", (unsigned long long)pc,
+                                 iterations, worklist.size());
+      AbsState state = in_states[pc];
+
+      std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
+      const cs_insn* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
+      if (insn == nullptr || pc + insn->size > cfi.pc_end) {
+        continue;
+      }
+      size_t insn_size = insn->size;
+      insn_sizes[pc] = insn_size;
+      bool is_ja_or_jae = insn->id == X86_INS_JA || insn->id == X86_INS_JAE;
+      bool is_jae = insn->id == X86_INS_JAE;
+
+      const CFIRow* row = cfi.RowAt(pc);
+      AbsVal before[kNumGPRs];
+      std::copy(std::begin(state.gpr), std::end(state.gpr), std::begin(before));
+      TransferOutcome outcome = semantics.Transfer(*insn, &state);
+      UpdateUBoundsAfterTransfer(disasm_->handle(), *insn, &state);
+
+      if (outcome.is_call) {
+        std::optional<uint64_t> lp = landing_pad_for_call(pc);
+        if (lp.has_value()) {
+          VLOG(2) << absl::StrFormat("0x%llx: call site propagates to landing pad 0x%llx", (unsigned long long)pc,
+                                     (unsigned long long)*lp);
+          propagate(*lp, state);
         }
       }
+
+      if (outcome.falls_through) {
+        uint64_t next = pc + insn_size;
+        if (next < cfi.pc_end && FallThroughIsReal(cfi, row, next, before, state)) {
+          AbsState fallthrough_state = state;
+          if (is_ja_or_jae) {
+            std::optional<BoundGuard> guard = FindGuardBound(pc, is_jae, image_, disasm_, cfi.pc_end, fallthrough_pred);
+            if (guard.has_value()) {
+              VLOG(1) << absl::StrFormat("0x%llx: %s taken-edge guard sets ubound[%d]=%llu on fall-through to 0x%llx",
+                                         (unsigned long long)pc, is_jae ? "jae" : "ja", guard->reg,
+                                         (unsigned long long)guard->ubound, (unsigned long long)next);
+              fallthrough_state.SetUBound(guard->reg, guard->ubound);
+            }
+          }
+          propagate(next, fallthrough_state);
+          fallthrough_pred[next] = pc;
+        }
+      }
+      if (outcome.has_direct_target) {
+        uint64_t target = outcome.direct_target;
+        // A branch out of the FDE is a tail call, which is normal and not
+        // ours to follow.
+        if (target >= cfi.pc_begin && target < cfi.pc_end) {
+          propagate(target, state);
+        }
+      }
+      if (outcome.has_jump_table) {
+        std::optional<std::vector<uint64_t>> targets =
+            ResolveJumpTable(outcome.jump_table_addr, outcome.jump_table_entries);
+        if (targets.has_value()) {
+          for (uint64_t target : *targets) {
+            if (target >= cfi.pc_begin && target < cfi.pc_end) {
+              propagate(target, state);
+            }
+            // A target outside our own FDE is cross-FDE dispatch (§6); that
+            // FDE gets its own walk, and pass 2 below notes it without
+            // trying to follow.
+          }
+        }
+      }
+    }
+  };
+  drain();
+
+  // A handful of landing pads may still be unreached: a call-site region
+  // whose call instruction was never itself walked (e.g. dead by an
+  // unrelated reachability gap), or an encoding this reader didn't
+  // resolve to an edge. Fall back to trusting each one's own declared
+  // row -- the same "seed the target's row directly" trust used
+  // everywhere else a predecessor state cannot be derived -- so a
+  // landing pad is never silently left as a coverage gap merely because
+  // its precise edge could not be found. This is strictly the weaker,
+  // pre-existing behavior, so it is flagged as a review rather than
+  // treated as equivalent to a state actually checked against.
+  {
+    std::vector<uint64_t> distinct_landing_pads;
+    distinct_landing_pads.reserve(call_sites.size());
+    for (const LSDACallSite& cs : call_sites) {
+      distinct_landing_pads.push_back(cs.landing_pad);
+    }
+    std::sort(distinct_landing_pads.begin(), distinct_landing_pads.end());
+    distinct_landing_pads.erase(std::unique(distinct_landing_pads.begin(), distinct_landing_pads.end()),
+                                distinct_landing_pads.end());
+    bool seeded_any = false;
+    for (uint64_t lp : distinct_landing_pads) {
+      if (in_states.contains(lp)) {
+        continue;
+      }
+      const CFIRow* row = cfi.RowAt(lp);
+      if (row == nullptr) {
+        continue;  // reported as a missing-row finding once the walk reaches nearby code
+      }
+      sink.Add(Finding::Severity::kReview, lp,
+               "this landing pad's incoming state could not be derived from any call site actually walked, so it is "
+               "trusted from its own declared CFI row instead of independently checked",
+               "");
+      propagate(lp, AbsState::SeedFromRow(*row, /*at_function_entry=*/false));
+      seeded_any = true;
+    }
+    if (seeded_any) {
+      drain();
     }
   }
+
+  VLOG(2) << absl::StrFormat(
+      "FDE 0x%llx done: %zu worklist pops, %zu propagate() calls (%zu changed, %zu deduped against an already-"
+      "pending entry), %zu distinct addresses reached, %zu call sites in LSDA",
+      (unsigned long long)cfi.pc_begin, iterations, propagate_calls, propagate_changed, propagate_dedup_skipped,
+      in_states.size(), call_sites.size());
 
   if (hit_cap) {
     sink.Add(Finding::Severity::kReview, cfi.pc_begin,

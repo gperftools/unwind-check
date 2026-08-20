@@ -112,7 +112,7 @@ class LSDACursor {
 
 }  // namespace
 
-std::vector<uint64_t> ReadLSDALandingPads(const ELFImage& image, uint64_t lsda_vaddr, uint64_t fde_pc_begin) {
+std::vector<LSDACallSite> ReadLSDACallSites(const ELFImage& image, uint64_t lsda_vaddr, uint64_t fde_pc_begin) {
   LSDACursor cur(image, lsda_vaddr);
 
   uint8_t start_encoding = cur.ReadU8();
@@ -130,21 +130,23 @@ std::vector<uint64_t> ReadLSDALandingPads(const ELFImage& image, uint64_t lsda_v
   uint64_t call_site_table_length = cur.ReadUleb128();
   uint64_t call_site_table_end = cur.vaddr() + call_site_table_length;
 
-  std::vector<uint64_t> landing_pads;
+  // start/length/landing-pad all share the same base (lpstart) per the
+  // Itanium C++ ABI's LSDA layout.
+  std::vector<LSDACallSite> call_sites;
   while (cur.vaddr() < call_site_table_end) {
-    cur.ReadEncoded(call_site_encoding);  // call-site start; unused
-    cur.ReadEncoded(call_site_encoding);  // call-site length; unused
+    uint64_t start_offset = cur.ReadEncoded(call_site_encoding);
+    uint64_t length = cur.ReadEncoded(call_site_encoding);
     uint64_t landing_pad_offset = cur.ReadEncoded(call_site_encoding);
     cur.ReadUleb128();  // action table index; unused
 
     if (landing_pad_offset != 0) {
-      landing_pads.push_back(lpstart + landing_pad_offset);
+      call_sites.push_back({lpstart + start_offset, lpstart + start_offset + length, lpstart + landing_pad_offset});
     }
   }
 
-  std::sort(landing_pads.begin(), landing_pads.end());
-  landing_pads.erase(std::unique(landing_pads.begin(), landing_pads.end()), landing_pads.end());
-  return landing_pads;
+  std::sort(call_sites.begin(), call_sites.end(),
+            [](const LSDACallSite& a, const LSDACallSite& b) { return a.start < b.start; });
+  return call_sites;
 }
 
 }  // namespace unwind_analysis
