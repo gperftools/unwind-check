@@ -29,7 +29,7 @@ class Symbolizer {
  public:
   enum class Addr2LineMode { kAuto, kOff, kExplicit };
 
-  Symbolizer(const ElfImage& image, Addr2LineMode mode, std::string tool_path);
+  Symbolizer(const ELFImage& image, Addr2LineMode mode, std::string tool_path);
 
   // "operator new(unsigned long)+0x2c", or "" when nothing covers vaddr.
   // Consults addr2line's answer as a fallback, so call Prepare first if
@@ -51,7 +51,7 @@ class Symbolizer {
  private:
   std::string DebugName(uint64_t vaddr) const;
 
-  const ElfImage& image_;
+  const ELFImage& image_;
   const std::string tool_path_;
   bool use_addr2line_ = false;
   std::string disabled_reason_;

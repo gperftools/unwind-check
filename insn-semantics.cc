@@ -66,7 +66,7 @@ AbsVal ReadReg(const AbsState& state, unsigned reg) {
   if (!InsnSemantics::IsFull64(reg)) {
     return AbsVal::Top();
   }
-  return state.reg(InsnSemantics::DwarfRegOf(reg));
+  return state.reg(InsnSemantics::DWARFRegOf(reg));
 }
 
 // The CFA-relative offset a memory operand addresses, when we can name
@@ -80,8 +80,8 @@ std::optional<int64_t> MemSlot(const AbsState& state, const x86_op_mem& mem) {
   if (mem.base == X86_REG_INVALID || !InsnSemantics::IsFull64(mem.base)) {
     return std::nullopt;
   }
-  const AbsVal& base = state.reg(InsnSemantics::DwarfRegOf(mem.base));
-  if (base.kind != AbsVal::Kind::kCfaRel) {
+  const AbsVal& base = state.reg(InsnSemantics::DWARFRegOf(mem.base));
+  if (base.kind != AbsVal::Kind::kCFARel) {
     return std::nullopt;
   }
   return base.delta + mem.disp;
@@ -93,7 +93,7 @@ AbsVal LeaValue(const AbsState& state, const x86_op_mem& mem) {
   if (!slot.has_value()) {
     return AbsVal::Top();
   }
-  return AbsVal::CfaRel(*slot);
+  return AbsVal::CFARel(*slot);
 }
 
 void EraseSlots(AbsState* state, int64_t start, int64_t size) {
@@ -117,7 +117,7 @@ void HandleUnplacedMemWrite(AbsState*) {
 
 }  // namespace
 
-int InsnSemantics::DwarfRegOf(unsigned reg) {
+int InsnSemantics::DWARFRegOf(unsigned reg) {
   const RegAlias* a = FindAlias(reg);
   return a == nullptr ? -1 : a->dwarf;
 }
@@ -134,14 +134,14 @@ void InsnSemantics::ClobberWrites(const cs_insn& insn, AbsState* state) const {
   uint8_t write_count = 0;
   if (cs_regs_access(handle_, &insn, read, &read_count, written, &write_count) != CS_ERR_OK) {
     // We could not find out what it writes, so assume the worst.
-    for (int r = 0; r < kNumGpRegs; r++) {
+    for (int r = 0; r < kNumGPRs; r++) {
       state->ClobberReg(r);
     }
     state->slots.clear();
     return;
   }
   for (uint8_t i = 0; i < write_count; i++) {
-    int d = DwarfRegOf(written[i]);
+    int d = DWARFRegOf(written[i]);
     if (d >= 0) {
       state->ClobberReg(d);
     }
@@ -155,7 +155,7 @@ void InsnSemantics::ClobberWrites(const cs_insn& insn, AbsState* state) const {
       continue;
     }
     if (op.type == X86_OP_REG) {
-      int d = DwarfRegOf(op.reg);
+      int d = DWARFRegOf(op.reg);
       if (d >= 0) {
         state->ClobberReg(d);
       }
@@ -206,8 +206,8 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       // The call pushes and the matching ret pops, so rsp is unchanged
       // across it -- but everything below rsp is the callee's now, and
       // the red zone does not survive a call.
-      const AbsVal& rsp = state->reg(kDwarfRsp);
-      if (rsp.kind == AbsVal::Kind::kCfaRel) {
+      const AbsVal& rsp = state->reg(kDWARFRsp);
+      if (rsp.kind == AbsVal::Kind::kCFARel) {
         state->DropSlotsBelow(rsp.delta);
       }
       // When rsp is untracked -- after a stack realignment or an alloca
@@ -228,7 +228,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
     case X86_INS_PUSHFQ: {
       if (insn.id == X86_INS_PUSH && (x.op_count != 1 || x.operands[0].size != 8)) {
         out.review_reason = "push with an operand size other than 8 bytes";
-        state->ClobberReg(kDwarfRsp);
+        state->ClobberReg(kDWARFRsp);
         return out;
       }
       AbsVal pushed = AbsVal::Top();
@@ -241,12 +241,12 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
           pushed = slot.has_value() ? state->Slot(*slot) : AbsVal::Top();
         }
       }
-      const AbsVal rsp = state->reg(kDwarfRsp);
-      if (rsp.kind != AbsVal::Kind::kCfaRel) {
+      const AbsVal rsp = state->reg(kDWARFRsp);
+      if (rsp.kind != AbsVal::Kind::kCFARel) {
         return out;  // rsp already untracked; nothing to say
       }
       int64_t at = rsp.delta - 8;
-      state->SetReg(kDwarfRsp, AbsVal::CfaRel(at));
+      state->SetReg(kDWARFRsp, AbsVal::CFARel(at));
       state->SetSlot(at, pushed);
       return out;
     }
@@ -255,20 +255,20 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
     case X86_INS_POPFQ: {
       if (insn.id == X86_INS_POP && (x.op_count != 1 || x.operands[0].size != 8)) {
         out.review_reason = "pop with an operand size other than 8 bytes";
-        state->ClobberReg(kDwarfRsp);
+        state->ClobberReg(kDWARFRsp);
         return out;
       }
-      const AbsVal rsp = state->reg(kDwarfRsp);
+      const AbsVal rsp = state->reg(kDWARFRsp);
       AbsVal popped = AbsVal::Top();
-      if (rsp.kind == AbsVal::Kind::kCfaRel) {
+      if (rsp.kind == AbsVal::Kind::kCFARel) {
         popped = state->Slot(rsp.delta);
-        state->SetReg(kDwarfRsp, AbsVal::CfaRel(rsp.delta + 8));
+        state->SetReg(kDWARFRsp, AbsVal::CFARel(rsp.delta + 8));
         state->DropDeadSlots(rsp.delta + 8);
       }
       if (insn.id == X86_INS_POP) {
         const cs_x86_op& op = x.operands[0];
         if (op.type == X86_OP_REG) {
-          int d = DwarfRegOf(op.reg);
+          int d = DWARFRegOf(op.reg);
           if (d >= 0) {
             state->SetReg(d, IsFull64(op.reg) ? popped : AbsVal::Top());
           }
@@ -284,14 +284,14 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
 
     case X86_INS_LEAVE: {
       // leave == mov %rbp,%rsp ; pop %rbp
-      state->SetReg(kDwarfRsp, state->reg(kDwarfRbp));
-      const AbsVal rsp = state->reg(kDwarfRsp);
-      if (rsp.kind == AbsVal::Kind::kCfaRel) {
-        state->SetReg(kDwarfRbp, state->Slot(rsp.delta));
-        state->SetReg(kDwarfRsp, AbsVal::CfaRel(rsp.delta + 8));
+      state->SetReg(kDWARFRsp, state->reg(kDWARFRbp));
+      const AbsVal rsp = state->reg(kDWARFRsp);
+      if (rsp.kind == AbsVal::Kind::kCFARel) {
+        state->SetReg(kDWARFRbp, state->Slot(rsp.delta));
+        state->SetReg(kDWARFRsp, AbsVal::CFARel(rsp.delta + 8));
         state->DropDeadSlots(rsp.delta + 8);
       } else {
-        state->ClobberReg(kDwarfRbp);
+        state->ClobberReg(kDWARFRbp);
       }
       return out;
     }
@@ -300,7 +300,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       if (x.op_count != 2 || x.operands[0].type != X86_OP_REG || x.operands[1].type != X86_OP_MEM) {
         break;
       }
-      int d = DwarfRegOf(x.operands[0].reg);
+      int d = DWARFRegOf(x.operands[0].reg);
       if (d < 0) {
         break;
       }
@@ -317,7 +317,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       const cs_x86_op& dst = x.operands[0];
       const cs_x86_op& src = x.operands[1];
       if (dst.type == X86_OP_REG) {
-        int d = DwarfRegOf(dst.reg);
+        int d = DWARFRegOf(dst.reg);
         if (d < 0) {
           break;
         }
@@ -356,19 +356,19 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       if (x.op_count != 2 || x.operands[0].type != X86_OP_REG || x.operands[1].type != X86_OP_IMM) {
         break;
       }
-      int d = DwarfRegOf(x.operands[0].reg);
+      int d = DWARFRegOf(x.operands[0].reg);
       if (d < 0) {
         break;
       }
       const AbsVal cur = state->reg(d);
-      if (!IsFull64(x.operands[0].reg) || cur.kind != AbsVal::Kind::kCfaRel) {
+      if (!IsFull64(x.operands[0].reg) || cur.kind != AbsVal::Kind::kCFARel) {
         state->ClobberReg(d);
         return out;
       }
       int64_t imm = x.operands[1].imm;
       int64_t delta = insn.id == X86_INS_ADD ? cur.delta + imm : cur.delta - imm;
-      state->SetReg(d, AbsVal::CfaRel(delta));
-      if (d == kDwarfRsp && delta > cur.delta) {
+      state->SetReg(d, AbsVal::CFARel(delta));
+      if (d == kDWARFRsp && delta > cur.delta) {
         state->DropDeadSlots(delta);
       }
       return out;

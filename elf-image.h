@@ -39,18 +39,18 @@ struct FuncSymbol {
 // .eh_frame-to-.text delta is different in file-offset space than it is
 // in vaddr space.
 //
-// So ElfImage performs a "fake load": an address space reservation spanning
+// So ELFImage performs a "fake load": an address space reservation spanning
 // every PT_LOAD's vaddr range, with each segment mmap'd via MAP_FIXED
 // at the offset its p_vaddr asks for. Downstream everything then lives in
 // one consistent address space, and bias() converts back to the
 // link-time vaddrs a human wants to read in a report.
-class ElfImage {
+class ELFImage {
  public:
-  ElfImage(const ElfImage&) = delete;
-  ElfImage& operator=(const ElfImage&) = delete;
-  ~ElfImage();
+  ELFImage(const ELFImage&) = delete;
+  ELFImage& operator=(const ELFImage&) = delete;
+  ~ELFImage();
 
-  static absl::StatusOr<std::unique_ptr<ElfImage>> Open(const std::string& path);
+  static absl::StatusOr<std::unique_ptr<ELFImage>> Open(const std::string& path);
 
   const std::string& path() const {
     return path_;
@@ -110,7 +110,7 @@ class ElfImage {
   }
 
  private:
-  ElfImage() = default;
+  ELFImage() = default;
 
   std::string path_;
 

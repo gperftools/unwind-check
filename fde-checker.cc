@@ -16,7 +16,7 @@ namespace unwind_analysis {
 
 namespace {
 
-constexpr int kCalleeSaved[] = {kDwarfRbx, kDwarfRbp, 12, 13, 14, 15};
+constexpr int kCalleeSaved[] = {kDWARFRbx, kDWARFRbp, 12, 13, 14, 15};
 
 bool IsCalleeSaved(int reg) {
   return std::find(std::begin(kCalleeSaved), std::end(kCalleeSaved), reg) != std::end(kCalleeSaved);
@@ -60,14 +60,14 @@ class FindingSink {
 // Compares one CFI row against the state the code actually produces.
 class RowChecker {
  public:
-  RowChecker(const FdeChecker::Options& options, FindingSink* sink) : options_(options), sink_(sink) {
+  RowChecker(const FDEChecker::Options& options, FindingSink* sink) : options_(options), sink_(sink) {
   }
 
-  void Check(uint64_t pc, const CfiRow& row, const AbsState& state, const std::string& insn_text) {
+  void Check(uint64_t pc, const CFIRow& row, const AbsState& state, const std::string& insn_text) {
     insn_text_ = insn_text;
     pc_ = pc;
-    CheckCfa(row.cfa, state);
-    for (int r = 0; r < kNumDwarfRegs; r++) {
+    CheckCFA(row.cfa, state);
+    for (int r = 0; r < kNumDWARFRegs; r++) {
       CheckReg(r, row.regs[r], state);
     }
   }
@@ -80,31 +80,31 @@ class RowChecker {
     sink_->Add(Finding::Severity::kMismatch, pc_, std::move(msg), insn_text_);
   }
 
-  void CheckCfa(const CfaRule& cfa, const AbsState& state) {
+  void CheckCFA(const CFARule& cfa, const AbsState& state) {
     switch (cfa.kind) {
-      case CfaRule::Kind::kUndefined:
+      case CFARule::Kind::kUndefined:
         Review("no CFA rule is in force here");
         return;
-      case CfaRule::Kind::kExpression:
+      case CFARule::Kind::kExpression:
         Review("CFA is given by a DWARF expression, which this version does not evaluate");
         return;
-      case CfaRule::Kind::kRegOffset:
+      case CFARule::Kind::kRegOffset:
         break;
     }
-    if (cfa.reg >= kNumGpRegs) {
+    if (cfa.reg >= kNumGPRs) {
       Review(absl::StrFormat("CFA is based on DWARF register %d, which is not a general-purpose register", cfa.reg));
       return;
     }
     const AbsVal& v = state.reg(cfa.reg);
-    if (v.kind != AbsVal::Kind::kCfaRel) {
+    if (v.kind != AbsVal::Kind::kCFARel) {
       Review(absl::StrFormat("CFA is declared as %s, but %s holds %s here, so the rule cannot be verified",
-                             cfa.ToString(), DwarfRegName(cfa.reg), v.ToString()));
+                             cfa.ToString(), DWARFRegName(cfa.reg), v.ToString()));
       return;
     }
     if (v.delta + cfa.offset != 0) {
       Mismatch(absl::StrFormat("declared CFA is %s, but %s is CFA%+d here, so the rule yields CFA%+d (should be %s%+d)",
-                               cfa.ToString(), DwarfRegName(cfa.reg), static_cast<int>(v.delta),
-                               static_cast<int>(v.delta + cfa.offset), DwarfRegName(cfa.reg),
+                               cfa.ToString(), DWARFRegName(cfa.reg), static_cast<int>(v.delta),
+                               static_cast<int>(v.delta + cfa.offset), DWARFRegName(cfa.reg),
                                static_cast<int>(-v.delta)));
     }
   }
@@ -112,7 +112,7 @@ class RowChecker {
   // Reads a register out of the state, or nullopt for RA, which is not a
   // GPR and so has no tracked value of its own.
   static std::optional<AbsVal> RegValue(const AbsState& state, int reg) {
-    if (reg < 0 || reg >= kNumGpRegs) {
+    if (reg < 0 || reg >= kNumGPRs) {
       return std::nullopt;
     }
     return state.reg(reg);
@@ -135,15 +135,15 @@ class RowChecker {
         CheckSameValue(r, state);
         return;
 
-      case RegRule::Kind::kAtCfaOffset: {
+      case RegRule::Kind::kAtCFAOffset: {
         AbsVal at = state.Slot(rule.offset);
         if (at.is_unknown()) {
           Review(absl::StrFormat("CFI says %s is saved at [CFA%+d], but we cannot say what is stored there",
-                                 DwarfRegName(r), static_cast<int>(rule.offset)));
+                                 DWARFRegName(r), static_cast<int>(rule.offset)));
           return;
         }
         if (!at.IsOrigReg(r)) {
-          Mismatch(absl::StrFormat("CFI says %s is saved at [CFA%+d], but that slot holds %s", DwarfRegName(r),
+          Mismatch(absl::StrFormat("CFI says %s is saved at [CFA%+d], but that slot holds %s", DWARFRegName(r),
                                    static_cast<int>(rule.offset), at.ToString()));
         }
         return;
@@ -155,12 +155,12 @@ class RowChecker {
           return;
         }
         if (v->is_unknown()) {
-          Review(absl::StrFormat("CFI says %s is CFA%+d, but we are not tracking it here", DwarfRegName(r),
+          Review(absl::StrFormat("CFI says %s is CFA%+d, but we are not tracking it here", DWARFRegName(r),
                                  static_cast<int>(rule.offset)));
           return;
         }
-        if (!v->IsCfaRel(rule.offset)) {
-          Mismatch(absl::StrFormat("CFI says %s is CFA%+d, but it holds %s", DwarfRegName(r),
+        if (!v->IsCFARel(rule.offset)) {
+          Mismatch(absl::StrFormat("CFI says %s is CFA%+d, but it holds %s", DWARFRegName(r),
                                    static_cast<int>(rule.offset), v->ToString()));
         }
         return;
@@ -169,18 +169,18 @@ class RowChecker {
       case RegRule::Kind::kInRegister: {
         std::optional<AbsVal> v = RegValue(state, rule.reg);
         if (!v.has_value()) {
-          Review(absl::StrFormat("CFI says %s was moved into DWARF register %d, which we do not track", DwarfRegName(r),
+          Review(absl::StrFormat("CFI says %s was moved into DWARF register %d, which we do not track", DWARFRegName(r),
                                  rule.reg));
           return;
         }
         if (v->is_unknown()) {
-          Review(absl::StrFormat("CFI says %s was moved into %s, but we are not tracking %s here", DwarfRegName(r),
-                                 DwarfRegName(rule.reg), DwarfRegName(rule.reg)));
+          Review(absl::StrFormat("CFI says %s was moved into %s, but we are not tracking %s here", DWARFRegName(r),
+                                 DWARFRegName(rule.reg), DWARFRegName(rule.reg)));
           return;
         }
         if (!v->IsOrigReg(r)) {
-          Mismatch(absl::StrFormat("CFI says %s was moved into %s, but %s holds %s", DwarfRegName(r),
-                                   DwarfRegName(rule.reg), DwarfRegName(rule.reg), v->ToString()));
+          Mismatch(absl::StrFormat("CFI says %s was moved into %s, but %s holds %s", DWARFRegName(r),
+                                   DWARFRegName(rule.reg), DWARFRegName(rule.reg), v->ToString()));
         }
         return;
       }
@@ -188,7 +188,7 @@ class RowChecker {
       case RegRule::Kind::kExpression:
       case RegRule::Kind::kValExpression:
         Review(absl::StrFormat("%s is described by a DWARF expression, which this version does not evaluate",
-                               DwarfRegName(r)));
+                               DWARFRegName(r)));
         return;
     }
   }
@@ -198,17 +198,17 @@ class RowChecker {
     if (!v.has_value() || v->is_unknown()) {
       if (v.has_value()) {
         Review(absl::StrFormat("CFI says %s still holds its entry value, but we are not tracking it here",
-                               DwarfRegName(r)));
+                               DWARFRegName(r)));
       }
       return;
     }
     if (!v->IsOrigReg(r)) {
       Mismatch(
-          absl::StrFormat("CFI says %s still holds its entry value, but it holds %s", DwarfRegName(r), v->ToString()));
+          absl::StrFormat("CFI says %s still holds its entry value, but it holds %s", DWARFRegName(r), v->ToString()));
     }
   }
 
-  const FdeChecker::Options& options_;
+  const FDEChecker::Options& options_;
   FindingSink* sink_;
   std::string insn_text_;
   uint64_t pc_ = 0;
@@ -220,19 +220,19 @@ class RowChecker {
 // precision and nothing more, and reporting it is noise. Should the
 // value be consulted further along, it is unknown by then and the
 // ordinary per-address check says so.
-bool RowDependsOn(const CfiRow& row, const JoinConflict& conflict) {
+bool RowDependsOn(const CFIRow& row, const JoinConflict& conflict) {
   if (conflict.reg == JoinConflict::kSlotConflict) {
     for (const RegRule& rule : row.regs) {
-      if (rule.kind == RegRule::Kind::kAtCfaOffset && rule.offset == conflict.offset) {
+      if (rule.kind == RegRule::Kind::kAtCFAOffset && rule.offset == conflict.offset) {
         return true;
       }
     }
     return false;
   }
-  if (row.cfa.kind == CfaRule::Kind::kRegOffset && row.cfa.reg == conflict.reg) {
+  if (row.cfa.kind == CFARule::Kind::kRegOffset && row.cfa.reg == conflict.reg) {
     return true;
   }
-  for (int r = 0; r < kNumDwarfRegs; r++) {
+  for (int r = 0; r < kNumDWARFRegs; r++) {
     const RegRule& rule = row.regs[r];
     if (rule.kind == RegRule::Kind::kInRegister && rule.reg == conflict.reg) {
       return true;
@@ -247,8 +247,8 @@ bool RowDependsOn(const CfiRow& row, const JoinConflict& conflict) {
   return false;
 }
 
-bool CfaSatisfiedBy(const CfaRule& cfa, const AbsVal& v) {
-  return v.kind == AbsVal::Kind::kCfaRel && v.delta + cfa.offset == 0;
+bool CFASatisfiedBy(const CFARule& cfa, const AbsVal& v) {
+  return v.kind == AbsVal::Kind::kCFARel && v.delta + cfa.offset == 0;
 }
 
 // Whether the address after this instruction is really its successor.
@@ -284,21 +284,21 @@ bool CfaSatisfiedBy(const CfaRule& cfa, const AbsVal& v) {
 // callee is named. It does mean a doubly-wrong CFI could be pruned
 // instead of reported; the region then shows up as an unchecked
 // coverage gap rather than silently passing.
-bool FallThroughIsReal(const FdeCfi& cfi, const CfiRow* here, uint64_t next, const AbsVal (&before)[kNumGpRegs],
+bool FallThroughIsReal(const CFI& cfi, const CFIRow* here, uint64_t next, const AbsVal (&before)[kNumGPRs],
                        const AbsState& after) {
-  const CfiRow* row = cfi.RowAt(next);
+  const CFIRow* row = cfi.RowAt(next);
   if (row == nullptr || row == here) {
     return true;  // still inside the same row, so certainly the same block
   }
-  if (row->cfa.kind != CfaRule::Kind::kRegOffset || row->cfa.reg >= kNumGpRegs) {
+  if (row->cfa.kind != CFARule::Kind::kRegOffset || row->cfa.reg >= kNumGPRs) {
     return true;
   }
   const AbsVal& was = before[row->cfa.reg];
   const AbsVal& now = after.reg(row->cfa.reg);
-  if (was.kind != AbsVal::Kind::kCfaRel || now.kind != AbsVal::Kind::kCfaRel) {
+  if (was.kind != AbsVal::Kind::kCFARel || now.kind != AbsVal::Kind::kCFARel) {
     return true;  // not confident enough to prune anything
   }
-  return CfaSatisfiedBy(row->cfa, now) || CfaSatisfiedBy(row->cfa, was);
+  return CFASatisfiedBy(row->cfa, now) || CFASatisfiedBy(row->cfa, was);
 }
 
 }  // namespace
@@ -315,8 +315,8 @@ const char* VerdictName(Verdict v) {
   return "?";
 }
 
-FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
-  FdeResult result;
+FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
+  FDEResult result;
   result.fde_addr = cfi.fde_addr;
   result.pc_begin = cfi.pc_begin;
   result.pc_end = cfi.pc_end;
@@ -354,7 +354,7 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
     }
   };
 
-  const CfiRow* first_row = cfi.RowAt(cfi.pc_begin);
+  const CFIRow* first_row = cfi.RowAt(cfi.pc_begin);
   if (first_row == nullptr) {
     sink.Add(Finding::Severity::kReview, cfi.pc_begin, "no CFI row covers the start of this FDE", "");
     result.findings = sink.Take();
@@ -371,15 +371,15 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
     // words already pushed.
     const char* kEnteredByJump =
         " (either the CFI is wrong, or this is entered by a jump rather than a call, the way a PLT trampoline is)";
-    if (first_row->cfa.kind != CfaRule::Kind::kRegOffset || first_row->cfa.reg != kDwarfRsp ||
+    if (first_row->cfa.kind != CFARule::Kind::kRegOffset || first_row->cfa.reg != kDWARFRsp ||
         first_row->cfa.offset != 8) {
       sink.Add(Finding::Severity::kReview, cfi.pc_begin,
                absl::StrFormat("a function symbol starts here, so the CFA should be rsp+8, but the CFI says %s%s",
                                first_row->cfa.ToString(), kEnteredByJump),
                "");
     }
-    const RegRule& ra = first_row->regs[kDwarfRip];
-    if (ra.kind != RegRule::Kind::kAtCfaOffset || ra.offset != -8) {
+    const RegRule& ra = first_row->regs[kDWARFRip];
+    if (ra.kind != RegRule::Kind::kAtCFAOffset || ra.offset != -8) {
       if (ra.kind != RegRule::Kind::kUndefined) {
         sink.Add(Finding::Severity::kReview, cfi.pc_begin,
                  absl::StrFormat("a function symbol starts here, so the return address should be at [CFA-8], but "
@@ -401,8 +401,8 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
   if (cfi.lsda_addr != 0) {
     std::vector<uint64_t> landing_pads;
     try {
-      landing_pads = ReadLsdaLandingPads(image_, cfi.lsda_addr, cfi.pc_begin);
-    } catch (const EhFrameError& e) {
+      landing_pads = ReadLSDALandingPads(image_, cfi.lsda_addr, cfi.pc_begin);
+    } catch (const EHFrameError& e) {
       sink.Add(Finding::Severity::kReview, cfi.pc_begin,
                absl::StrFormat("failed to parse this FDE's LSDA (.gcc_except_table) at 0x%016llx: %s",
                                static_cast<unsigned long long>(cfi.lsda_addr), e.what()),
@@ -413,7 +413,7 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
       if (lp < cfi.pc_begin || lp >= cfi.pc_end) {
         continue;  // a malformed LSDA shouldn't be able to walk us outside the FDE
       }
-      const CfiRow* row = cfi.RowAt(lp);
+      const CFIRow* row = cfi.RowAt(lp);
       if (row == nullptr) {
         continue;  // reported as a missing-row finding once the walk reaches nearby code
       }
@@ -444,8 +444,8 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
     size_t insn_size = insn->size;
     insn_sizes[pc] = insn_size;
 
-    const CfiRow* row = cfi.RowAt(pc);
-    AbsVal before[kNumGpRegs];
+    const CFIRow* row = cfi.RowAt(pc);
+    AbsVal before[kNumGPRs];
     std::copy(std::begin(state.gpr), std::end(state.gpr), std::begin(before));
     TransferOutcome outcome = semantics.Transfer(*insn, &state);
 
@@ -498,7 +498,7 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
 
     // The row at pc describes the state when RIP == pc, so compare
     // before applying the instruction, not after.
-    const CfiRow* row = cfi.RowAt(pc);
+    const CFIRow* row = cfi.RowAt(pc);
     if (row == nullptr) {
       sink.Add(Finding::Severity::kReview, pc, "no CFI row covers this address", insn_text);
     } else {

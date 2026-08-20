@@ -7,20 +7,20 @@
 
 #include "absl/strings/str_format.h"
 #include "dwarf-constants.h"
-#include "eh-frame-reader.h"  // EhFrameError
+#include "eh-frame-reader.h"  // EHFrameError
 
 namespace unwind_analysis {
 
 namespace {
 
 // A byte cursor over the LSDA, working in plain vaddr arithmetic via
-// ElfImage::BytesAt. Unlike eh-frame-reader.h's Decoder, this has no
+// ELFImage::BytesAt. Unlike eh-frame-reader.h's Decoder, this has no
 // need for live pointers and their bias -- that reader is shared with an
 // online unwinder that only ever sees live memory, but nothing here is,
 // so vaddrs are simplest.
-class LsdaCursor {
+class LSDACursor {
  public:
-  LsdaCursor(const ElfImage& image, uint64_t vaddr) : image_(image), vaddr_(vaddr) {
+  LSDACursor(const ELFImage& image, uint64_t vaddr) : image_(image), vaddr_(vaddr) {
   }
 
   uint64_t vaddr() const {
@@ -30,7 +30,7 @@ class LsdaCursor {
   uint8_t ReadU8() {
     std::span<const uint8_t> b = image_.BytesAt(vaddr_, 1);
     if (b.empty()) {
-      throw EhFrameError("gcc_except_table: read past mapped data");
+      throw EHFrameError("gcc_except_table: read past mapped data");
     }
     vaddr_ += 1;
     return b[0];
@@ -41,7 +41,7 @@ class LsdaCursor {
     unsigned shift = 0;
     while (true) {
       if (shift >= 64) {
-        throw EhFrameError("gcc_except_table: uleb128 overflow");
+        throw EHFrameError("gcc_except_table: uleb128 overflow");
       }
       uint8_t byte = ReadU8();
       result |= static_cast<uint64_t>(byte & 0x7f) << shift;
@@ -58,7 +58,7 @@ class LsdaCursor {
     uint64_t base = pcrel ? vaddr_ : 0;
     std::span<const uint8_t> b = image_.BytesAt(vaddr_, size);
     if (b.size() < size) {
-      throw EhFrameError("gcc_except_table: truncated data");
+      throw EHFrameError("gcc_except_table: truncated data");
     }
     uint64_t raw = 0;
     memcpy(&raw, b.data(), size);
@@ -87,7 +87,7 @@ class LsdaCursor {
     if (hi == DW_EH_PE_pcrel) {
       pcrel = true;
     } else if (hi != 0) {
-      throw EhFrameError(absl::StrFormat("gcc_except_table: unsupported encoding 0x%02x", encoding));
+      throw EHFrameError(absl::StrFormat("gcc_except_table: unsupported encoding 0x%02x", encoding));
     }
     switch (lo) {
       case DW_EH_PE_udata2:
@@ -101,19 +101,19 @@ class LsdaCursor {
       case DW_EH_PE_absptr:
         return ReadFixed(8, false, pcrel);
       default:
-        throw EhFrameError(absl::StrFormat("gcc_except_table: unsupported encoding 0x%02x", encoding));
+        throw EHFrameError(absl::StrFormat("gcc_except_table: unsupported encoding 0x%02x", encoding));
     }
   }
 
  private:
-  const ElfImage& image_;
+  const ELFImage& image_;
   uint64_t vaddr_;
 };
 
 }  // namespace
 
-std::vector<uint64_t> ReadLsdaLandingPads(const ElfImage& image, uint64_t lsda_vaddr, uint64_t fde_pc_begin) {
-  LsdaCursor cur(image, lsda_vaddr);
+std::vector<uint64_t> ReadLSDALandingPads(const ELFImage& image, uint64_t lsda_vaddr, uint64_t fde_pc_begin) {
+  LSDACursor cur(image, lsda_vaddr);
 
   uint8_t start_encoding = cur.ReadU8();
   uint64_t lpstart = fde_pc_begin;

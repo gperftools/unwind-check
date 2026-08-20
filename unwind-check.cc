@@ -51,15 +51,15 @@ constexpr int kExitReview = 2;
 constexpr int kExitFailure = 3;
 
 // One FDE as read from .eh_frame, before any code analysis.
-struct RawFde {
+struct RawFDE {
   uint64_t vaddr = 0;
-  std::optional<FdeCfi> cfi;
+  std::optional<CFI> cfi;
   std::string error;
 };
 
-FdeResult MakeStructuralResult(uint64_t fde_vaddr, uint64_t pc_begin, uint64_t pc_end, Finding::Severity severity,
+FDEResult MakeStructuralResult(uint64_t fde_vaddr, uint64_t pc_begin, uint64_t pc_end, Finding::Severity severity,
                                std::string message) {
-  FdeResult r;
+  FDEResult r;
   r.fde_addr = fde_vaddr;
   r.pc_begin = pc_begin;
   r.pc_end = pc_end;
@@ -103,24 +103,24 @@ Symbolizer::Addr2LineMode ParseAddr2LineMode(const std::string& value, std::stri
 
 // Reads every FDE in .eh_frame. A record we cannot decode costs one
 // report line, not the run.
-std::vector<RawFde> ReadAllFdes(const ElfImage& image, std::string* fatal_error) {
-  std::vector<RawFde> fdes;
+std::vector<RawFDE> ReadAllFDEs(const ELFImage& image, std::string* fatal_error) {
+  std::vector<RawFDE> fdes;
   std::vector<uint64_t> addrs;
   try {
     EnumerateFDEs(static_cast<uintptr_t>(image.eh_frame_start()) + image.bias(),
                   static_cast<uintptr_t>(image.eh_frame_end()) + image.bias(),
                   [&](uintptr_t fde_addr) { addrs.push_back(image.ToVaddr(fde_addr)); });
-  } catch (const EhFrameError& e) {
+  } catch (const EHFrameError& e) {
     // Whatever we got before the bad record is still worth checking.
     *fatal_error = e.what();
   }
   fdes.reserve(addrs.size());
   for (uint64_t addr : addrs) {
-    RawFde raw;
+    RawFDE raw;
     raw.vaddr = addr;
     try {
-      raw.cfi = ReadFde(addr, image.eh_frame_start(), image.eh_frame_end(), image.bias());
-    } catch (const EhFrameError& e) {
+      raw.cfi = ReadFDE(addr, image.eh_frame_start(), image.eh_frame_end(), image.bias());
+    } catch (const EHFrameError& e) {
       raw.error = e.what();
     }
     fdes.push_back(std::move(raw));
@@ -131,16 +131,16 @@ std::vector<RawFde> ReadAllFdes(const ElfImage& image, std::string* fatal_error)
 // Checks that do not need any disassembly: FDE ranges must be inside
 // executable memory, must be non-empty, and must not overlap each other.
 // Nothing else available reports any of this.
-void RunStructuralChecks(const ElfImage& image, const std::vector<RawFde>& fdes, std::vector<FdeResult>* results,
-                         std::vector<const FdeCfi*>* checkable) {
-  std::vector<const RawFde*> sorted;
-  for (const RawFde& raw : fdes) {
+void RunStructuralChecks(const ELFImage& image, const std::vector<RawFDE>& fdes, std::vector<FDEResult>* results,
+                         std::vector<const CFI*>* checkable) {
+  std::vector<const RawFDE*> sorted;
+  for (const RawFDE& raw : fdes) {
     if (!raw.error.empty()) {
       results->push_back(MakeStructuralResult(raw.vaddr, 0, 0, Finding::Severity::kReview,
                                               absl::StrFormat("cannot decode this FDE: %s", raw.error)));
       continue;
     }
-    const FdeCfi& cfi = *raw.cfi;
+    const CFI& cfi = *raw.cfi;
     if (cfi.pc_end <= cfi.pc_begin) {
       results->push_back(MakeStructuralResult(raw.vaddr, cfi.pc_begin, cfi.pc_end, Finding::Severity::kMismatch,
                                               "FDE covers an empty or backwards PC range"));
@@ -158,10 +158,10 @@ void RunStructuralChecks(const ElfImage& image, const std::vector<RawFde>& fdes,
   }
 
   std::sort(sorted.begin(), sorted.end(),
-            [](const RawFde* a, const RawFde* b) { return a->cfi->pc_begin < b->cfi->pc_begin; });
+            [](const RawFDE* a, const RawFDE* b) { return a->cfi->pc_begin < b->cfi->pc_begin; });
   for (size_t i = 1; i < sorted.size(); i++) {
-    const FdeCfi& prev = *sorted[i - 1]->cfi;
-    const FdeCfi& cur = *sorted[i]->cfi;
+    const CFI& prev = *sorted[i - 1]->cfi;
+    const CFI& cur = *sorted[i]->cfi;
     if (cur.pc_begin < prev.pc_end) {
       results->push_back(
           MakeStructuralResult(sorted[i]->vaddr, cur.pc_begin, cur.pc_end, Finding::Severity::kMismatch,
@@ -173,29 +173,29 @@ void RunStructuralChecks(const ElfImage& image, const std::vector<RawFde>& fdes,
 
 // Prints one FDE's decoded row table, for eyeballing against
 // `readelf --debug-dump=frames-interp`.
-void DumpCfi(const FdeCfi& cfi, const Symbolizer& symbolizer) {
+void DumpCFI(const CFI& cfi, const Symbolizer& symbolizer) {
   std::string name = symbolizer.Name(cfi.pc_begin);
   absl::PrintF("FDE 0x%x pc=0x%x..0x%x%s%s\n", cfi.fde_addr, cfi.pc_begin, cfi.pc_end, name.empty() ? "" : "  ", name);
-  for (const CfiRow& row : cfi.rows) {
+  for (const CFIRow& row : cfi.rows) {
     absl::PrintF("  0x%-14x cfa=%s", row.pc_start, row.cfa.ToString());
-    for (int r = 0; r < kNumDwarfRegs; r++) {
+    for (int r = 0; r < kNumDWARFRegs; r++) {
       if (row.regs[r].kind == RegRule::Kind::kUnset) {
         continue;
       }
-      absl::PrintF("  %s=%s", DwarfRegName(r), row.regs[r].ToString());
+      absl::PrintF("  %s=%s", DWARFRegName(r), row.regs[r].ToString());
     }
     absl::PrintF("\n");
   }
 }
 
 int Run(const std::string& path) {
-  absl::StatusOr<std::unique_ptr<ElfImage>> maybe_image = ElfImage::Open(path);
+  absl::StatusOr<std::unique_ptr<ELFImage>> maybe_image = ELFImage::Open(path);
   if (!maybe_image.ok()) {
     absl::FPrintF(stderr, "unwind-check: %s\n", maybe_image.status().message());
     return kExitFailure;
   }
 
-  const ElfImage& image = **maybe_image;
+  const ELFImage& image = **maybe_image;
   if (!image.has_eh_frame()) {
     absl::FPrintF(stderr, "unwind-check: %s has no .eh_frame section; there is nothing to check\n", path);
     return kExitFailure;
@@ -210,14 +210,14 @@ int Run(const std::string& path) {
   Disassembler* disasm = maybe_disasm.value().get();
 
   std::string enumerate_error;
-  std::vector<RawFde> fdes = ReadAllFdes(image, &enumerate_error);
+  std::vector<RawFDE> fdes = ReadAllFDEs(image, &enumerate_error);
   if (fdes.empty() && !enumerate_error.empty()) {
     absl::FPrintF(stderr, "unwind-check: cannot read .eh_frame of %s: %s\n", path, enumerate_error);
     return kExitFailure;
   }
 
-  std::vector<FdeResult> results;
-  std::vector<const FdeCfi*> checkable;
+  std::vector<FDEResult> results;
+  std::vector<const CFI*> checkable;
   RunStructuralChecks(image, fdes, &results, &checkable);
 
   std::string tool_path;
@@ -243,11 +243,11 @@ int Run(const std::string& path) {
     }
   }
 
-  FdeChecker::Options options;
+  FDEChecker::Options options;
   options.check_unmentioned_callee_saved = absl::GetFlag(FLAGS_check_unmentioned_callee_saved);
   options.report_coverage_gaps = absl::GetFlag(FLAGS_report_coverage_gaps);
   options.max_findings_per_fde = static_cast<size_t>(std::max(1, absl::GetFlag(FLAGS_max_findings)));
-  FdeChecker checker{image, disasm, options};
+  FDEChecker checker{image, disasm, options};
 
   // Where a function symbol starts, the FDE's first row is checkable
   // against the canonical entry state. Elsewhere -- PLT stubs, the cold
@@ -277,7 +277,7 @@ int Run(const std::string& path) {
 
   const bool dump_cfi = absl::GetFlag(FLAGS_dump_cfi);
 
-  for (const FdeCfi* cfi : checkable) {
+  for (const CFI* cfi : checkable) {
     if (pc_filter.has_value() && !(cfi->pc_begin <= *pc_filter && *pc_filter < cfi->pc_end)) {
       continue;
     }
@@ -288,12 +288,12 @@ int Run(const std::string& path) {
       }
     }
     if (dump_cfi) {
-      DumpCfi(*cfi, symbolizer);
+      DumpCFI(*cfi, symbolizer);
       continue;
     }
     try {
       results.push_back(checker.Check(*cfi, function_starts.contains(cfi->pc_begin)));
-    } catch (const EhFrameError& e) {
+    } catch (const EHFrameError& e) {
       results.push_back(MakeStructuralResult(cfi->fde_addr, cfi->pc_begin, cfi->pc_end, Finding::Severity::kReview,
                                              absl::StrFormat("analysis aborted: %s", e.what())));
     }

@@ -11,7 +11,7 @@
 namespace unwind_analysis {
 
 // Parses one FDE's LSDA (the .gcc_except_table entry named by its 'L'
-// augmentation, see cfi-table.h's FdeCfi::lsda_addr) and returns the
+// augmentation, see cfi-table.h's CFI::lsda_addr) and returns the
 // distinct landing-pad addresses it names, as vaddrs.
 //
 // Nothing here is specific to C++: the table format is the one gcc/clang
@@ -19,11 +19,11 @@ namespace unwind_analysis {
 // type table (which exception types are caught where) is irrelevant to
 // this tool's question, so it is never even read.
 //
-// lsda_vaddr is FdeCfi::lsda_addr; fde_pc_begin is the same FDE's
+// lsda_vaddr is CFI::lsda_addr; fde_pc_begin is the same FDE's
 // pc_begin, used as the landing-pad base when the LSDA has no explicit
 // @LPStart of its own, which is the overwhelmingly common case. Throws
-// EhFrameError (see eh-frame-reader.h) on malformed data.
-std::vector<uint64_t> ReadLsdaLandingPads(const ElfImage& image, uint64_t lsda_vaddr, uint64_t fde_pc_begin);
+// EHFrameError (see eh-frame-reader.h) on malformed data.
+std::vector<uint64_t> ReadLSDALandingPads(const ELFImage& image, uint64_t lsda_vaddr, uint64_t fde_pc_begin);
 
 }  // namespace unwind_analysis
 

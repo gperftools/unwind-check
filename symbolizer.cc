@@ -66,7 +66,7 @@ std::string Demangle(const std::string& name) {
   return result;
 }
 
-Symbolizer::Symbolizer(const ElfImage& image, Addr2LineMode mode, std::string tool_path)
+Symbolizer::Symbolizer(const ELFImage& image, Addr2LineMode mode, std::string tool_path)
     : image_(image), tool_path_(tool_path.empty() ? "llvm-addr2line" : std::move(tool_path)) {
   // NOTE: llvm-addr2line is much faster on larger binaries. TODO: try llvm-addr2line and addr2line in order.
   switch (mode) {

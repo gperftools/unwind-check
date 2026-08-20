@@ -35,7 +35,7 @@ struct Finding {
   int repeats = 0;
 };
 
-struct FdeResult {
+struct FDEResult {
   uint64_t fde_addr = 0;
   uint64_t pc_begin = 0;
   uint64_t pc_end = 0;
@@ -45,7 +45,7 @@ struct FdeResult {
   size_t instructions_checked = 0;
 };
 
-class FdeChecker {
+class FDEChecker {
  public:
   struct Options {
     // Also require that callee-saved registers with no explicit rule
@@ -59,7 +59,7 @@ class FdeChecker {
     size_t max_iterations = 200000;
   };
 
-  FdeChecker(const ElfImage& image, Disassembler* disasm, const Options& options)
+  FDEChecker(const ELFImage& image, Disassembler* disasm, const Options& options)
       : image_(image), disasm_(disasm), options_(options) {
   }
 
@@ -68,10 +68,10 @@ class FdeChecker {
   // canonical x86-64 entry state, and we say so if it does not. When it
   // does not -- a cold fragment, a PLT stub -- there is nothing to
   // compare the first row against and we take it as given.
-  FdeResult Check(const FdeCfi& cfi, bool at_function_entry) const;
+  FDEResult Check(const CFI& cfi, bool at_function_entry) const;
 
  private:
-  const ElfImage& image_;
+  const ELFImage& image_;
   Disassembler* const disasm_;
   Options options_;
 };

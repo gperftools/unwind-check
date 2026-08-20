@@ -24,7 +24,7 @@ class TableBuilder : public UnwindVisitor {
     result_.fde_addr = fde_vaddr;
   }
 
-  FdeCfi TakeResult() {
+  CFI TakeResult() {
     return std::move(result_);
   }
 
@@ -62,7 +62,7 @@ class TableBuilder : public UnwindVisitor {
     // Zero-width rows happen whenever two advances land on the same PC;
     // the later rules win and there is nothing to record for the first.
     if (pc > row_pc_) {
-      CfiRow row;
+      CFIRow row;
       row.pc_start = row_pc_;
       row.cfa = cur_cfa_;
       std::copy(std::begin(cur_regs_), std::end(cur_regs_), std::begin(row.regs));
@@ -73,30 +73,30 @@ class TableBuilder : public UnwindVisitor {
   }
 
   bool HandleDefCFA(uintptr_t reg, uintptr_t offset) {
-    cur_cfa_ = CfaRule{CfaRule::Kind::kRegOffset, static_cast<uint8_t>(reg), static_cast<int64_t>(offset)};
+    cur_cfa_ = CFARule{CFARule::Kind::kRegOffset, static_cast<uint8_t>(reg), static_cast<int64_t>(offset)};
     return true;
   }
 
   bool HandleDefCFAReg(uintptr_t reg) {
-    cur_cfa_.kind = CfaRule::Kind::kRegOffset;
+    cur_cfa_.kind = CFARule::Kind::kRegOffset;
     cur_cfa_.reg = static_cast<uint8_t>(reg);
     return true;
   }
 
   bool HandleDefCFAOffset(uintptr_t offset) {
-    cur_cfa_.kind = CfaRule::Kind::kRegOffset;
+    cur_cfa_.kind = CFARule::Kind::kRegOffset;
     cur_cfa_.offset = static_cast<int64_t>(offset);
     return true;
   }
 
   bool HandleDefCFAExpression(std::span<const uint8_t> expr) {
     (void)expr;
-    cur_cfa_ = CfaRule{CfaRule::Kind::kExpression, 0, 0};
+    cur_cfa_ = CFARule{CFARule::Kind::kExpression, 0, 0};
     return true;
   }
 
   bool HandleOffset(uintptr_t reg, uintptr_t new_offset) {
-    return SetRule(reg, RegRule{RegRule::Kind::kAtCfaOffset, 0, static_cast<int64_t>(new_offset)});
+    return SetRule(reg, RegRule{RegRule::Kind::kAtCFAOffset, 0, static_cast<int64_t>(new_offset)});
   }
 
   bool HandleRegister(uintptr_t reg, uintptr_t stored_in_reg) {
@@ -104,7 +104,7 @@ class TableBuilder : public UnwindVisitor {
   }
 
   bool HandleRestore(uintptr_t reg) {
-    if (reg >= kNumDwarfRegs) {
+    if (reg >= kNumDWARFRegs) {
       result_.has_exotic_regs = true;
       return true;
     }
@@ -136,7 +136,7 @@ class TableBuilder : public UnwindVisitor {
 
   bool HandleRememberState() {
     if (stack_.size() >= 32) {
-      throw EhFrameError("DW_CFA_remember_state nested deeper than 32 levels");
+      throw EHFrameError("DW_CFA_remember_state nested deeper than 32 levels");
     }
     Saved s;
     s.cfa = cur_cfa_;
@@ -147,7 +147,7 @@ class TableBuilder : public UnwindVisitor {
 
   bool HandleRestoreState() {
     if (stack_.empty()) {
-      throw EhFrameError("DW_CFA_restore_state with nothing remembered");
+      throw EHFrameError("DW_CFA_restore_state with nothing remembered");
     }
     cur_cfa_ = stack_.back().cfa;
     std::copy(std::begin(stack_.back().regs), std::end(stack_.back().regs), std::begin(cur_regs_));
@@ -157,12 +157,12 @@ class TableBuilder : public UnwindVisitor {
 
  private:
   struct Saved {
-    CfaRule cfa;
-    RegRule regs[kNumDwarfRegs];
+    CFARule cfa;
+    RegRule regs[kNumDWARFRegs];
   };
 
   bool SetRule(uintptr_t reg, const RegRule& rule) {
-    if (reg >= kNumDwarfRegs) {
+    if (reg >= kNumDWARFRegs) {
       // SSE and friends. Real code does describe them occasionally; we
       // note it and move on rather than refusing the whole FDE.
       result_.has_exotic_regs = true;
@@ -172,30 +172,30 @@ class TableBuilder : public UnwindVisitor {
     return true;
   }
 
-  FdeCfi result_;
+  CFI result_;
   uintptr_t bias_ = 0;
   uint64_t row_pc_ = 0;
-  CfaRule cur_cfa_;
-  RegRule cur_regs_[kNumDwarfRegs];
-  RegRule cie_regs_[kNumDwarfRegs];
+  CFARule cur_cfa_;
+  RegRule cur_regs_[kNumDWARFRegs];
+  RegRule cie_regs_[kNumDWARFRegs];
   std::vector<Saved> stack_;
 };
 
 }  // namespace
 
-const char* DwarfRegName(int reg) {
-  if (reg < 0 || reg >= kNumDwarfRegs) {
+const char* DWARFRegName(int reg) {
+  if (reg < 0 || reg >= kNumDWARFRegs) {
     return "r?";
   }
   return kRegNames[reg];
 }
 
-std::string CfaRule::ToString() const {
+std::string CFARule::ToString() const {
   switch (kind) {
     case Kind::kUndefined:
       return "<no CFA rule>";
     case Kind::kRegOffset:
-      return absl::StrFormat("%s%+d", DwarfRegName(reg), static_cast<int>(offset));
+      return absl::StrFormat("%s%+d", DWARFRegName(reg), static_cast<int>(offset));
     case Kind::kExpression:
       return "<DWARF expression>";
   }
@@ -210,12 +210,12 @@ std::string RegRule::ToString() const {
       return "undefined";
     case Kind::kSameValue:
       return "same_value";
-    case Kind::kAtCfaOffset:
+    case Kind::kAtCFAOffset:
       return absl::StrFormat("[CFA%+d]", static_cast<int>(offset));
     case Kind::kValOffset:
       return absl::StrFormat("CFA%+d", static_cast<int>(offset));
     case Kind::kInRegister:
-      return absl::StrFormat("in %s", DwarfRegName(reg));
+      return absl::StrFormat("in %s", DWARFRegName(reg));
     case Kind::kExpression:
       return "<DWARF expression>";
     case Kind::kValExpression:
@@ -224,20 +224,20 @@ std::string RegRule::ToString() const {
   return "<?>";
 }
 
-const CfiRow* FdeCfi::RowAt(uint64_t pc) const {
+const CFIRow* CFI::RowAt(uint64_t pc) const {
   if (pc < pc_begin || pc >= pc_end || rows.empty()) {
     return nullptr;
   }
   // Last row whose pc_start <= pc.
   auto it =
-      std::upper_bound(rows.begin(), rows.end(), pc, [](uint64_t v, const CfiRow& row) { return v < row.pc_start; });
+      std::upper_bound(rows.begin(), rows.end(), pc, [](uint64_t v, const CFIRow& row) { return v < row.pc_start; });
   if (it == rows.begin()) {
     return nullptr;
   }
   return &*(it - 1);
 }
 
-FdeCfi ReadFde(uint64_t fde_vaddr, uint64_t eh_frame_start, uint64_t eh_frame_end, uintptr_t bias) {
+CFI ReadFDE(uint64_t fde_vaddr, uint64_t eh_frame_start, uint64_t eh_frame_end, uintptr_t bias) {
   TableBuilder builder{fde_vaddr};
   builder.set_bias(bias);
   EHReaderInputs inputs{};
@@ -246,9 +246,9 @@ FdeCfi ReadFde(uint64_t fde_vaddr, uint64_t eh_frame_start, uint64_t eh_frame_en
   inputs.eh_frame_start = static_cast<uintptr_t>(eh_frame_start) + bias;
   inputs.eh_frame_end = static_cast<uintptr_t>(eh_frame_end) + bias;
   DecodeFDEAt(inputs, static_cast<uintptr_t>(fde_vaddr) + bias, &builder);
-  FdeCfi result = builder.TakeResult();
+  CFI result = builder.TakeResult();
   if (result.rows.empty() && result.pc_end > result.pc_begin) {
-    throw EhFrameError(absl::StrFormat("FDE at 0x%016zx produced no rows", fde_vaddr));
+    throw EHFrameError(absl::StrFormat("FDE at 0x%016zx produced no rows", fde_vaddr));
   }
   return result;
 }

@@ -81,7 +81,7 @@ slice it is reading. Mapping the file raw and handing it file offsets would
 silently corrupt every `pc_begin`, because the `.eh_frame`-to-`.text` delta is
 different in file-offset space than in vaddr space.
 
-So `ElfImage` materialises one address space reservation spanning every
+So `ELFImage` materialises one address space reservation spanning every
 PT_LOAD's vaddr range, with each segment mmap'd via `MAP_FIXED` at the offset
 its `p_vaddr` asks for. Downstream lives in one consistent address space;
 `bias()` converts back to link-time vaddrs for the report. This is checked
@@ -93,7 +93,7 @@ directly by `elf-image-test.cc`'s `PreservesVaddrDistancesAcrossSections`.
 both enabled by being offline. Everything else is byte-identical, deliberately,
 so the two can still be diffed.
 
-1. **`Fail` throws `EhFrameError`** instead of taking the `WithExit` non-local
+1. **`Fail` throws `EHFrameError`** instead of taking the `WithExit` non-local
    exit that runs no destructors. One malformed FDE now costs one report line
    instead of the process — and the upstream rule that nothing in that file may
    own anything by RAII does not apply here.
@@ -115,7 +115,7 @@ The anchor: **CFA is defined once as `rsp` on entry plus 8** and never
 redefined. Every tracked value is expressed relative to it, which is what makes
 a declared CFI rule directly checkable instead of something to re-derive.
 
-A value is `kTop`, `kBottom`, `kCfaRel(delta)`, or `kOrigReg(r)` — "whatever
+A value is `kTop`, `kBottom`, `kCFARel(delta)`, or `kOrigReg(r)` — "whatever
 DWARF register r held on entry". `kTop` and `kBottom` used to be a single
 conflated `kUnknown`; they are kept apart because they behave oppositely under
 `Join`. `kTop` means *truly unknown* — nothing has been tracked, or precision
@@ -150,11 +150,11 @@ fact `Entry()` assumes outright — so it seeds to `kOrigReg(r)`. Anywhere else
 exception landing pad reached by the unwinder mid-function — the CFI's
 silence only means nothing needed unwinding that register, not that it is
 unchanged, so it seeds to `kTop` instead. An *explicit* `kSameValue` rule is a
-real CFI assertion either way and is always trusted. `FdeChecker` passes its
+real CFI assertion either way and is always trusted. `FDEChecker` passes its
 own `at_function_entry` (see below) through for the FDE's own first row, and
 `false` for every landing pad, since a pad is reached only by the unwinder.
 
-Where a function symbol starts the FDE, `FdeChecker` separately notes it if the
+Where a function symbol starts the FDE, `FDEChecker` separately notes it if the
 first row is not the canonical `CFA = rsp+8` with `ra` at `[CFA-8]`. That is a
 **review, not a mismatch**, and deliberately so: we cannot prove an FDE is
 entered by a call. glibc's `_dl_runtime_resolve_fxsave` carries a real function

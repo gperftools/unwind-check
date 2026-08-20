@@ -11,60 +11,60 @@ std::string AbsVal::ToString() const {
       return "unknown";
     case Kind::kBottom:
       return "conflict";
-    case Kind::kCfaRel:
+    case Kind::kCFARel:
       return absl::StrFormat("CFA%+d", static_cast<int>(delta));
     case Kind::kOrigReg:
-      return absl::StrFormat("entry %s", DwarfRegName(reg));
+      return absl::StrFormat("entry %s", DWARFRegName(reg));
   }
   return "?";
 }
 
 AbsState AbsState::Entry() {
   AbsState s;
-  for (int r = 0; r < kNumGpRegs; r++) {
+  for (int r = 0; r < kNumGPRs; r++) {
     s.gpr[r] = AbsVal::OrigReg(r);
   }
-  s.gpr[kDwarfRsp] = AbsVal::CfaRel(-8);
-  s.slots[-8] = AbsVal::OrigReg(kDwarfRip);
+  s.gpr[kDWARFRsp] = AbsVal::CFARel(-8);
+  s.slots[-8] = AbsVal::OrigReg(kDWARFRip);
   return s;
 }
 
-AbsState AbsState::SeedFromRow(const CfiRow& row, bool at_function_entry) {
+AbsState AbsState::SeedFromRow(const CFIRow& row, bool at_function_entry) {
   AbsState s;
-  for (int r = 0; r < kNumGpRegs; r++) {
+  for (int r = 0; r < kNumGPRs; r++) {
     s.gpr[r] = AbsVal::OrigReg(r);
   }
 
-  for (int r = 0; r < kNumDwarfRegs; r++) {
+  for (int r = 0; r < kNumDWARFRegs; r++) {
     const RegRule& rule = row.regs[r];
     switch (rule.kind) {
       case RegRule::Kind::kUnset:
         // Silence means "still the entry value" only when nothing has
         // run yet to make that untrue -- see the comment on the
         // declaration for the fragment/landing-pad case.
-        if (!at_function_entry && r < kNumGpRegs) {
+        if (!at_function_entry && r < kNumGPRs) {
           s.gpr[r] = AbsVal::Top();
         }
         break;
       case RegRule::Kind::kSameValue:
         break;  // an explicit CFI assertion, trusted wherever it appears
-      case RegRule::Kind::kAtCfaOffset:
+      case RegRule::Kind::kAtCFAOffset:
         s.slots[rule.offset] = AbsVal::OrigReg(r);
         break;
       case RegRule::Kind::kInRegister:
-        if (rule.reg < kNumGpRegs) {
+        if (rule.reg < kNumGPRs) {
           s.gpr[rule.reg] = AbsVal::OrigReg(r);
         }
         break;
       case RegRule::Kind::kValOffset:
-        if (r < kNumGpRegs) {
-          s.gpr[r] = AbsVal::CfaRel(rule.offset);
+        if (r < kNumGPRs) {
+          s.gpr[r] = AbsVal::CFARel(rule.offset);
         }
         break;
       case RegRule::Kind::kUndefined:
       case RegRule::Kind::kExpression:
       case RegRule::Kind::kValExpression:
-        if (r < kNumGpRegs) {
+        if (r < kNumGPRs) {
           s.gpr[r] = AbsVal::Top();
         }
         break;
@@ -73,10 +73,10 @@ AbsState AbsState::SeedFromRow(const CfiRow& row, bool at_function_entry) {
 
   // No usable CFA rule at the start: we cannot anchor anything, so rsp
   // is genuinely unknown (top) rather than assumed.
-  s.gpr[kDwarfRsp] = AbsVal::Top();
+  s.gpr[kDWARFRsp] = AbsVal::Top();
   // Last, so that the CFA rule wins for its own register.
-  if (row.cfa.kind == CfaRule::Kind::kRegOffset && row.cfa.reg < kNumGpRegs) {
-    s.gpr[row.cfa.reg] = AbsVal::CfaRel(-row.cfa.offset);
+  if (row.cfa.kind == CFARule::Kind::kRegOffset && row.cfa.reg < kNumGPRs) {
+    s.gpr[row.cfa.reg] = AbsVal::CFARel(-row.cfa.offset);
   }
   return s;
 }
@@ -113,13 +113,13 @@ std::string JoinConflict::Describe() const {
     return absl::StrFormat("stack slot CFA%+d is %s on one path and %s on another", static_cast<int>(offset),
                            lhs.ToString(), rhs.ToString());
   }
-  return absl::StrFormat("%s is %s on one path and %s on another", DwarfRegName(reg), lhs.ToString(), rhs.ToString());
+  return absl::StrFormat("%s is %s on one path and %s on another", DWARFRegName(reg), lhs.ToString(), rhs.ToString());
 }
 
 bool Join(const AbsState& incoming, AbsState* state, std::vector<JoinConflict>* conflicts) {
   bool changed = false;
 
-  for (int r = 0; r < kNumGpRegs; r++) {
+  for (int r = 0; r < kNumGPRs; r++) {
     if (state->gpr[r] == incoming.gpr[r]) {
       continue;
     }

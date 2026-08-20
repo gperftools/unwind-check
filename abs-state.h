@@ -33,7 +33,7 @@ struct AbsVal {
     // value drops to bottom it stays there, since the conflict that
     // produced it does not go away when a third path shows up.
     kBottom,
-    kCfaRel,   // the value is CFA + delta
+    kCFARel,   // the value is CFA + delta
     kOrigReg,  // the value is whatever DWARF register `reg` held on entry
   };
 
@@ -47,8 +47,8 @@ struct AbsVal {
   static AbsVal Bottom() {
     return AbsVal{Kind::kBottom, 0, 0};
   }
-  static AbsVal CfaRel(int64_t delta) {
-    return AbsVal{Kind::kCfaRel, delta, 0};
+  static AbsVal CFARel(int64_t delta) {
+    return AbsVal{Kind::kCFARel, delta, 0};
   }
   static AbsVal OrigReg(int reg) {
     return AbsVal{Kind::kOrigReg, 0, static_cast<uint8_t>(reg)};
@@ -66,8 +66,8 @@ struct AbsVal {
   bool is_unknown() const {
     return kind == Kind::kTop || kind == Kind::kBottom;
   }
-  bool IsCfaRel(int64_t d) const {
-    return kind == Kind::kCfaRel && delta == d;
+  bool IsCFARel(int64_t d) const {
+    return kind == Kind::kCFARel && delta == d;
   }
   bool IsOrigReg(int r) const {
     return kind == Kind::kOrigReg && reg == r;
@@ -84,7 +84,7 @@ struct AbsVal {
 // offsets from the CFA, so a `push` at function entry writes slot -16,
 // and the return address the call put there lives at slot -8.
 struct AbsState {
-  AbsVal gpr[kNumGpRegs];
+  AbsVal gpr[kNumGPRs];
   std::map<int64_t, AbsVal> slots;
 
   // The state on entry to a function: rsp is CFA-8 (the call pushed the
@@ -106,7 +106,7 @@ struct AbsState {
   // which is the strongest claim available without inter-procedural
   // information. For an FDE that really does start a function the
   // declared row is the canonical entry state anyway, so this is a
-  // strict generalisation of Entry() -- and FdeChecker separately
+  // strict generalisation of Entry() -- and FDEChecker separately
   // verifies that claim wherever a function symbol says the FDE starts
   // one.
   //
@@ -124,7 +124,7 @@ struct AbsState {
   // register seeds to kTop instead. An *explicit* RegRule::Kind::kSameValue
   // is a real CFI assertion either way, and is trusted regardless of
   // `at_function_entry`.
-  static AbsState SeedFromRow(const CfiRow& row, bool at_function_entry);
+  static AbsState SeedFromRow(const CFIRow& row, bool at_function_entry);
 
   const AbsVal& reg(int r) const {
     return gpr[r];

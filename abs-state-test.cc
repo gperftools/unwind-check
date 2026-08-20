@@ -14,7 +14,7 @@ TEST(AbsValTest, TopIsTheDefaultAndIsNeitherBottomNorConcrete) {
   EXPECT_TRUE(v.is_top());
   EXPECT_TRUE(v.is_unknown());
   EXPECT_FALSE(v.is_bottom());
-  EXPECT_FALSE(v.IsCfaRel(0));
+  EXPECT_FALSE(v.IsCFARel(0));
   EXPECT_FALSE(v.IsOrigReg(0));
   EXPECT_EQ(v, AbsVal::Top());
 }
@@ -27,50 +27,50 @@ TEST(AbsValTest, BottomIsUnknownButDistinctFromTop) {
   EXPECT_NE(v, AbsVal::Top());
 }
 
-TEST(AbsValTest, CfaRelAndOrigRegAreConcreteNotUnknown) {
-  AbsVal cfa = AbsVal::CfaRel(-16);
-  EXPECT_TRUE(cfa.IsCfaRel(-16));
-  EXPECT_FALSE(cfa.IsCfaRel(-8));
+TEST(AbsValTest, CFARelAndOrigRegAreConcreteNotUnknown) {
+  AbsVal cfa = AbsVal::CFARel(-16);
+  EXPECT_TRUE(cfa.IsCFARel(-16));
+  EXPECT_FALSE(cfa.IsCFARel(-8));
   EXPECT_FALSE(cfa.is_unknown());
 
-  AbsVal orig = AbsVal::OrigReg(kDwarfRbx);
-  EXPECT_TRUE(orig.IsOrigReg(kDwarfRbx));
-  EXPECT_FALSE(orig.IsOrigReg(kDwarfRax));
+  AbsVal orig = AbsVal::OrigReg(kDWARFRbx);
+  EXPECT_TRUE(orig.IsOrigReg(kDWARFRbx));
+  EXPECT_FALSE(orig.IsOrigReg(kDWARFRax));
   EXPECT_FALSE(orig.is_unknown());
 }
 
 TEST(AbsValTest, EqualityDistinguishesEveryKind) {
   EXPECT_NE(AbsVal::Top(), AbsVal::Bottom());
-  EXPECT_NE(AbsVal::Top(), AbsVal::CfaRel(0));
-  EXPECT_NE(AbsVal::Bottom(), AbsVal::CfaRel(0));
-  EXPECT_NE(AbsVal::CfaRel(8), AbsVal::CfaRel(-8));
-  EXPECT_NE(AbsVal::OrigReg(kDwarfRax), AbsVal::OrigReg(kDwarfRbx));
-  EXPECT_NE(AbsVal::CfaRel(0), AbsVal::OrigReg(kDwarfRax));
+  EXPECT_NE(AbsVal::Top(), AbsVal::CFARel(0));
+  EXPECT_NE(AbsVal::Bottom(), AbsVal::CFARel(0));
+  EXPECT_NE(AbsVal::CFARel(8), AbsVal::CFARel(-8));
+  EXPECT_NE(AbsVal::OrigReg(kDWARFRax), AbsVal::OrigReg(kDWARFRbx));
+  EXPECT_NE(AbsVal::CFARel(0), AbsVal::OrigReg(kDWARFRax));
   EXPECT_EQ(AbsVal::Bottom(), AbsVal::Bottom());
 }
 
 TEST(AbsValTest, ToStringNamesTopAndBottomDistinctly) {
   EXPECT_EQ(AbsVal::Top().ToString(), "unknown");
   EXPECT_EQ(AbsVal::Bottom().ToString(), "conflict");
-  EXPECT_EQ(AbsVal::CfaRel(8).ToString(), "CFA+8");
-  EXPECT_EQ(AbsVal::CfaRel(-16).ToString(), "CFA-16");
-  EXPECT_EQ(AbsVal::OrigReg(kDwarfRbx).ToString(), "entry rbx");
+  EXPECT_EQ(AbsVal::CFARel(8).ToString(), "CFA+8");
+  EXPECT_EQ(AbsVal::CFARel(-16).ToString(), "CFA-16");
+  EXPECT_EQ(AbsVal::OrigReg(kDWARFRbx).ToString(), "entry rbx");
 }
 
 // --- AbsState::Entry --------------------------------------------------
 
 TEST(AbsStateTest, EntryStateIsTheCanonicalCallFrame) {
   AbsState s = AbsState::Entry();
-  EXPECT_TRUE(s.reg(kDwarfRsp).IsCfaRel(-8));
-  EXPECT_TRUE(s.reg(kDwarfRbx).IsOrigReg(kDwarfRbx));
-  EXPECT_TRUE(s.Slot(-8).IsOrigReg(kDwarfRip));
+  EXPECT_TRUE(s.reg(kDWARFRsp).IsCFARel(-8));
+  EXPECT_TRUE(s.reg(kDWARFRbx).IsOrigReg(kDWARFRbx));
+  EXPECT_TRUE(s.Slot(-8).IsOrigReg(kDWARFRip));
   EXPECT_TRUE(s.Slot(-16).is_unknown());
 }
 
 TEST(AbsStateTest, EntryStateGivesEveryOtherGprItsOwnOriginalValue) {
   AbsState s = AbsState::Entry();
-  for (int r = 0; r < kNumGpRegs; r++) {
-    if (r == kDwarfRsp) {
+  for (int r = 0; r < kNumGPRs; r++) {
+    if (r == kDWARFRsp) {
       continue;
     }
     EXPECT_TRUE(s.reg(r).IsOrigReg(r)) << "register " << r;
@@ -86,15 +86,15 @@ TEST(AbsStateTest, SlotDefaultsToTopWhenNeverSet) {
 
 TEST(AbsStateTest, SetSlotStoresAConcreteValueAndReadsItBack) {
   AbsState s;
-  s.SetSlot(-16, AbsVal::OrigReg(kDwarfRbx));
-  EXPECT_TRUE(s.Slot(-16).IsOrigReg(kDwarfRbx));
+  s.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));
+  EXPECT_TRUE(s.Slot(-16).IsOrigReg(kDWARFRbx));
 }
 
 TEST(AbsStateTest, SetSlotWithTopErasesRatherThanStoring) {
   // Slot() already reads an absent key as top, so a stored kTop entry
   // would be redundant -- SetSlot keeps the map from ever holding one.
   AbsState s;
-  s.SetSlot(-16, AbsVal::OrigReg(kDwarfRbx));
+  s.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));
   s.SetSlot(-16, AbsVal::Top());
   EXPECT_TRUE(s.Slot(-16).is_top());
   EXPECT_EQ(s.slots.count(-16), 0u);
@@ -113,8 +113,8 @@ TEST(AbsStateTest, SetSlotWithBottomIsStoredExplicitly) {
 
 TEST(AbsStateTest, ClobberRegDropsToTop) {
   AbsState s = AbsState::Entry();
-  s.ClobberReg(kDwarfRax);
-  EXPECT_TRUE(s.reg(kDwarfRax).is_top());
+  s.ClobberReg(kDWARFRax);
+  EXPECT_TRUE(s.reg(kDWARFRax).is_top());
 }
 
 // --- DropSlotsBelow / DropDeadSlots --------------------------------------
@@ -124,35 +124,35 @@ TEST(AbsStateTest, DroppingDeadSlotsSparesTheRedZone) {
   // that restored it. That is safe because the kernel honours the red
   // zone, and the checker has to agree or it flags every function.
   AbsState s = AbsState::Entry();
-  s.SetSlot(-16, AbsVal::OrigReg(kDwarfRbx));
-  s.SetSlot(-400, AbsVal::OrigReg(kDwarfRbp));
+  s.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));
+  s.SetSlot(-400, AbsVal::OrigReg(kDWARFRbp));
   s.DropDeadSlots(-8);
-  EXPECT_TRUE(s.Slot(-16).IsOrigReg(kDwarfRbx)) << "within the red zone, still readable";
+  EXPECT_TRUE(s.Slot(-16).IsOrigReg(kDWARFRbx)) << "within the red zone, still readable";
   EXPECT_TRUE(s.Slot(-400).is_top()) << "far below the stack pointer, genuinely gone";
 }
 
 TEST(AbsStateTest, DropSlotsBelowIsExactForCalls) {
   AbsState s = AbsState::Entry();
-  s.SetSlot(-16, AbsVal::OrigReg(kDwarfRbx));
+  s.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));
   s.DropSlotsBelow(-8);
   EXPECT_TRUE(s.Slot(-16).is_top()) << "no red zone survives a call";
 }
 
 TEST(AbsStateTest, DropSlotsBelowKeepsTheBoundarySlot) {
   AbsState s;
-  s.SetSlot(-8, AbsVal::OrigReg(kDwarfRbx));
-  s.SetSlot(-16, AbsVal::OrigReg(kDwarfRbp));
+  s.SetSlot(-8, AbsVal::OrigReg(kDWARFRbx));
+  s.SetSlot(-16, AbsVal::OrigReg(kDWARFRbp));
   s.DropSlotsBelow(-8);
-  EXPECT_TRUE(s.Slot(-8).IsOrigReg(kDwarfRbx)) << "exactly at the new rsp, not below it";
+  EXPECT_TRUE(s.Slot(-8).IsOrigReg(kDWARFRbx)) << "exactly at the new rsp, not below it";
   EXPECT_TRUE(s.Slot(-16).is_top()) << "strictly below the new rsp";
 }
 
 TEST(AbsStateTest, DropDeadSlotsKeepsTheRedZoneBoundarySlot) {
   AbsState s;
-  s.SetSlot(-8 - AbsState::kRedZoneBytes, AbsVal::OrigReg(kDwarfRbx));
-  s.SetSlot(-9 - AbsState::kRedZoneBytes, AbsVal::OrigReg(kDwarfRbp));
+  s.SetSlot(-8 - AbsState::kRedZoneBytes, AbsVal::OrigReg(kDWARFRbx));
+  s.SetSlot(-9 - AbsState::kRedZoneBytes, AbsVal::OrigReg(kDWARFRbp));
   s.DropDeadSlots(-8);
-  EXPECT_TRUE(s.Slot(-8 - AbsState::kRedZoneBytes).IsOrigReg(kDwarfRbx)) << "last byte the red zone still covers";
+  EXPECT_TRUE(s.Slot(-8 - AbsState::kRedZoneBytes).IsOrigReg(kDWARFRbx)) << "last byte the red zone still covers";
   EXPECT_TRUE(s.Slot(-9 - AbsState::kRedZoneBytes).is_top()) << "one byte past the red zone";
 }
 
@@ -161,14 +161,14 @@ TEST(AbsStateTest, DropDeadSlotsKeepsTheRedZoneBoundarySlot) {
 TEST(AbsStateTest, JoinKeepsAgreementAndDropsDisagreement) {
   AbsState a = AbsState::Entry();
   AbsState b = AbsState::Entry();
-  b.SetReg(kDwarfRbx, AbsVal::CfaRel(-32));
+  b.SetReg(kDWARFRbx, AbsVal::CFARel(-32));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.reg(kDwarfRbx).is_bottom());
-  EXPECT_TRUE(a.reg(kDwarfRsp).IsCfaRel(-8)) << "agreeing components must survive";
+  EXPECT_TRUE(a.reg(kDWARFRbx).is_bottom());
+  EXPECT_TRUE(a.reg(kDWARFRsp).IsCFARel(-8)) << "agreeing components must survive";
   ASSERT_EQ(conflicts.size(), 1u);
-  EXPECT_EQ(conflicts[0].reg, kDwarfRbx);
+  EXPECT_EQ(conflicts[0].reg, kDWARFRbx);
 }
 
 TEST(AbsStateTest, JoinReportsRatherThanSilentlyWidening) {
@@ -176,13 +176,13 @@ TEST(AbsStateTest, JoinReportsRatherThanSilentlyWidening) {
   // stack pointers is the signal, so it must not be swallowed.
   AbsState a = AbsState::Entry();
   AbsState b = AbsState::Entry();
-  a.SetReg(kDwarfRsp, AbsVal::CfaRel(-16));
-  b.SetReg(kDwarfRsp, AbsVal::CfaRel(-24));
+  a.SetReg(kDWARFRsp, AbsVal::CFARel(-16));
+  b.SetReg(kDWARFRsp, AbsVal::CFARel(-24));
 
   std::vector<JoinConflict> conflicts;
   Join(b, &a, &conflicts);
   ASSERT_EQ(conflicts.size(), 1u);
-  EXPECT_EQ(conflicts[0].reg, kDwarfRsp);
+  EXPECT_EQ(conflicts[0].reg, kDWARFRsp);
   EXPECT_THAT(conflicts[0].Describe(), testing::HasSubstr("CFA-16"));
   EXPECT_THAT(conflicts[0].Describe(), testing::HasSubstr("CFA-24"));
 }
@@ -190,7 +190,7 @@ TEST(AbsStateTest, JoinReportsRatherThanSilentlyWidening) {
 TEST(AbsStateTest, JoinIsIdempotentOnceWidened) {
   AbsState a = AbsState::Entry();
   AbsState b = AbsState::Entry();
-  b.SetReg(kDwarfRbx, AbsVal::CfaRel(-32));
+  b.SetReg(kDWARFRbx, AbsVal::CFARel(-32));
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
   // Second time round nothing moves, which is what terminates the
@@ -201,33 +201,33 @@ TEST(AbsStateTest, JoinIsIdempotentOnceWidened) {
 TEST(AbsStateTest, JoinTopIsTheIdentityElementForRegisters) {
   AbsState a;  // every gpr defaults to top
   AbsState b;
-  b.SetReg(kDwarfRax, AbsVal::CfaRel(8));
+  b.SetReg(kDWARFRax, AbsVal::CFARel(8));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.reg(kDwarfRax).IsCfaRel(8));
+  EXPECT_TRUE(a.reg(kDWARFRax).IsCFARel(8));
   EXPECT_TRUE(conflicts.empty()) << "top contributes no claim, so there is nothing to disagree about";
 }
 
 TEST(AbsStateTest, JoinLeavesAConcreteRegisterAloneWhenIncomingIsTop) {
   AbsState a;
-  a.SetReg(kDwarfRax, AbsVal::CfaRel(8));
+  a.SetReg(kDWARFRax, AbsVal::CFARel(8));
   AbsState b;  // top
 
   std::vector<JoinConflict> conflicts;
   EXPECT_FALSE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.reg(kDwarfRax).IsCfaRel(8));
+  EXPECT_TRUE(a.reg(kDWARFRax).IsCFARel(8));
   EXPECT_TRUE(conflicts.empty());
 }
 
 TEST(AbsStateTest, JoinBottomRegisterAbsorbsAnIncomingTop) {
   AbsState a;
-  a.SetReg(kDwarfRax, AbsVal::Bottom());
+  a.SetReg(kDWARFRax, AbsVal::Bottom());
   AbsState b;  // top
 
   std::vector<JoinConflict> conflicts;
   EXPECT_FALSE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.reg(kDwarfRax).is_bottom());
+  EXPECT_TRUE(a.reg(kDWARFRax).is_bottom());
   EXPECT_TRUE(conflicts.empty());
 }
 
@@ -235,44 +235,44 @@ TEST(AbsStateTest, JoinBottomRegisterAbsorbsAnIncomingConcreteValue) {
   // Once a register is flagged as conflicting it must not be quietly
   // overwritten by whatever a later, unrelated predecessor claims.
   AbsState a;
-  a.SetReg(kDwarfRax, AbsVal::Bottom());
+  a.SetReg(kDWARFRax, AbsVal::Bottom());
   AbsState b;
-  b.SetReg(kDwarfRax, AbsVal::CfaRel(8));
+  b.SetReg(kDWARFRax, AbsVal::CFARel(8));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_FALSE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.reg(kDwarfRax).is_bottom());
+  EXPECT_TRUE(a.reg(kDWARFRax).is_bottom());
   EXPECT_TRUE(conflicts.empty()) << "not a fresh disagreement -- it was already recorded";
 }
 
 TEST(AbsStateTest, JoinPropagatesAnIncomingBottomRegisterWithoutReReporting) {
   AbsState a;
-  a.SetReg(kDwarfRax, AbsVal::CfaRel(8));
+  a.SetReg(kDWARFRax, AbsVal::CFARel(8));
   AbsState b;
-  b.SetReg(kDwarfRax, AbsVal::Bottom());
+  b.SetReg(kDWARFRax, AbsVal::Bottom());
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.reg(kDwarfRax).is_bottom());
+  EXPECT_TRUE(a.reg(kDWARFRax).is_bottom());
   EXPECT_TRUE(conflicts.empty()) << "the conflict was already reported at the join that produced the bottom";
 }
 
 TEST(AbsStateTest, JoinDoesNotReReportAFreshDisagreementAfterGoingBottom) {
   AbsState a;
-  a.SetReg(kDwarfRax, AbsVal::CfaRel(8));
+  a.SetReg(kDWARFRax, AbsVal::CFARel(8));
   AbsState b;
-  b.SetReg(kDwarfRax, AbsVal::CfaRel(16));
+  b.SetReg(kDWARFRax, AbsVal::CFARel(16));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
   ASSERT_EQ(conflicts.size(), 1u);
-  EXPECT_TRUE(a.reg(kDwarfRax).is_bottom());
+  EXPECT_TRUE(a.reg(kDWARFRax).is_bottom());
 
   // A third, differently-concrete predecessor arrives at the same PC.
   AbsState c;
-  c.SetReg(kDwarfRax, AbsVal::CfaRel(24));
+  c.SetReg(kDWARFRax, AbsVal::CFARel(24));
   EXPECT_FALSE(Join(c, &a, &conflicts));
-  EXPECT_TRUE(a.reg(kDwarfRax).is_bottom());
+  EXPECT_TRUE(a.reg(kDWARFRax).is_bottom());
   EXPECT_EQ(conflicts.size(), 1u) << "still just the first conflict -- bottom already said everything";
 }
 
@@ -281,12 +281,12 @@ TEST(AbsStateTest, JoinDoesNotReReportAFreshDisagreementAfterGoingBottom) {
 TEST(AbsStateTest, JoinSlotsAgreeAndSurvive) {
   AbsState a;
   AbsState b;
-  a.SetSlot(-16, AbsVal::OrigReg(kDwarfRbx));
-  b.SetSlot(-16, AbsVal::OrigReg(kDwarfRbx));
+  a.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));
+  b.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_FALSE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.Slot(-16).IsOrigReg(kDwarfRbx));
+  EXPECT_TRUE(a.Slot(-16).IsOrigReg(kDWARFRbx));
   EXPECT_TRUE(conflicts.empty());
 }
 
@@ -295,28 +295,28 @@ TEST(AbsStateTest, JoinKeepsASlotOnlyStateNames) {
   // the meet's identity element.
   AbsState a;
   AbsState b;
-  a.SetSlot(-24, AbsVal::OrigReg(kDwarfRbp));
+  a.SetSlot(-24, AbsVal::OrigReg(kDWARFRbp));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_FALSE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.Slot(-24).IsOrigReg(kDwarfRbp));
+  EXPECT_TRUE(a.Slot(-24).IsOrigReg(kDWARFRbp));
 }
 
 TEST(AbsStateTest, JoinImportsASlotOnlyIncomingNames) {
   AbsState a;
   AbsState b;
-  b.SetSlot(-24, AbsVal::OrigReg(kDwarfRbp));
+  b.SetSlot(-24, AbsVal::OrigReg(kDWARFRbp));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.Slot(-24).IsOrigReg(kDwarfRbp));
+  EXPECT_TRUE(a.Slot(-24).IsOrigReg(kDWARFRbp));
 }
 
 TEST(AbsStateTest, JoinSlotsDisagreeAndDropToBottom) {
   AbsState a;
   AbsState b;
-  a.SetSlot(-16, AbsVal::OrigReg(kDwarfRbx));
-  b.SetSlot(-16, AbsVal::OrigReg(kDwarfRbp));
+  a.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));
+  b.SetSlot(-16, AbsVal::OrigReg(kDWARFRbp));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
@@ -332,7 +332,7 @@ TEST(AbsStateTest, JoinBottomSlotAbsorbsAnIncomingConcreteValue) {
   AbsState a;
   a.SetSlot(-16, AbsVal::Bottom());
   AbsState b;
-  b.SetSlot(-16, AbsVal::OrigReg(kDwarfRbx));
+  b.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_FALSE(Join(b, &a, &conflicts));
@@ -355,7 +355,7 @@ TEST(AbsStateTest, JoinBottomSlotSurvivesEvenWhenIncomingLacksIt) {
 
 TEST(AbsStateTest, JoinPropagatesAnIncomingBottomSlotWithoutReReporting) {
   AbsState a;
-  a.SetSlot(-16, AbsVal::OrigReg(kDwarfRbx));
+  a.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));
   AbsState b;
   b.SetSlot(-16, AbsVal::Bottom());
 
@@ -380,17 +380,17 @@ TEST(AbsStateTest, JoinImportsABottomSlotOnlyIncomingNames) {
 
 TEST(AbsStateTest, JoinOrderDoesNotMatterForRegisters) {
   AbsState a;
-  a.SetReg(kDwarfRax, AbsVal::CfaRel(8));           // concrete only on a
-  a.SetReg(kDwarfRbx, AbsVal::Bottom());            // already conflicting on a
-  a.SetReg(kDwarfRcx, AbsVal::OrigReg(kDwarfRcx));  // agrees with b
-  a.SetReg(kDwarfRdx, AbsVal::CfaRel(-16));         // disagrees with b
-  // kDwarfRsi left at top on a.
+  a.SetReg(kDWARFRax, AbsVal::CFARel(8));           // concrete only on a
+  a.SetReg(kDWARFRbx, AbsVal::Bottom());            // already conflicting on a
+  a.SetReg(kDWARFRcx, AbsVal::OrigReg(kDWARFRcx));  // agrees with b
+  a.SetReg(kDWARFRdx, AbsVal::CFARel(-16));         // disagrees with b
+  // kDWARFRsi left at top on a.
 
   AbsState b;
-  b.SetReg(kDwarfRbx, AbsVal::CfaRel(0));  // concrete meeting a's bottom
-  b.SetReg(kDwarfRcx, AbsVal::OrigReg(kDwarfRcx));
-  b.SetReg(kDwarfRdx, AbsVal::CfaRel(-24));
-  b.SetReg(kDwarfRsi, AbsVal::CfaRel(32));  // concrete only on b
+  b.SetReg(kDWARFRbx, AbsVal::CFARel(0));  // concrete meeting a's bottom
+  b.SetReg(kDWARFRcx, AbsVal::OrigReg(kDWARFRcx));
+  b.SetReg(kDWARFRdx, AbsVal::CFARel(-24));
+  b.SetReg(kDWARFRsi, AbsVal::CFARel(32));  // concrete only on b
 
   AbsState merged_a_into_b = b;
   std::vector<JoinConflict> conflicts_a_into_b;
@@ -406,15 +406,15 @@ TEST(AbsStateTest, JoinOrderDoesNotMatterForRegisters) {
 
 TEST(AbsStateTest, JoinOrderDoesNotMatterForSlots) {
   AbsState a;
-  a.SetSlot(-8, AbsVal::OrigReg(kDwarfRbx));   // only on a
+  a.SetSlot(-8, AbsVal::OrigReg(kDWARFRbx));   // only on a
   a.SetSlot(-16, AbsVal::Bottom());            // already conflicting on a
-  a.SetSlot(-24, AbsVal::OrigReg(kDwarfRbp));  // agrees with b
-  a.SetSlot(-32, AbsVal::CfaRel(-40));         // disagrees with b
+  a.SetSlot(-24, AbsVal::OrigReg(kDWARFRbp));  // agrees with b
+  a.SetSlot(-32, AbsVal::CFARel(-40));         // disagrees with b
 
   AbsState b;
-  b.SetSlot(-16, AbsVal::OrigReg(kDwarfRbx));  // concrete meeting a's bottom
-  b.SetSlot(-24, AbsVal::OrigReg(kDwarfRbp));
-  b.SetSlot(-32, AbsVal::CfaRel(-48));
+  b.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));  // concrete meeting a's bottom
+  b.SetSlot(-24, AbsVal::OrigReg(kDWARFRbp));
+  b.SetSlot(-32, AbsVal::CFARel(-48));
   b.SetSlot(-40, AbsVal::OrigReg(12));  // r12, only on b
 
   AbsState merged_a_into_b = b;
@@ -432,9 +432,9 @@ TEST(AbsStateTest, JoinOrderDoesNotMatterForSlots) {
 // --- SeedFromRow -----------------------------------------------------
 
 TEST(AbsStateTest, SeedFromRowReproducesEntryForACanonicalRow) {
-  CfiRow row;
-  row.cfa = CfaRule{CfaRule::Kind::kRegOffset, kDwarfRsp, 8};
-  row.regs[kDwarfRip] = RegRule{RegRule::Kind::kAtCfaOffset, 0, -8};
+  CFIRow row;
+  row.cfa = CFARule{CFARule::Kind::kRegOffset, kDWARFRsp, 8};
+  row.regs[kDWARFRip] = RegRule{RegRule::Kind::kAtCFAOffset, 0, -8};
   EXPECT_EQ(AbsState::SeedFromRow(row, /*at_function_entry=*/true), AbsState::Entry());
 }
 
@@ -443,16 +443,16 @@ TEST(AbsStateTest, SeedFromRowHandlesAFragmentStartingMidFrame) {
   // starts with registers already spilled and rsp well below the CFA.
   // A `.cold` fragment is reached by a jump after the hot part has
   // already run, never by a call, so this is not function entry.
-  CfiRow row;
-  row.cfa = CfaRule{CfaRule::Kind::kRegOffset, kDwarfRsp, 32};
-  row.regs[kDwarfRip] = RegRule{RegRule::Kind::kAtCfaOffset, 0, -8};
-  row.regs[kDwarfRbx] = RegRule{RegRule::Kind::kAtCfaOffset, 0, -24};
+  CFIRow row;
+  row.cfa = CFARule{CFARule::Kind::kRegOffset, kDWARFRsp, 32};
+  row.regs[kDWARFRip] = RegRule{RegRule::Kind::kAtCFAOffset, 0, -8};
+  row.regs[kDWARFRbx] = RegRule{RegRule::Kind::kAtCFAOffset, 0, -24};
 
   AbsState s = AbsState::SeedFromRow(row, /*at_function_entry=*/false);
-  EXPECT_TRUE(s.reg(kDwarfRsp).IsCfaRel(-32));
-  EXPECT_TRUE(s.Slot(-24).IsOrigReg(kDwarfRbx));
-  EXPECT_TRUE(s.Slot(-8).IsOrigReg(kDwarfRip));
-  EXPECT_TRUE(s.reg(kDwarfRax).is_top())
+  EXPECT_TRUE(s.reg(kDWARFRsp).IsCFARel(-32));
+  EXPECT_TRUE(s.Slot(-24).IsOrigReg(kDWARFRbx));
+  EXPECT_TRUE(s.Slot(-8).IsOrigReg(kDWARFRip));
+  EXPECT_TRUE(s.reg(kDWARFRax).is_top())
       << "unmentioned mid-function: the CFI's silence about rax doesn't mean it still holds its entry value";
 }
 
@@ -460,88 +460,88 @@ TEST(AbsStateTest, SeedFromRowAtEntryTrustsUnmentionedRegistersAsOriginal) {
   // At a genuine function entry nothing has executed yet, so a register
   // the row says nothing about trivially still holds what the caller
   // passed in -- the same fact Entry() assumes outright.
-  CfiRow row;
-  row.cfa = CfaRule{CfaRule::Kind::kRegOffset, kDwarfRsp, 8};
-  row.regs[kDwarfRip] = RegRule{RegRule::Kind::kAtCfaOffset, 0, -8};
+  CFIRow row;
+  row.cfa = CFARule{CFARule::Kind::kRegOffset, kDWARFRsp, 8};
+  row.regs[kDWARFRip] = RegRule{RegRule::Kind::kAtCFAOffset, 0, -8};
 
   AbsState s = AbsState::SeedFromRow(row, /*at_function_entry=*/true);
-  EXPECT_TRUE(s.reg(kDwarfRax).IsOrigReg(kDwarfRax));
-  EXPECT_TRUE(s.reg(kDwarfRbx).IsOrigReg(kDwarfRbx));
+  EXPECT_TRUE(s.reg(kDWARFRax).IsOrigReg(kDWARFRax));
+  EXPECT_TRUE(s.reg(kDWARFRbx).IsOrigReg(kDWARFRbx));
 }
 
 TEST(AbsStateTest, SeedFromRowAwayFromEntryTrustsAnExplicitSameValueRule) {
   // RegRule::Kind::kSameValue is a real CFI assertion (DW_CFA_same_value),
   // not silence, so it is trusted even off the entry path -- e.g. a
   // landing pad whose CFI says a callee-saved register never moved.
-  CfiRow row;
-  row.cfa = CfaRule{CfaRule::Kind::kRegOffset, kDwarfRsp, 32};
-  row.regs[kDwarfRbx] = RegRule{RegRule::Kind::kSameValue, 0, 0};
+  CFIRow row;
+  row.cfa = CFARule{CFARule::Kind::kRegOffset, kDWARFRsp, 32};
+  row.regs[kDWARFRbx] = RegRule{RegRule::Kind::kSameValue, 0, 0};
 
   AbsState s = AbsState::SeedFromRow(row, /*at_function_entry=*/false);
-  EXPECT_TRUE(s.reg(kDwarfRbx).IsOrigReg(kDwarfRbx));
-  EXPECT_TRUE(s.reg(kDwarfRax).is_top()) << "rax is merely unmentioned, not asserted same-value";
+  EXPECT_TRUE(s.reg(kDWARFRbx).IsOrigReg(kDWARFRbx));
+  EXPECT_TRUE(s.reg(kDWARFRax).is_top()) << "rax is merely unmentioned, not asserted same-value";
 }
 
 TEST(AbsStateTest, SeedFromRowHandlesAValOffsetRule) {
   // kValOffset means the register's value *is* CFA+offset -- the DRAP
-  // pattern, among others -- distinct from kAtCfaOffset, where the
+  // pattern, among others -- distinct from kAtCFAOffset, where the
   // register is merely *saved* there.
-  CfiRow row;
-  row.cfa = CfaRule{CfaRule::Kind::kRegOffset, kDwarfRsp, 16};
-  row.regs[kDwarfRax] = RegRule{RegRule::Kind::kValOffset, 0, -16};
+  CFIRow row;
+  row.cfa = CFARule{CFARule::Kind::kRegOffset, kDWARFRsp, 16};
+  row.regs[kDWARFRax] = RegRule{RegRule::Kind::kValOffset, 0, -16};
 
   AbsState s = AbsState::SeedFromRow(row, /*at_function_entry=*/false);
-  EXPECT_TRUE(s.reg(kDwarfRax).IsCfaRel(-16));
+  EXPECT_TRUE(s.reg(kDWARFRax).IsCFARel(-16));
 }
 
 TEST(AbsStateTest, SeedFromRowHandlesAnInRegisterRule) {
   // DW_CFA_register: rbp's caller-entry value was moved into rax.
-  CfiRow row;
-  row.cfa = CfaRule{CfaRule::Kind::kRegOffset, kDwarfRsp, 16};
-  row.regs[kDwarfRbp] = RegRule{RegRule::Kind::kInRegister, kDwarfRax, 0};
+  CFIRow row;
+  row.cfa = CFARule{CFARule::Kind::kRegOffset, kDWARFRsp, 16};
+  row.regs[kDWARFRbp] = RegRule{RegRule::Kind::kInRegister, kDWARFRax, 0};
 
   AbsState s = AbsState::SeedFromRow(row, /*at_function_entry=*/false);
-  EXPECT_TRUE(s.reg(kDwarfRax).IsOrigReg(kDwarfRbp));
+  EXPECT_TRUE(s.reg(kDWARFRax).IsOrigReg(kDWARFRbp));
 }
 
 TEST(AbsStateTest, SeedFromRowTreatsUndefinedAndExpressionRulesAsTopRegardlessOfEntry) {
   for (bool at_entry : {true, false}) {
-    CfiRow row;
-    row.cfa = CfaRule{CfaRule::Kind::kRegOffset, kDwarfRsp, 16};
-    row.regs[kDwarfRax] = RegRule{RegRule::Kind::kUndefined, 0, 0};
-    row.regs[kDwarfRbx] = RegRule{RegRule::Kind::kExpression, 0, 0};
-    row.regs[kDwarfRcx] = RegRule{RegRule::Kind::kValExpression, 0, 0};
+    CFIRow row;
+    row.cfa = CFARule{CFARule::Kind::kRegOffset, kDWARFRsp, 16};
+    row.regs[kDWARFRax] = RegRule{RegRule::Kind::kUndefined, 0, 0};
+    row.regs[kDWARFRbx] = RegRule{RegRule::Kind::kExpression, 0, 0};
+    row.regs[kDWARFRcx] = RegRule{RegRule::Kind::kValExpression, 0, 0};
 
     AbsState s = AbsState::SeedFromRow(row, at_entry);
-    EXPECT_TRUE(s.reg(kDwarfRax).is_top()) << "at_function_entry=" << at_entry;
-    EXPECT_TRUE(s.reg(kDwarfRbx).is_top()) << "at_function_entry=" << at_entry;
-    EXPECT_TRUE(s.reg(kDwarfRcx).is_top()) << "at_function_entry=" << at_entry;
+    EXPECT_TRUE(s.reg(kDWARFRax).is_top()) << "at_function_entry=" << at_entry;
+    EXPECT_TRUE(s.reg(kDWARFRbx).is_top()) << "at_function_entry=" << at_entry;
+    EXPECT_TRUE(s.reg(kDWARFRcx).is_top()) << "at_function_entry=" << at_entry;
   }
 }
 
-TEST(AbsStateTest, SeedFromRowLetsTheCfaRuleOverrideAnUnmentionedRegister) {
+TEST(AbsStateTest, SeedFromRowLetsTheCFARuleOverrideAnUnmentionedRegister) {
   // The CFA rule is applied last precisely so it wins for its own
   // register, even though that register's own RegRule (if any) is
   // processed earlier in the same loop.
-  CfiRow row;
-  row.cfa = CfaRule{CfaRule::Kind::kRegOffset, kDwarfRbp, 16};
+  CFIRow row;
+  row.cfa = CFARule{CFARule::Kind::kRegOffset, kDWARFRbp, 16};
 
   AbsState s = AbsState::SeedFromRow(row, /*at_function_entry=*/false);
-  EXPECT_TRUE(s.reg(kDwarfRbp).IsCfaRel(-16)) << "the CFA rule, not the (absent) per-register rule, wins";
+  EXPECT_TRUE(s.reg(kDWARFRbp).IsCFARel(-16)) << "the CFA rule, not the (absent) per-register rule, wins";
 }
 
-TEST(AbsStateTest, SeedFromRowLeavesRspTopWhenTheCfaIsNotRspBased) {
-  CfiRow row;
-  row.cfa = CfaRule{CfaRule::Kind::kRegOffset, kDwarfRbp, 16};
+TEST(AbsStateTest, SeedFromRowLeavesRspTopWhenTheCFAIsNotRspBased) {
+  CFIRow row;
+  row.cfa = CFARule{CFARule::Kind::kRegOffset, kDWARFRbp, 16};
 
   AbsState s = AbsState::SeedFromRow(row, /*at_function_entry=*/false);
-  EXPECT_TRUE(s.reg(kDwarfRsp).is_top()) << "nothing anchors rsp when the CFA is based on another register";
+  EXPECT_TRUE(s.reg(kDWARFRsp).is_top()) << "nothing anchors rsp when the CFA is based on another register";
 }
 
-TEST(AbsStateTest, SeedFromRowRefusesToGuessWhenTheCfaIsAnExpression) {
-  CfiRow row;
-  row.cfa = CfaRule{CfaRule::Kind::kExpression, 0, 0};
-  EXPECT_TRUE(AbsState::SeedFromRow(row, /*at_function_entry=*/true).reg(kDwarfRsp).is_top());
+TEST(AbsStateTest, SeedFromRowRefusesToGuessWhenTheCFAIsAnExpression) {
+  CFIRow row;
+  row.cfa = CFARule{CFARule::Kind::kExpression, 0, 0};
+  EXPECT_TRUE(AbsState::SeedFromRow(row, /*at_function_entry=*/true).reg(kDWARFRsp).is_top());
 }
 
 }  // namespace

@@ -20,10 +20,10 @@
 namespace unwind_analysis {
 namespace {
 
-class CfiTableTest : public testing::Test {
+class CFITableTest : public testing::Test {
  protected:
   void SetUp() override {
-    absl::StatusOr<std::unique_ptr<ElfImage>> image = ElfImage::Open("testdata/libfixtures.so");
+    absl::StatusOr<std::unique_ptr<ELFImage>> image = ELFImage::Open("testdata/libfixtures.so");
     ASSERT_TRUE(image.ok()) << image.status();
     image_ = std::move(*image);
 
@@ -32,13 +32,13 @@ class CfiTableTest : public testing::Test {
     }
     EnumerateFDEs(static_cast<uintptr_t>(image_->eh_frame_start()) + image_->bias(),
                   static_cast<uintptr_t>(image_->eh_frame_end()) + image_->bias(), [&](uintptr_t addr) {
-                    FdeCfi cfi = ReadFde(image_->ToVaddr(addr), image_->eh_frame_start(), image_->eh_frame_end(),
-                                         image_->bias());
+                    CFI cfi = ReadFDE(image_->ToVaddr(addr), image_->eh_frame_start(), image_->eh_frame_end(),
+                                      image_->bias());
                     fdes_[cfi.pc_begin] = std::move(cfi);
                   });
   }
 
-  const FdeCfi& FdeFor(const std::string& name) {
+  const CFI& FDEFor(const std::string& name) {
     auto sym = symbols_.find(name);
     EXPECT_NE(sym, symbols_.end()) << name;
     auto fde = fdes_.find(sym->second);
@@ -46,14 +46,14 @@ class CfiTableTest : public testing::Test {
     return fde->second;
   }
 
-  std::unique_ptr<ElfImage> image_;
+  std::unique_ptr<ELFImage> image_;
   std::map<std::string, uint64_t> symbols_;
-  std::map<uint64_t, FdeCfi> fdes_;
+  std::map<uint64_t, CFI> fdes_;
 };
 
 // Only the fixtures: the CRT glue the linker adds (__do_global_dtors_aux
 // and friends) legitimately has no unwind info at all.
-TEST_F(CfiTableTest, FdeRangesMatchTheSymbolTable) {
+TEST_F(CFITableTest, FDERangesMatchTheSymbolTable) {
   for (const auto& [name, vaddr] : symbols_) {
     if (name.rfind("good_", 0) != 0 && name.rfind("bad_", 0) != 0 && name.rfind("review_", 0) != 0) {
       continue;
@@ -65,9 +65,9 @@ TEST_F(CfiTableTest, FdeRangesMatchTheSymbolTable) {
   }
 }
 
-TEST_F(CfiTableTest, EveryFdeStartsWithTheCiesReturnAddressRule) {
+TEST_F(CFITableTest, EveryFDEStartsWithTheCIEsReturnAddressRule) {
   for (const auto& [pc, cfi] : fdes_) {
-    EXPECT_EQ(cfi.return_reg, kDwarfRip) << "at 0x" << std::hex << pc;
+    EXPECT_EQ(cfi.return_reg, kDWARFRip) << "at 0x" << std::hex << pc;
     ASSERT_FALSE(cfi.rows.empty());
     EXPECT_EQ(cfi.rows.front().pc_start, cfi.pc_begin);
   }
@@ -82,62 +82,62 @@ TEST_F(CfiTableTest, EveryFdeStartsWithTheCiesReturnAddressRule) {
 //   pop  %r12        .cfi_def_cfa_offset 16
 //   pop  %rbx        .cfi_def_cfa_offset 8
 //   ret
-TEST_F(CfiTableTest, DecodesTheHandWrittenRowsOfGoodCalleeSaved) {
-  const FdeCfi& cfi = FdeFor("good_callee_saved");
+TEST_F(CFITableTest, DecodesTheHandWrittenRowsOfGoodCalleeSaved) {
+  const CFI& cfi = FDEFor("good_callee_saved");
   std::vector<int> offsets;
-  for (const CfiRow& row : cfi.rows) {
-    ASSERT_EQ(row.cfa.kind, CfaRule::Kind::kRegOffset);
-    EXPECT_EQ(row.cfa.reg, kDwarfRsp);
+  for (const CFIRow& row : cfi.rows) {
+    ASSERT_EQ(row.cfa.kind, CFARule::Kind::kRegOffset);
+    EXPECT_EQ(row.cfa.reg, kDWARFRsp);
     offsets.push_back(static_cast<int>(row.cfa.offset));
   }
   EXPECT_THAT(offsets, testing::ElementsAre(8, 16, 24, 32, 24, 16, 8));
 
   // The saves are declared where the directives put them, and the
   // .cfi_restore in the epilogue puts the rules back to the CIE's.
-  const CfiRow* mid = cfi.RowAt(cfi.rows[3].pc_start);
+  const CFIRow* mid = cfi.RowAt(cfi.rows[3].pc_start);
   ASSERT_NE(mid, nullptr);
-  EXPECT_EQ(mid->regs[kDwarfRbx].kind, RegRule::Kind::kAtCfaOffset);
-  EXPECT_EQ(mid->regs[kDwarfRbx].offset, -16);
-  EXPECT_EQ(mid->regs[12].kind, RegRule::Kind::kAtCfaOffset);
+  EXPECT_EQ(mid->regs[kDWARFRbx].kind, RegRule::Kind::kAtCFAOffset);
+  EXPECT_EQ(mid->regs[kDWARFRbx].offset, -16);
+  EXPECT_EQ(mid->regs[12].kind, RegRule::Kind::kAtCFAOffset);
   EXPECT_EQ(mid->regs[12].offset, -24);
-  EXPECT_EQ(mid->regs[kDwarfRip].kind, RegRule::Kind::kAtCfaOffset);
-  EXPECT_EQ(mid->regs[kDwarfRip].offset, -8);
+  EXPECT_EQ(mid->regs[kDWARFRip].kind, RegRule::Kind::kAtCFAOffset);
+  EXPECT_EQ(mid->regs[kDWARFRip].offset, -8);
 }
 
-TEST_F(CfiTableTest, TracksTheFramePointerBecomingTheCfaRegister) {
-  const FdeCfi& cfi = FdeFor("good_frame_pointer");
+TEST_F(CFITableTest, TracksTheFramePointerBecomingTheCFARegister) {
+  const CFI& cfi = FDEFor("good_frame_pointer");
   ASSERT_GE(cfi.rows.size(), 3u);
-  EXPECT_EQ(cfi.rows.front().cfa.reg, kDwarfRsp);
+  EXPECT_EQ(cfi.rows.front().cfa.reg, kDWARFRsp);
   bool saw_rbp_cfa = false;
-  for (const CfiRow& row : cfi.rows) {
-    if (row.cfa.reg == kDwarfRbp && row.cfa.kind == CfaRule::Kind::kRegOffset) {
+  for (const CFIRow& row : cfi.rows) {
+    if (row.cfa.reg == kDWARFRbp && row.cfa.kind == CFARule::Kind::kRegOffset) {
       saw_rbp_cfa = true;
       EXPECT_EQ(row.cfa.offset, 16);
     }
   }
   EXPECT_TRUE(saw_rbp_cfa);
-  EXPECT_EQ(cfi.rows.back().cfa.reg, kDwarfRsp) << "and back to rsp after the pop";
+  EXPECT_EQ(cfi.rows.back().cfa.reg, kDWARFRsp) << "and back to rsp after the pop";
   EXPECT_EQ(cfi.rows.back().cfa.offset, 8);
 }
 
-TEST_F(CfiTableTest, RecordsDwarfExpressionsWithoutEvaluatingThem) {
-  const FdeCfi& cfi = FdeFor("review_cfa_expression");
+TEST_F(CFITableTest, RecordsDWARFExpressionsWithoutEvaluatingThem) {
+  const CFI& cfi = FDEFor("review_cfa_expression");
   ASSERT_GE(cfi.rows.size(), 2u);
-  EXPECT_EQ(cfi.rows.back().cfa.kind, CfaRule::Kind::kExpression);
+  EXPECT_EQ(cfi.rows.back().cfa.kind, CFARule::Kind::kExpression);
 }
 
-TEST_F(CfiTableTest, RowLookupIsBoundedByTheFdeRange) {
-  const FdeCfi& cfi = FdeFor("good_leaf");
+TEST_F(CFITableTest, RowLookupIsBoundedByTheFDERange) {
+  const CFI& cfi = FDEFor("good_leaf");
   EXPECT_NE(cfi.RowAt(cfi.pc_begin), nullptr);
   EXPECT_NE(cfi.RowAt(cfi.pc_end - 1), nullptr);
   EXPECT_EQ(cfi.RowAt(cfi.pc_end), nullptr);
   EXPECT_EQ(cfi.RowAt(cfi.pc_begin - 1), nullptr);
 }
 
-TEST_F(CfiTableTest, MalformedFdeAddressThrowsRatherThanCrashing) {
+TEST_F(CFITableTest, MalformedFDEAddressThrowsRatherThanCrashing) {
   EXPECT_THROW(
-      ReadFde(image_->eh_frame_end() + 0x1000, image_->eh_frame_start(), image_->eh_frame_end(), image_->bias()),
-      EhFrameError);
+      ReadFDE(image_->eh_frame_end() + 0x1000, image_->eh_frame_start(), image_->eh_frame_end(), image_->bias()),
+      EHFrameError);
 }
 
 }  // namespace

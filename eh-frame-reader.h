@@ -29,7 +29,7 @@
 // Adapted from backtrace-test's runtime unwinder. Two changes, both
 // enabled by this tool being offline rather than async-signal-safe:
 //
-//  * failures throw EhFrameError instead of taking a non-local exit
+//  * failures throw EHFrameError instead of taking a non-local exit
 //    that runs no destructors, so one malformed FDE costs one report
 //    line rather than the process;
 //  * FDEs can be enumerated linearly over the whole section, not just
@@ -39,9 +39,9 @@ namespace unwind_analysis {
 
 // Thrown on any malformed or unsupported .eh_frame construct. Callers
 // catch it per-FDE and turn it into a diagnostic.
-class EhFrameError : public std::runtime_error {
+class EHFrameError : public std::runtime_error {
  public:
-  explicit EhFrameError(std::string what) : std::runtime_error(std::move(what)) {
+  explicit EHFrameError(std::string what) : std::runtime_error(std::move(what)) {
   }
 };
 
@@ -158,7 +158,7 @@ class Decoder {
     va_start(args, fmt);
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    throw EhFrameError(buf);
+    throw EHFrameError(buf);
   }
 
   template <typename T>
@@ -869,7 +869,7 @@ void DecodeFDEAt(EHReaderInputs inputs, uintptr_t fde_addr, V* v) {
 //
 // This is what the runtime reader has no need for: it only ever
 // binary-searches .eh_frame_hdr for one PC, while a checker wants every
-// entry. Throws EhFrameError on a malformed record.
+// entry. Throws EHFrameError on a malformed record.
 void EnumerateFDEs(uintptr_t eh_frame_start, uintptr_t eh_frame_end,
                    absl::FunctionRef<void(uintptr_t fde_addr)> callback);
 

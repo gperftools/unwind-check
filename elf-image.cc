@@ -116,7 +116,7 @@ bool LoadSegment::Contains(uint64_t addr, uint64_t size) const {
   return off <= memsz && size <= memsz - off;
 }
 
-ElfImage::~ElfImage() {
+ELFImage::~ELFImage() {
   if (image_ != nullptr) {
     munmap(image_, image_size_);
   }
@@ -125,7 +125,7 @@ ElfImage::~ElfImage() {
   }
 }
 
-bool ElfImage::IsExecutable(uint64_t vaddr, uint64_t size) const {
+bool ELFImage::IsExecutable(uint64_t vaddr, uint64_t size) const {
   for (const LoadSegment& seg : segments_) {
     if (seg.executable() && seg.Contains(vaddr, size)) {
       return true;
@@ -134,7 +134,7 @@ bool ElfImage::IsExecutable(uint64_t vaddr, uint64_t size) const {
   return false;
 }
 
-std::span<const uint8_t> ElfImage::BytesAt(uint64_t vaddr, uint64_t size) const {
+std::span<const uint8_t> ELFImage::BytesAt(uint64_t vaddr, uint64_t size) const {
   for (const LoadSegment& seg : segments_) {
     if (vaddr < seg.vaddr) {
       continue;
@@ -149,7 +149,7 @@ std::span<const uint8_t> ElfImage::BytesAt(uint64_t vaddr, uint64_t size) const 
   return {};
 }
 
-absl::StatusOr<std::unique_ptr<ElfImage>> ElfImage::Open(const std::string& path) {
+absl::StatusOr<std::unique_ptr<ELFImage>> ELFImage::Open(const std::string& path) {
   int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
   if (fd < 0) {
     return absl::NotFoundError(absl::StrFormat("cannot open %s: %s", path, strerror(errno)));
@@ -170,7 +170,7 @@ absl::StatusOr<std::unique_ptr<ElfImage>> ElfImage::Open(const std::string& path
     return absl::InternalError(absl::StrFormat("cannot mmap %s: %s", path, strerror(errno)));
   }
 
-  std::unique_ptr<ElfImage> img{new ElfImage()};
+  std::unique_ptr<ELFImage> img{new ELFImage()};
   img->path_ = path;
   img->file_ = static_cast<const uint8_t*>(mapped);
   img->file_size_ = file_size;

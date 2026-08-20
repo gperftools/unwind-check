@@ -31,14 +31,14 @@ const char* FixturePath() {
 }
 
 struct Checked {
-  FdeResult result;
+  FDEResult result;
   std::vector<std::string> messages;
 };
 
 class FixturesTest : public testing::Test {
  protected:
   static void SetUpTestSuite() {
-    absl::StatusOr<std::unique_ptr<ElfImage>> image = ElfImage::Open(FixturePath());
+    absl::StatusOr<std::unique_ptr<ELFImage>> image = ELFImage::Open(FixturePath());
     ASSERT_TRUE(image.ok()) << image.status();
     image_ = image->release();
 
@@ -53,12 +53,12 @@ class FixturesTest : public testing::Test {
       starts.insert(sym.vaddr);
     }
 
-    FdeChecker checker{*image_, disasm_, FdeChecker::Options{}};
+    FDEChecker checker{*image_, disasm_, FDEChecker::Options{}};
     by_name_ = new std::map<std::string, Checked>();
     EnumerateFDEs(static_cast<uintptr_t>(image_->eh_frame_start()) + image_->bias(),
                   static_cast<uintptr_t>(image_->eh_frame_end()) + image_->bias(), [&](uintptr_t fde_addr) {
-                    FdeCfi cfi = ReadFde(image_->ToVaddr(fde_addr), image_->eh_frame_start(), image_->eh_frame_end(),
-                                         image_->bias());
+                    CFI cfi = ReadFDE(image_->ToVaddr(fde_addr), image_->eh_frame_start(), image_->eh_frame_end(),
+                                      image_->bias());
                     std::string name = symbolizer_->Name(cfi.pc_begin);
                     if (name.empty()) {
                       return;
@@ -80,7 +80,7 @@ class FixturesTest : public testing::Test {
 
   // Address of the n-th instruction of a function, counting from zero.
   static uint64_t InstructionAt(std::string_view name, int index) {
-    const FdeResult& r = Get(name).result;
+    const FDEResult& r = Get(name).result;
     uint64_t pc = r.pc_begin;
     for (int i = 0; i < index; i++) {
       std::span<const uint8_t> bytes = image_->BytesAt(pc, 16);
@@ -91,13 +91,13 @@ class FixturesTest : public testing::Test {
     return pc;
   }
 
-  static ElfImage* image_;
+  static ELFImage* image_;
   static Disassembler* disasm_;
   static Symbolizer* symbolizer_;
   static std::map<std::string, Checked>* by_name_;
 };
 
-ElfImage* FixturesTest::image_ = nullptr;
+ELFImage* FixturesTest::image_ = nullptr;
 Disassembler* FixturesTest::disasm_ = nullptr;
 Symbolizer* FixturesTest::symbolizer_ = nullptr;
 std::map<std::string, Checked>* FixturesTest::by_name_ = nullptr;
@@ -146,7 +146,7 @@ TEST_F(FixturesTest, HoistedStackAdjustmentIsCaughtAtTheRightInstruction) {
   EXPECT_THAT(f.message, HasSubstr("rsp is CFA-16"));
 }
 
-TEST_F(FixturesTest, LatePushCfiIsCaughtAtTheInstructionInBetween) {
+TEST_F(FixturesTest, LatePushCFIIsCaughtAtTheInstructionInBetween) {
   const Checked& c = Get("bad_late_push_cfi");
   ASSERT_FALSE(c.result.findings.empty());
   const Finding& f = c.result.findings.front();
@@ -169,7 +169,7 @@ TEST_F(FixturesTest, IndirectJumpIsFlaggedNotGuessed) {
   EXPECT_THAT(Get("review_indirect_jump").messages, Contains(HasSubstr("unresolved indirect jump")));
 }
 
-TEST_F(FixturesTest, CfaExpressionIsFlaggedNotEvaluated) {
+TEST_F(FixturesTest, CFAExpressionIsFlaggedNotEvaluated) {
   EXPECT_THAT(Get("review_cfa_expression").messages, Contains(HasSubstr("CFA is given by a DWARF expression")));
 }
 

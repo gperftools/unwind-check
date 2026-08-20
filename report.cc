@@ -20,7 +20,7 @@ std::string Location(Symbolizer* sym, uint64_t pc) {
   return absl::StrFormat("0x%x (%s)", pc, source);
 }
 
-void PrintOne(const FdeResult& r, Symbolizer* sym) {
+void PrintOne(const FDEResult& r, Symbolizer* sym) {
   std::string name = sym->Name(r.pc_begin);
   if (name.empty()) {
     name = "<no symbol>";
@@ -42,9 +42,9 @@ void PrintOne(const FdeResult& r, Symbolizer* sym) {
 
 }  // namespace
 
-Summary Summarize(const std::vector<FdeResult>& results) {
+Summary Summarize(const std::vector<FDEResult>& results) {
   Summary s;
-  for (const FdeResult& r : results) {
+  for (const FDEResult& r : results) {
     switch (r.verdict) {
       case Verdict::kBlessed:
         s.blessed++;
@@ -60,12 +60,12 @@ Summary Summarize(const std::vector<FdeResult>& results) {
   return s;
 }
 
-void PrintReport(const std::vector<FdeResult>& results, Symbolizer* symbolizer, const ReportOptions& options) {
+void PrintReport(const std::vector<FDEResult>& results, Symbolizer* symbolizer, const ReportOptions& options) {
   if (!options.summary_only) {
     // Every address the report will mention, resolved in one addr2line
     // run rather than one per finding.
     std::vector<uint64_t> interesting;
-    for (const FdeResult& r : results) {
+    for (const FDEResult& r : results) {
       if (r.verdict == Verdict::kBlessed && !options.verbose) {
         continue;
       }
@@ -78,18 +78,18 @@ void PrintReport(const std::vector<FdeResult>& results, Symbolizer* symbolizer, 
 
     // Mismatches first: they are the findings that claim something is
     // actually wrong.
-    std::vector<const FdeResult*> ordered;
+    std::vector<const FDEResult*> ordered;
     ordered.reserve(results.size());
-    for (const FdeResult& r : results) {
+    for (const FDEResult& r : results) {
       if (r.verdict == Verdict::kBlessed && !options.verbose) {
         continue;
       }
       ordered.push_back(&r);
     }
-    std::stable_sort(ordered.begin(), ordered.end(), [](const FdeResult* a, const FdeResult* b) {
+    std::stable_sort(ordered.begin(), ordered.end(), [](const FDEResult* a, const FDEResult* b) {
       return static_cast<int>(a->verdict) > static_cast<int>(b->verdict);
     });
-    for (const FdeResult* r : ordered) {
+    for (const FDEResult* r : ordered) {
       PrintOne(*r, symbolizer);
     }
     if (!ordered.empty()) {

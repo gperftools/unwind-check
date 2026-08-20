@@ -26,11 +26,11 @@ struct Summary {
   }
 };
 
-Summary Summarize(const std::vector<FdeResult>& results);
+Summary Summarize(const std::vector<FDEResult>& results);
 
 // Prints the per-FDE report and the trailing histogram to stdout.
 // `symbolizer` is consulted for names and, when available, source lines.
-void PrintReport(const std::vector<FdeResult>& results, Symbolizer* symbolizer, const ReportOptions& options);
+void PrintReport(const std::vector<FDEResult>& results, Symbolizer* symbolizer, const ReportOptions& options);
 
 }  // namespace unwind_analysis
 
