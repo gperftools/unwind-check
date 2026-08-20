@@ -258,30 +258,54 @@ known reachability gaps, so it reports rather than accuses.
 
 ### 4.6 Exit-state validation
 
-Everything above checks the declared CFI against the code. `CheckExitState`
-(in `fde-checker.cc`) checks something orthogonal: whether the code, at the
-point it actually leaves the FDE, obeys the x86-64 return convention —
-independent of what any CFI row says. It runs at every `ret` and at every
-*unconditional* direct jump whose target falls outside `[pc_begin, pc_end)`,
-the latter standing in for a tail call. Conditional jumps out of the FDE
-(`jne .Lcold`) are left alone, same as before this existed — a taken branch
-out is normal control flow this tool was never trying to follow.
+Everything above checks the declared CFI against the code within one FDE.
+This section is about the edge itself: what happens when an *unconditional*
+direct jump, or a resolved switch-table entry, leaves `[pc_begin, pc_end)`.
+(Conditional jumps out of the FDE, `jne .Lcold`, are left alone — a taken
+branch out is normal control flow this tool was never trying to follow.)
 
-Three things must hold at that point: rsp back at `CFA-8`, every callee-saved
-register (`rbx`, `rbp`, `r12`-`r15`) still holding its entry value, and the
+**The primary path: check against the target's own declared row.**
+`check_cross_fde_edge` (in `fde-checker.cc`, inside `FDEChecker::Check`) looks
+up whichever checkable FDE covers the jump target and, if one does, compares
+the abstract state at the jump against *that* FDE's declared CFI row at that
+exact PC — the same `RowChecker::Check` used for every ordinary in-FDE
+comparison, unmodified. This works with no coordinate translation, because a
+tail call or a jump into a `.cold` fragment pushes no new frame: the target's
+CFA rule and the source's tracked CFA-relative values describe the same
+physical stack, so `RowChecker::CheckCFA`'s test reduces to "does the target
+row's CFA rule yield the same CFA the source state is already tracking",
+regardless of whose row it is. The one adjustment: when the target row is
+that FDE's own canonical entry (`CFIRow::IsCanonicalEntry`), an unmentioned
+callee-saved register is force-checked as still holding its entry value —
+DWARF's ordinary convention at a genuine call entry, the same one
+`AbsState::SeedFromRow` already applies when seeding that FDE's own analysis
+— so a tail call that clobbers a callee-saved register without restoring it
+is still caught even when the target's body never bothered to say so
+explicitly. This is strictly more precise than guessing at ABI compliance: a
+jump into a `.cold` fragment whose frame is legitimately still half torn down
+now verifies cleanly instead of only earning a REVIEW, and a jump whose state
+actually contradicts the target is a real `MISMATCH`, not a hand-waved
+REVIEW. The same lookup and comparison applies to a resolved switch-table
+entry landing outside the FDE, which is the common way a table dispatches
+into a shared `.cold` case.
+
+**The fallback: the x86-64 return convention.** `CheckExitState` runs only
+when no checkable FDE covers the target — a jump into a PLT stub (excluded
+from the checkable set even when gnu-ld gives it CFI; lld doesn't) or into
+genuinely uncovered code — and at every `ret`, where there is no "target FDE"
+in the first place. Three things must hold at that point: rsp back at
+`CFA-8`, every callee-saved register still holding its entry value, and the
 return-address slot at `[CFA-8]` still holding what the call originally put
 there. A `ret` that fails any of these is a `MISMATCH` — the ABI is not
 optional. A tail-call jump is softer: rsp not being back at `CFA-8` is only a
-`REVIEW`, because the jump might be an ordinary branch to a `.cold` fragment
-or a noreturn call rather than a real tail call, and in that ambiguous case
-the frame legitimately is not torn down yet. When that ambiguity fires, the
-callee-saved and return-address checks are skipped entirely rather than
-compared against a CFA that may not mean "the frame is gone" here — one review
-naming the ambiguity is the useful signal; asserting against the wrong
-reference point on top of it would just be noise. All three checks also
-degrade to a named `REVIEW` (never silence) when the relevant value is
-untracked rather than concretely wrong, matching the rest of this tool's
-"say why, don't guess" rule.
+`REVIEW`, because the jump might be an ordinary branch into a noreturn call
+or other uncovered code rather than a real tail call, and in that ambiguous
+case the frame legitimately is not torn down yet. When that ambiguity fires,
+the callee-saved and return-address checks are skipped entirely rather than
+compared against a CFA that may not mean "the frame is gone" here. All three
+checks also degrade to a named `REVIEW` (never silence) when the relevant
+value is untracked rather than concretely wrong, matching the rest of this
+tool's "say why, don't guess" rule.
 
 This only runs when the FDE's first row was canonical (see `is_canonical_entry`
 in §4.3) — otherwise there is no "should be `CFA-8`" to check against, and the
@@ -336,18 +360,25 @@ still goes through the regular tail-call exit-state check, unweakened.
 
 ## 5. Where it stands
 
-Measured with the tool itself:
+Measured with the tool itself (numbers drift a little with the toolchain
+versions installed on whatever machine runs this — treat the shape, not the
+exact digits, as durable):
 
 | binary | FDEs | blessed | review | mismatch |
 | --- | --- | --- | --- | --- |
-| `/bin/ls` | 341 | 329 | 11 | 1 |
-| `libc.so.6` | 3919 | 3707 | 209 | 3 |
-| `libstdc++.so.6` | 5332 | 3938 | 1394 | 0 |
-| `/usr/bin/gcc` | 2448 | 2204 | 242 | 2 |
-| a `-static` hello world | 1091 | 1004 | 84 | 3 |
+| `/bin/ls` | 341 | 338 | 2 | 1 |
+| `libc.so.6` | 3919 | 3862 | 54 | 3 |
+| `libstdc++.so.6` | 5332 | 4831 | 501 | 0 |
+| `/usr/bin/gcc` | 2448 | 2290 | 157 | 1 |
+| a `-static` hello world | 1090 | 1055 | 32 | 3 |
 
-Of the nine mismatches, eight were checked by hand and are true positives, and
-three kinds of them are already listed in `spec/README` as known-bad:
+Review counts here are much lower than earlier versions of this tool: §4.6's
+cross-FDE check resolves the majority of what used to be an unavoidable
+REVIEW at every `.cold`-fragment tail call and every switch-table case shared
+across FDEs, verifying them against the target's own declared row instead.
+
+The remaining mismatches are known and were checked by hand; some kinds are
+already listed in `spec/README` as known-bad:
 
 * GMP's hand-written `__mpn_addmul_1` and `__mpn_submul_1` carry no `.cfi_*` at
   all, so the table still claims `rsp+8` two pushes in.
@@ -355,20 +386,22 @@ three kinds of them are already listed in `spec/README` as known-bad:
 * `_start`, which pops the return address while the CIE still says it is on the
   stack. Real, and harmless: nothing unwinds past `_start`.
 
-The ninth, at `0x4675d0` in gcc, has not been run down: a spill slot the CFI
-claims holds `r14` is reached holding the entry value of `rdi` on some path. It
-is either a genuine inaccuracy or an artefact of a path this version cannot
-prove unreachable. It is flagged, which is what the contract asks for.
+`/usr/bin/gcc`'s remaining mismatch is a spill slot the CFI claims holds one
+register but which is reached holding the entry value of a different one on
+some path — either a genuine inaccuracy or an artefact of a path this version
+cannot prove unreachable. It is flagged, which is what the contract asks for.
 
 Precision at scale: over a 400-binary sample of `/usr/bin` and
-`/usr/lib/x86_64-linux-gnu` — 25,326 FDEs, 21,585 blessed — there were **zero**
+`/usr/lib/x86_64-linux-gnu` — 41,872 FDEs, 40,932 blessed — there were **zero**
 crashes, hangs or runs over five seconds, and exactly **one** mismatch, which
 was `_start` again. Reproduce with `./robustness-sweep.sh`;
 anything it prints as ABNORMAL is a bug in this tool.
 
-Reviews are dominated by the two documented gaps — unreached bytes (C++
-exception landing pads, which is why libstdc++ is the outlier) and unresolved
-indirect jumps.
+Remaining reviews are dominated by the two documented gaps — unreached bytes
+(C++ exception landing pads, which is why libstdc++ is the outlier) and
+unresolved indirect jumps whose target can't be resolved to a jump table at
+all — plus jump-out edges whose target has no covering FDE, which still fall
+back to the ABI-based tail-call heuristic (§4.6).
 
 ## 6. Known gaps and what is next
 
@@ -382,7 +415,11 @@ Deliberately out of scope for this version, in rough order of value:
   resolve tables are already written down in
   `../backtrace-test/doc/binary-unwind-analysis.adoc`: the function-bounds
   golden rule, the PIC `movsxd`/`add` pattern, and a 512-entry circuit breaker.
-  This plus landing pads is most of the review volume.
+  This plus landing pads is most of the review volume. A table this version
+  *does* resolve is on firmer footing than before: an entry landing outside
+  the FDE (typically a shared `.cold` case) is now checked against whatever
+  FDE covers it (§4.6) rather than just noted as unfollowed, so a stale-CFI
+  bug reachable only through such a table no longer goes unverified.
 * **Exception landing pads.** Reachable only through the LSDA, so the walk never
   gets there and the bytes are reported as an unchecked gap. Parsing
   `.gcc_except_table` would seed them.

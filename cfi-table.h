@@ -70,6 +70,12 @@ struct CFIRow {
   uint64_t pc_start = 0;
   CFARule cfa;
   RegRule regs[kNumDWARFRegs];
+
+  // Whether this row describes the canonical x86-64 state on entry from a
+  // `call`: CFA = rsp+8, with the return address at [CFA-8]. True of a
+  // genuine function entry; false of e.g. a PLT trampoline's target or a
+  // `.cold` fragment reached mid-function.
+  bool IsCanonicalEntry() const;
 };
 
 // One decoded FDE.

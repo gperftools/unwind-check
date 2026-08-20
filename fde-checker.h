@@ -61,16 +61,22 @@ class FDEChecker {
     size_t max_iterations = 200000;
   };
 
-  // `all_fde_ranges` is every known FDE's [pc_begin, pc_end), sorted by
-  // pc_begin. It is used only to validate that a resolved switch-table
-  // entry lands inside *some* FDE (initial-switch-tables-plan.md §3.3) --
-  // not necessarily this one: a shared, ICF'd throw block can be reached
-  // from a table 1.2 MB away in a different FDE (§5). Leaving it empty
-  // simply means no table ever validates, which is safe -- it just costs
-  // the coverage this feature exists to recover.
+  // `all_cfis` is every known checkable FDE, sorted by pc_begin. It backs
+  // two things: validating that a resolved switch-table entry lands inside
+  // *some* FDE (initial-switch-tables-plan.md §3.3) -- not necessarily this
+  // one, since a shared, ICF'd throw block can be reached from a table
+  // 1.2 MB away in a different FDE (§5) -- and looking up the declared CFI
+  // row at a jump target outside this FDE's own range, so a tail call or a
+  // switch-table dispatch into another FDE (typically a `.cold` fragment)
+  // can be checked against what that FDE actually declares instead of
+  // guessed at via the tail-call ABI convention. Leaving it empty simply
+  // means neither lookup ever succeeds, which is safe -- it just costs the
+  // precision these features exist to recover, and any jump whose target
+  // has no entry here (PLT stubs included, since the caller excludes them)
+  // falls back to the ABI-based check.
   FDEChecker(const ELFImage& image, Disassembler* disasm, const Options& options,
-             std::vector<std::pair<uint64_t, uint64_t>> all_fde_ranges = {})
-      : image_(image), disasm_(disasm), options_(options), all_fde_ranges_(std::move(all_fde_ranges)) {
+             std::vector<std::pair<std::pair<uint64_t, uint64_t>, const CFI*>> all_cfis = {})
+      : image_(image), disasm_(disasm), options_(options), cfi_index_(std::move(all_cfis)) {
   }
 
   // `at_function_entry` says a function symbol starts exactly at
@@ -87,11 +93,13 @@ class FDEChecker {
   // resolved absolute targets, or nullopt.
   std::optional<std::vector<uint64_t>> ResolveJumpTable(uint64_t table_addr, uint64_t entries) const;
   bool LandsInsideSomeFDE(uint64_t addr) const;
+  // The checkable FDE covering `pc`, or nullptr if none does.
+  const CFI* CFIContaining(uint64_t pc) const;
 
   const ELFImage& image_;
   Disassembler* const disasm_;
   Options options_;
-  std::vector<std::pair<uint64_t, uint64_t>> all_fde_ranges_;
+  std::vector<std::pair<std::pair<uint64_t, uint64_t>, const CFI*>> cfi_index_;
 };
 
 }  // namespace unwind_analysis

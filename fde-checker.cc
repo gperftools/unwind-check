@@ -6,10 +6,12 @@
 #include <algorithm>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "eh-frame-reader.h"
 #include "insn-semantics.h"
@@ -234,9 +236,29 @@ class RowChecker {
   RowChecker(const FDEChecker::Options& options, FindingSink* sink) : options_(options), sink_(sink) {
   }
 
-  void Check(uint64_t pc, const CFIRow& row, const AbsState& state, const std::string& insn_text) {
+  // `edge_context`, when non-empty, is prefixed onto every finding's
+  // message -- used when `row` is not this instruction's own FDE's row but
+  // a foreign FDE's declared row being checked across a jump-out edge, so
+  // the finding says which edge and which FDE it is about rather than
+  // reading like an ordinary in-FDE disagreement.
+  //
+  // `force_callee_saved_same_value` overrides options_.check_unmentioned_callee_saved
+  // for callee-saved registers `row` leaves unmentioned (kUnset). It exists
+  // for exactly one case: `row` is a foreign FDE's own canonical entry row
+  // (checked via IsCanonicalEntry()). There, silence is not "nothing to
+  // say" the way it usually is within one FDE -- it is the ordinary DWARF
+  // convention that an unmentioned register at a genuine call entry still
+  // holds the caller's value, the same convention AbsState::SeedFromRow
+  // already applies when seeding a canonical entry's own analysis. Without
+  // this, a tail call that clobbers a callee-saved register without
+  // restoring it would go unnoticed whenever the target FDE's own body
+  // never bothered to say so explicitly (which is the common case).
+  void Check(uint64_t pc, const CFIRow& row, const AbsState& state, const std::string& insn_text,
+             std::string_view edge_context = "", bool force_callee_saved_same_value = false) {
     insn_text_ = insn_text;
     pc_ = pc;
+    edge_context_ = edge_context;
+    force_callee_saved_same_value_ = force_callee_saved_same_value;
     CheckCFA(row.cfa, state);
     for (int r = 0; r < kNumDWARFRegs; r++) {
       CheckReg(r, row.regs[r], state);
@@ -245,10 +267,10 @@ class RowChecker {
 
  private:
   void Review(std::string msg) {
-    sink_->Add(Finding::Severity::kReview, pc_, std::move(msg), insn_text_);
+    sink_->Add(Finding::Severity::kReview, pc_, absl::StrCat(edge_context_, msg), insn_text_);
   }
   void Mismatch(std::string msg) {
-    sink_->Add(Finding::Severity::kMismatch, pc_, std::move(msg), insn_text_);
+    sink_->Add(Finding::Severity::kMismatch, pc_, absl::StrCat(edge_context_, msg), insn_text_);
   }
 
   void CheckCFA(const CFARule& cfa, const AbsState& state) {
@@ -292,7 +314,7 @@ class RowChecker {
   void CheckReg(int r, const RegRule& rule, const AbsState& state) {
     switch (rule.kind) {
       case RegRule::Kind::kUnset:
-        if (options_.check_unmentioned_callee_saved && IsCalleeSaved(r)) {
+        if ((options_.check_unmentioned_callee_saved || force_callee_saved_same_value_) && IsCalleeSaved(r)) {
           CheckSameValue(r, state);
         }
         return;
@@ -383,6 +405,8 @@ class RowChecker {
   FindingSink* sink_;
   std::string insn_text_;
   uint64_t pc_ = 0;
+  std::string_view edge_context_;
+  bool force_callee_saved_same_value_ = false;
 };
 
 // Whether the CFI in force at some address actually consults the thing
@@ -472,6 +496,16 @@ bool FallThroughIsReal(const CFI& cfi, const CFIRow* here, uint64_t next, const 
   return CFASatisfiedBy(row->cfa, now) || CFASatisfiedBy(row->cfa, was);
 }
 
+// Checks a `ret`, or a tail-call-style jump whose target has no known FDE
+// to check it against instead (see check_cross_fde_edge in Check() below,
+// which handles every jump target that does), against the x86-64 return
+// convention: rsp back at CFA-8, callee-saved registers restored, the
+// return-address slot untouched. For a `ret` this is the ABI, not
+// optional. For a jump it is a fallback guess -- the target might be a PLT
+// stub (excluded from the checkable FDE set even when one exists, so it
+// always lands here) or genuinely uncovered code, and there is nothing
+// declared to compare against, so this is what "looks like a tail call"
+// has to mean instead.
 void CheckExitState(uint64_t pc, const AbsState& state, const std::string& insn_text, FindingSink* sink,
                     bool at_function_entry, bool is_tail_call) {
   const char* context = is_tail_call ? "tail call" : "return";
@@ -489,8 +523,9 @@ void CheckExitState(uint64_t pc, const AbsState& state, const std::string& insn_
   } else if (!rsp.IsCFARel(-8)) {
     if (is_tail_call) {
       sink->Add(Finding::Severity::kReview, pc,
-                absl::StrFormat("unconditional jump out of FDE with rsp at CFA%+d (should be CFA-8 for a tail call; "
-                                "could be a branch to a cold fragment or noreturn call)",
+                absl::StrFormat("unconditional jump out of FDE to an address with no covering FDE, with rsp at "
+                                "CFA%+d (should be CFA-8 for a tail call; could be a branch to a noreturn call, or "
+                                "into code with no CFI at all)",
                                 static_cast<int>(rsp.delta)),
                 insn_text);
     } else {
@@ -500,11 +535,14 @@ void CheckExitState(uint64_t pc, const AbsState& state, const std::string& insn_
   }
 
   // A tail call whose rsp is not back at CFA-8 already earned the review
-  // above and might just be a branch to a `.cold` fragment rather than a
-  // real tail call -- in which case the frame is not really torn down yet
-  // either, so checking callee-saved registers and the return-address slot
-  // against the ABI's return convention would only add redundant noise on
-  // top of that one review.
+  // above and might just be a branch into a noreturn call or otherwise
+  // uncovered code rather than a real tail call -- in which case the frame
+  // is not really torn down yet either, so checking callee-saved registers
+  // and the return-address slot against the ABI's return convention would
+  // only add redundant noise on top of that one review. (A jump into a
+  // `.cold` fragment with an FDE of its own no longer reaches this
+  // function at all -- it is checked against that FDE's declared row by
+  // check_cross_fde_edge in Check() instead.)
   bool ambiguous_tail_call = is_tail_call && !rsp.IsCFARel(-8);
 
   // 2. Check callee-saved registers
@@ -568,13 +606,21 @@ const char* VerdictName(Verdict v) {
 }
 
 bool FDEChecker::LandsInsideSomeFDE(uint64_t addr) const {
-  auto it = std::upper_bound(all_fde_ranges_.begin(), all_fde_ranges_.end(), addr,
-                             [](uint64_t a, const std::pair<uint64_t, uint64_t>& r) { return a < r.first; });
-  if (it == all_fde_ranges_.begin()) {
-    return false;
+  return CFIContaining(addr) != nullptr;
+}
+
+const CFI* FDEChecker::CFIContaining(uint64_t pc) const {
+  auto it = std::upper_bound(
+      cfi_index_.begin(), cfi_index_.end(), pc,
+      [](uint64_t a, const std::pair<std::pair<uint64_t, uint64_t>, const CFI*>& e) { return a < e.first.first; });
+  if (it == cfi_index_.begin()) {
+    return nullptr;
   }
   --it;
-  return addr >= it->first && addr < it->second;
+  if (pc < it->first.first || pc >= it->first.second) {
+    return nullptr;
+  }
+  return it->second;
 }
 
 std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table_addr, uint64_t entries) const {
@@ -638,6 +684,41 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
   RowChecker row_checker{options_, &sink};
   InsnSemantics semantics{disasm_->handle()};
 
+  // Checks `state` (the abstract state right before an unconditional jump,
+  // or a resolved jump-table entry, at `pc`) against the declared CFI row
+  // at `target`, when some other checkable FDE covers it. This is strictly
+  // more precise than guessing at tail-call-ABI compliance: a jump into
+  // another FDE's `.cold` fragment or a shared switch-table case is
+  // checked against what that FDE actually declares, the same way any
+  // other CFI row is checked in this tool. Returns false when no FDE
+  // covers `target` (a PLT stub is exactly this case, since
+  // RunStructuralChecks excludes PLT-covered FDEs from what the caller
+  // hands us), so the caller can fall back to the ABI-based check.
+  auto check_cross_fde_edge = [&](uint64_t edge_pc, uint64_t target, const AbsState& edge_state,
+                                  const std::string& edge_insn_text) {
+    const CFI* target_cfi = CFIContaining(target);
+    if (target_cfi == nullptr) {
+      return false;
+    }
+    const CFIRow* target_row = target_cfi->RowAt(target);
+    if (target_row == nullptr) {
+      return false;
+    }
+    // Force-check unmentioned callee-saved registers only at the target
+    // FDE's own canonical entry row: there, DWARF convention (and
+    // AbsState::SeedFromRow's own seeding, see §4.3) already treats
+    // silence as "still holds the caller's value", so this just applies
+    // that same convention here instead of leaving a tail-call-breaking
+    // clobber unnoticed because the target's body never bothered to spell
+    // out what a genuine entry implies for free.
+    bool target_is_canonical_entry = target == target_cfi->pc_begin && target_row->IsCanonicalEntry();
+    row_checker.Check(edge_pc, *target_row, edge_state, edge_insn_text,
+                      absl::StrFormat("jump to 0x%llx (FDE at 0x%llx): ", (unsigned long long)target,
+                                      (unsigned long long)target_cfi->fde_addr),
+                      target_is_canonical_entry);
+    return true;
+  };
+
   // Forward dataflow over the instructions reachable from pc_begin by
   // direct control flow. Per-instruction rather than per-block: simpler,
   // and functions are small enough that it does not matter.
@@ -677,10 +758,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     result.verdict = Verdict::kReview;
     return result;
   }
-  bool is_canonical_entry =
-      (first_row->cfa.kind == CFARule::Kind::kRegOffset && first_row->cfa.reg == kDWARFRsp &&
-       first_row->cfa.offset == 8 &&
-       (first_row->regs[kDWARFRip].kind == RegRule::Kind::kAtCFAOffset && first_row->regs[kDWARFRip].offset == -8));
+  bool is_canonical_entry = first_row->IsCanonicalEntry();
 
   if (at_function_entry) {
     // A function entered by `call` has rsp at CFA-8 on its first
@@ -900,11 +978,13 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       } else {
         for (uint64_t target : *targets) {
           if (target < cfi.pc_begin || target >= cfi.pc_end) {
-            sink.Add(Finding::Severity::kReview, pc,
-                     absl::StrFormat("resolved switch-table entry at 0x%llx lands outside this FDE's range; it is "
-                                     "not followed here and is checked on its own as part of whatever FDE covers it",
-                                     static_cast<unsigned long long>(target)),
-                     insn_text);
+            if (!check_cross_fde_edge(pc, target, state, insn_text)) {
+              sink.Add(Finding::Severity::kReview, pc,
+                       absl::StrFormat("resolved switch-table entry at 0x%llx lands outside this FDE's range and no "
+                                       "FDE covers it, so there is no declared row to check it against",
+                                       static_cast<unsigned long long>(target)),
+                       insn_text);
+            }
           }
         }
         // In-range targets were walked in pass 1 and are checked in their
@@ -914,7 +994,9 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       CheckExitState(pc, state, insn_text, &sink, is_canonical_entry, /*is_tail_call=*/false);
     } else if (!outcome.falls_through && outcome.has_direct_target &&
                (outcome.direct_target < cfi.pc_begin || outcome.direct_target >= cfi.pc_end)) {
-      CheckExitState(pc, state, insn_text, &sink, is_canonical_entry, /*is_tail_call=*/true);
+      if (!check_cross_fde_edge(pc, outcome.direct_target, state, insn_text)) {
+        CheckExitState(pc, state, insn_text, &sink, is_canonical_entry, /*is_tail_call=*/true);
+      }
     } else if (outcome.indirect_branch) {
       if (is_canonical_entry && IsExitState(state)) {
         // Indirect tail call (e.g. virtual call or function pointer tail call)

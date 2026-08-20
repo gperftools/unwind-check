@@ -479,3 +479,146 @@ review_switch_table_unguarded:
         ret
         .cfi_endproc
         .size   review_switch_table_unguarded, .-review_switch_table_unguarded
+
+/* ---------------------------------------------------------------- */
+/*
+ * Cross-FDE verification of jump-out edges: when an unconditional jump (or
+ * a resolved switch-table entry) leaves this FDE for an address covered by
+ * some *other* FDE, the state is checked against that FDE's own declared
+ * row instead of being guessed at via the tail-call ABI convention. This
+ * is the shared target for the next two fixtures: no symbol of its own
+ * (playing the role of a `.cold` fragment reached only by a jump), and its
+ * first row is deliberately not the tail-call-compatible CFA-8 -- %rbx is
+ * already spilled and the frame is only half torn down, exactly the shape
+ * a jump into a `.cold` fragment has.
+ */
+.Lcold_fragment_target:
+        .cfi_startproc
+        .cfi_def_cfa_offset 16
+        .cfi_offset %rbx, -16
+        movl    $1, %eax
+        popq    %rbx
+        .cfi_def_cfa_offset 8
+        .cfi_restore %rbx
+        ret
+        .cfi_endproc
+
+/* A jump to .Lcold_fragment_target whose state genuinely matches what it
+ * declares (%rbx spilled, CFA at rsp+16) -- not tail-call-ABI-compliant,
+ * but correctly verified against the target FDE instead of only earning a
+ * REVIEW the way the old ABI-only heuristic would. */
+        .globl  good_jump_to_cold_fragment
+        .type   good_jump_to_cold_fragment, @function
+good_jump_to_cold_fragment:
+        .cfi_startproc
+        pushq   %rbx
+        .cfi_def_cfa_offset 16
+        .cfi_offset %rbx, -16
+        movl    %edi, %eax
+        jmp     .Lcold_fragment_target
+        .cfi_endproc
+        .size   good_jump_to_cold_fragment, .-good_jump_to_cold_fragment
+
+/* Same target, but the jump happens before %rbx is actually spilled -- the
+ * state genuinely contradicts .Lcold_fragment_target's declared row, which
+ * the old heuristic could not have caught (rsp not at CFA-8 was only ever
+ * a REVIEW for a tail call) but the cross-FDE row comparison reports as a
+ * real MISMATCH. */
+        .globl  bad_jump_to_cold_fragment
+        .type   bad_jump_to_cold_fragment, @function
+bad_jump_to_cold_fragment:
+        .cfi_startproc
+        movl    %edi, %eax
+        jmp     .Lcold_fragment_target
+        .cfi_endproc
+        .size   bad_jump_to_cold_fragment, .-bad_jump_to_cold_fragment
+
+/* A jump whose target has no FDE at all (unlike .Lcold_fragment_target
+ * above) -- the fallback ABI-based tail-call check still applies here,
+ * unchanged, and still only REVIEWs since rsp isn't at CFA-8. */
+.Lno_fde_target:
+        ret
+
+        .globl  review_tail_call_no_target_fde
+        .type   review_tail_call_no_target_fde, @function
+review_tail_call_no_target_fde:
+        .cfi_startproc
+        pushq   %rbx
+        .cfi_def_cfa_offset 16
+        .cfi_offset %rbx, -16
+        movl    %edi, %eax
+        jmp     .Lno_fde_target
+        .cfi_endproc
+        .size   review_tail_call_no_target_fde, .-review_tail_call_no_target_fde
+
+/* ---------------------------------------------------------------- */
+/*
+ * The same cross-FDE verification, reached through a resolved switch table
+ * instead of a direct jump: one case is a shared fragment outside this
+ * FDE's own range (again playing the role of a `.cold` case shared across
+ * functions), and it is checked against that fragment's declared row.
+ */
+.Lswitch_cold_target:
+        .cfi_startproc
+        .cfi_def_cfa_offset 16
+        movl    $20, %eax
+        addq    $8, %rsp
+        .cfi_def_cfa_offset 8
+        ret
+        .cfi_endproc
+
+        .section .rodata
+        .align  4
+.Lswitch_cold_table:
+        .long   .Lswitch_cold_case0-.Lswitch_cold_table
+        .long   .Lswitch_cold_target-.Lswitch_cold_table
+        .text
+
+        .globl  good_switch_table_into_cold
+        .type   good_switch_table_into_cold, @function
+good_switch_table_into_cold:
+        .cfi_startproc
+        subq    $8, %rsp
+        .cfi_def_cfa_offset 16
+        movl    %edi, %eax
+        cmpl    $1, %eax
+        ja      .Lswitch_cold_out
+        leaq    .Lswitch_cold_table(%rip), %rcx
+        movslq  (%rcx,%rax,4), %rdx
+        addq    %rcx, %rdx
+        jmp     *%rdx
+.Lswitch_cold_case0:
+        movl    $10, %eax
+.Lswitch_cold_out:
+        addq    $8, %rsp
+        .cfi_def_cfa_offset 8
+        ret
+        .cfi_endproc
+        .size   good_switch_table_into_cold, .-good_switch_table_into_cold
+
+/* Same shape, but the CFA is not adjusted before the dispatch, so the
+ * state at the jump contradicts .Lswitch_cold_target's declared row. */
+        .section .rodata
+        .align  4
+.Lswitch_cold_bad_table:
+        .long   .Lswitch_cold_bad_case0-.Lswitch_cold_bad_table
+        .long   .Lswitch_cold_target-.Lswitch_cold_bad_table
+        .text
+
+        .globl  bad_switch_table_into_cold
+        .type   bad_switch_table_into_cold, @function
+bad_switch_table_into_cold:
+        .cfi_startproc
+        movl    %edi, %eax
+        cmpl    $1, %eax
+        ja      .Lswitch_cold_bad_out
+        leaq    .Lswitch_cold_bad_table(%rip), %rcx
+        movslq  (%rcx,%rax,4), %rdx
+        addq    %rcx, %rdx
+        jmp     *%rdx
+.Lswitch_cold_bad_case0:
+        movl    $10, %eax
+.Lswitch_cold_bad_out:
+        ret
+        .cfi_endproc
+        .size   bad_switch_table_into_cold, .-bad_switch_table_into_cold

@@ -61,14 +61,14 @@ class FixturesTest : public testing::Test {
                     all_cfis.push_back(ReadFDE(image_->ToVaddr(fde_addr), image_->eh_frame_start(),
                                                image_->eh_frame_end(), image_->bias()));
                   });
-    std::vector<std::pair<uint64_t, uint64_t>> all_fde_ranges;
-    all_fde_ranges.reserve(all_cfis.size());
+    std::vector<std::pair<std::pair<uint64_t, uint64_t>, const CFI*>> cfi_index;
+    cfi_index.reserve(all_cfis.size());
     for (const CFI& cfi : all_cfis) {
-      all_fde_ranges.emplace_back(cfi.pc_begin, cfi.pc_end);
+      cfi_index.emplace_back(std::make_pair(cfi.pc_begin, cfi.pc_end), &cfi);
     }
-    std::sort(all_fde_ranges.begin(), all_fde_ranges.end());
+    std::sort(cfi_index.begin(), cfi_index.end());
 
-    FDEChecker checker{*image_, disasm_, FDEChecker::Options{}, all_fde_ranges};
+    FDEChecker checker{*image_, disasm_, FDEChecker::Options{}, cfi_index};
     by_name_ = new std::map<std::string, Checked>();
     for (const CFI& cfi : all_cfis) {
       std::string name = symbolizer_->Name(cfi.pc_begin);
@@ -138,7 +138,12 @@ TEST_F(FixturesTest, EveryFixtureIsPresent) {
                            "review_cfa_expression",
                            "good_switch_table",
                            "bad_switch_table_case",
-                           "review_switch_table_unguarded"}) {
+                           "review_switch_table_unguarded",
+                           "good_jump_to_cold_fragment",
+                           "bad_jump_to_cold_fragment",
+                           "review_tail_call_no_target_fde",
+                           "good_switch_table_into_cold",
+                           "bad_switch_table_into_cold"}) {
     EXPECT_TRUE(by_name_->contains(name)) << name << " has no FDE";
   }
 }
@@ -206,8 +211,11 @@ TEST_F(FixturesTest, ReturnWithWrongCalleeSavedRegisterIsCaught) {
 }
 
 TEST_F(FixturesTest, TailCallWithWrongCalleeSavedRegisterIsCaught) {
+  // good_leaf, the tail-call target, has an FDE of its own, so this is now
+  // checked against its declared (canonical) entry row rather than the
+  // generic tail-call-ABI fallback -- same verdict, different message.
   EXPECT_THAT(Get("bad_tail_call_wrong_reg_restored").messages,
-              Contains(HasSubstr("tail call with callee-saved register rbx holding entry r12")));
+              Contains(HasSubstr("CFI says rbx still holds its entry value, but it holds entry r12")));
 }
 
 TEST_F(FixturesTest, ReturnWithUntrackedCalleeSavedIsReview) {
@@ -234,6 +242,39 @@ TEST_F(FixturesTest, StaleCFIInASwitchCaseBodyIsCaught) {
 
 TEST_F(FixturesTest, UnguardedIndirectJumpStaysReviewRatherThanBeingResolvedOnAGuess) {
   EXPECT_THAT(Get("review_switch_table_unguarded").messages, Contains(HasSubstr("unresolved indirect jump")));
+}
+
+TEST_F(FixturesTest, JumpIntoColdFragmentIsCheckedAgainstItsOwnDeclaredRow) {
+  // Not tail-call-ABI-compliant (rsp isn't at CFA-8), but it matches
+  // exactly what the target FDE declares, so this must go fully blessed
+  // rather than earning the old heuristic's REVIEW.
+  const Checked& c = Get("good_jump_to_cold_fragment");
+  EXPECT_EQ(c.result.verdict, Verdict::kBlessed);
+  EXPECT_TRUE(c.messages.empty()) << testing::PrintToString(c.messages);
+}
+
+TEST_F(FixturesTest, JumpIntoColdFragmentWithWrongStateIsAMismatch) {
+  const Checked& c = Get("bad_jump_to_cold_fragment");
+  ASSERT_FALSE(c.result.findings.empty());
+  const Finding& f = c.result.findings.front();
+  EXPECT_EQ(f.severity, Finding::Severity::kMismatch);
+  EXPECT_EQ(f.pc, InstructionAt("bad_jump_to_cold_fragment", 1));  // the jmp
+  EXPECT_THAT(f.message, HasSubstr("jump to"));
+  EXPECT_THAT(f.message, HasSubstr("declared CFA is rsp+16"));
+}
+
+TEST_F(FixturesTest, TailCallToAnAddressWithNoFDEStillUsesTheABIFallback) {
+  EXPECT_THAT(Get("review_tail_call_no_target_fde").messages, Contains(HasSubstr("no covering FDE")));
+}
+
+TEST_F(FixturesTest, SwitchTableCaseInAnotherFDEIsCheckedAgainstItsDeclaredRow) {
+  const Checked& c = Get("good_switch_table_into_cold");
+  EXPECT_EQ(c.result.verdict, Verdict::kBlessed);
+  EXPECT_TRUE(c.messages.empty()) << testing::PrintToString(c.messages);
+}
+
+TEST_F(FixturesTest, SwitchTableCaseInAnotherFDEWithWrongStateIsAMismatch) {
+  EXPECT_THAT(Get("bad_switch_table_into_cold").messages, Contains(HasSubstr("declared CFA is rsp+16")));
 }
 
 TEST_F(FixturesTest, CFAExpressionIsFlaggedNotEvaluated) {

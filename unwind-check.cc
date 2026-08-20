@@ -255,21 +255,23 @@ int Run(const std::string& path) {
     }
   }
 
-  // Every structurally valid FDE's PC range, sorted, so the checker can
-  // tell whether a resolved switch-table entry lands inside *some* FDE
-  // (not necessarily the one being checked -- see fde-checker.h).
-  std::vector<std::pair<uint64_t, uint64_t>> all_fde_ranges;
-  all_fde_ranges.reserve(checkable.size());
+  // Every structurally valid FDE, sorted by pc_begin, so the checker can
+  // tell whether a resolved switch-table entry lands inside *some* FDE (not
+  // necessarily the one being checked), and can look up the declared CFI
+  // row at a jump target outside the FDE it is currently checking -- see
+  // fde-checker.h.
+  std::vector<std::pair<std::pair<uint64_t, uint64_t>, const CFI*>> cfi_index;
+  cfi_index.reserve(checkable.size());
   for (const CFI* cfi : checkable) {
-    all_fde_ranges.emplace_back(cfi->pc_begin, cfi->pc_end);
+    cfi_index.emplace_back(std::make_pair(cfi->pc_begin, cfi->pc_end), cfi);
   }
-  std::sort(all_fde_ranges.begin(), all_fde_ranges.end());
+  std::sort(cfi_index.begin(), cfi_index.end());
 
   FDEChecker::Options options;
   options.check_unmentioned_callee_saved = absl::GetFlag(FLAGS_check_unmentioned_callee_saved);
   options.report_coverage_gaps = absl::GetFlag(FLAGS_report_coverage_gaps);
   options.max_findings_per_fde = static_cast<size_t>(std::max(1, absl::GetFlag(FLAGS_max_findings)));
-  FDEChecker checker{image, disasm, options, all_fde_ranges};
+  FDEChecker checker{image, disasm, options, cfi_index};
 
   // Where a function symbol starts, the FDE's first row is checkable
   // against the canonical entry state. Elsewhere -- PLT stubs, the cold

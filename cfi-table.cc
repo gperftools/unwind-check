@@ -224,6 +224,11 @@ std::string RegRule::ToString() const {
   return "<?>";
 }
 
+bool CFIRow::IsCanonicalEntry() const {
+  return cfa.kind == CFARule::Kind::kRegOffset && cfa.reg == kDWARFRsp && cfa.offset == 8 &&
+         regs[kDWARFRip].kind == RegRule::Kind::kAtCFAOffset && regs[kDWARFRip].offset == -8;
+}
+
 const CFIRow* CFI::RowAt(uint64_t pc) const {
   if (pc < pc_begin || pc >= pc_end || rows.empty()) {
     return nullptr;
