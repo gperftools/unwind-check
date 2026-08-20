@@ -12,3 +12,15 @@
 
 * for exception pads at least when they land in our FDE check that CFI
   state matches CFI state for the range of instructions of "call-site".
+
+* switch calls for PIE/PIC look pretty much like this:
+1a703:       48 8d 3d f6 b2 fe ff    lea    -0x14d0a(%rip),%rdi        # 5a00 <__abi_tag+0x5704>
+1a70a:       48 63 04 87             movslq (%rdi,%rax,4),%rax
+1a70e:       48 01 f8                add    %rdi,%rax
+1a711:       ff e0                   jmp    *%rax
+
+So adding known-constant and (loaded with sign-extension from possible
+switch table) could be simple-ish AbsVal extensions and get us some
+switch table handling. Different indexes we could either handle by
+trying to track ranges (e.g. %rax above) or just scanning from 0 until
+table is referring to "our" FDE.
