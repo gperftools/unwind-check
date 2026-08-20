@@ -132,10 +132,10 @@ std::vector<uint64_t> ReadLsdaLandingPads(const ElfImage& image, uint64_t lsda_v
 
   std::vector<uint64_t> landing_pads;
   while (cur.vaddr() < call_site_table_end) {
-    cur.ReadEncoded(call_site_encoding);                          // call-site start; unused
-    cur.ReadEncoded(call_site_encoding);                          // call-site length; unused
+    cur.ReadEncoded(call_site_encoding);  // call-site start; unused
+    cur.ReadEncoded(call_site_encoding);  // call-site length; unused
     uint64_t landing_pad_offset = cur.ReadEncoded(call_site_encoding);
-    cur.ReadUleb128();                                            // action table index; unused
+    cur.ReadUleb128();  // action table index; unused
 
     if (landing_pad_offset != 0) {
       landing_pads.push_back(lpstart + landing_pad_offset);

@@ -380,17 +380,17 @@ TEST(AbsStateTest, JoinImportsABottomSlotOnlyIncomingNames) {
 
 TEST(AbsStateTest, JoinOrderDoesNotMatterForRegisters) {
   AbsState a;
-  a.SetReg(kDwarfRax, AbsVal::CfaRel(8));                // concrete only on a
-  a.SetReg(kDwarfRbx, AbsVal::Bottom());                 // already conflicting on a
-  a.SetReg(kDwarfRcx, AbsVal::OrigReg(kDwarfRcx));       // agrees with b
-  a.SetReg(kDwarfRdx, AbsVal::CfaRel(-16));              // disagrees with b
+  a.SetReg(kDwarfRax, AbsVal::CfaRel(8));           // concrete only on a
+  a.SetReg(kDwarfRbx, AbsVal::Bottom());            // already conflicting on a
+  a.SetReg(kDwarfRcx, AbsVal::OrigReg(kDwarfRcx));  // agrees with b
+  a.SetReg(kDwarfRdx, AbsVal::CfaRel(-16));         // disagrees with b
   // kDwarfRsi left at top on a.
 
   AbsState b;
-  b.SetReg(kDwarfRbx, AbsVal::CfaRel(0));                // concrete meeting a's bottom
+  b.SetReg(kDwarfRbx, AbsVal::CfaRel(0));  // concrete meeting a's bottom
   b.SetReg(kDwarfRcx, AbsVal::OrigReg(kDwarfRcx));
   b.SetReg(kDwarfRdx, AbsVal::CfaRel(-24));
-  b.SetReg(kDwarfRsi, AbsVal::CfaRel(32));               // concrete only on b
+  b.SetReg(kDwarfRsi, AbsVal::CfaRel(32));  // concrete only on b
 
   AbsState merged_a_into_b = b;
   std::vector<JoinConflict> conflicts_a_into_b;
@@ -406,16 +406,16 @@ TEST(AbsStateTest, JoinOrderDoesNotMatterForRegisters) {
 
 TEST(AbsStateTest, JoinOrderDoesNotMatterForSlots) {
   AbsState a;
-  a.SetSlot(-8, AbsVal::OrigReg(kDwarfRbx));    // only on a
-  a.SetSlot(-16, AbsVal::Bottom());             // already conflicting on a
-  a.SetSlot(-24, AbsVal::OrigReg(kDwarfRbp));   // agrees with b
-  a.SetSlot(-32, AbsVal::CfaRel(-40));          // disagrees with b
+  a.SetSlot(-8, AbsVal::OrigReg(kDwarfRbx));   // only on a
+  a.SetSlot(-16, AbsVal::Bottom());            // already conflicting on a
+  a.SetSlot(-24, AbsVal::OrigReg(kDwarfRbp));  // agrees with b
+  a.SetSlot(-32, AbsVal::CfaRel(-40));         // disagrees with b
 
   AbsState b;
-  b.SetSlot(-16, AbsVal::OrigReg(kDwarfRbx));   // concrete meeting a's bottom
+  b.SetSlot(-16, AbsVal::OrigReg(kDwarfRbx));  // concrete meeting a's bottom
   b.SetSlot(-24, AbsVal::OrigReg(kDwarfRbp));
   b.SetSlot(-32, AbsVal::CfaRel(-48));
-  b.SetSlot(-40, AbsVal::OrigReg(12));          // r12, only on b
+  b.SetSlot(-40, AbsVal::OrigReg(12));  // r12, only on b
 
   AbsState merged_a_into_b = b;
   std::vector<JoinConflict> conflicts_a_into_b;
