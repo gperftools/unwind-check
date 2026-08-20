@@ -469,72 +469,72 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
     sink.Add(Finding::Severity::kReview, cfi.pc_begin,
              absl::StrFormat("analysis gave up after %d dataflow steps", static_cast<int>(options_.max_iterations)),
              "");
-  } else {
-    // Pass 2: Verify settled states against declared CFI rows in deterministic (sorted PC) order.
-    std::vector<uint64_t> reached_pcs;
-    reached_pcs.reserve(in_states.size());
-    for (const auto& [pc, _] : in_states) {
-      reached_pcs.push_back(pc);
+  }
+
+  // Pass 2: Verify settled states against declared CFI rows in deterministic (sorted PC) order.
+  std::vector<uint64_t> reached_pcs;
+  reached_pcs.reserve(in_states.size());
+  for (const auto& [pc, _] : in_states) {
+    reached_pcs.push_back(pc);
+  }
+  std::sort(reached_pcs.begin(), reached_pcs.end());
+
+  for (uint64_t pc : reached_pcs) {
+    const AbsState& state = in_states[pc];
+
+    std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
+    const cs_insn* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
+    if (insn == nullptr) {
+      sink.Add(Finding::Severity::kReview, pc, "cannot decode the instruction at this address", "");
+      continue;
     }
-    std::sort(reached_pcs.begin(), reached_pcs.end());
+    if (pc + insn->size > cfi.pc_end) {
+      sink.Add(Finding::Severity::kReview, pc, "instruction runs past the end of the FDE's PC range",
+               Disassembler::Text(*insn));
+      continue;
+    }
+    std::string insn_text = Disassembler::Text(*insn);
+    result.instructions_checked++;
 
-    for (uint64_t pc : reached_pcs) {
-      const AbsState& state = in_states[pc];
+    // The row at pc describes the state when RIP == pc, so compare
+    // before applying the instruction, not after.
+    const CfiRow* row = cfi.RowAt(pc);
+    if (row == nullptr) {
+      sink.Add(Finding::Severity::kReview, pc, "no CFI row covers this address", insn_text);
+    } else {
+      row_checker.Check(pc, *row, state, insn_text);
+    }
 
-      std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
-      const cs_insn* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
-      if (insn == nullptr) {
-        sink.Add(Finding::Severity::kReview, pc, "cannot decode the instruction at this address", "");
-        continue;
-      }
-      if (pc + insn->size > cfi.pc_end) {
-        sink.Add(Finding::Severity::kReview, pc, "instruction runs past the end of the FDE's PC range",
-                 Disassembler::Text(*insn));
-        continue;
-      }
-      std::string insn_text = Disassembler::Text(*insn);
-      result.instructions_checked++;
-
-      // The row at pc describes the state when RIP == pc, so compare
-      // before applying the instruction, not after.
-      const CfiRow* row = cfi.RowAt(pc);
-      if (row == nullptr) {
-        sink.Add(Finding::Severity::kReview, pc, "no CFI row covers this address", insn_text);
-      } else {
-        row_checker.Check(pc, *row, state, insn_text);
-      }
-
-      auto it_conflicts = join_conflicts.find(pc);
-      if (it_conflicts != join_conflicts.end()) {
-        for (const JoinConflict& c : it_conflicts->second) {
-          if (row == nullptr || !RowDependsOn(*row, c)) {
-            continue;
-          }
-          // .eh_frame declares one state per PC, so two edges arriving here
-          // with different values cannot both match the single row covering
-          // this address -- which makes this either the compiler bug we are
-          // hunting or a gap in our own reachability. This version has known
-          // gaps (it does not know which calls never return, and it does not
-          // resolve jump tables), so it reports rather than accuses.
-          sink.Add(Finding::Severity::kReview, pc,
-                   absl::StrFormat("paths into this address disagree: %s -- one of them must contradict the single CFI "
-                                   "row here, unless one of them is not really reachable",
-                                   c.Describe()),
-                   "");
+    auto it_conflicts = join_conflicts.find(pc);
+    if (it_conflicts != join_conflicts.end()) {
+      for (const JoinConflict& c : it_conflicts->second) {
+        if (row == nullptr || !RowDependsOn(*row, c)) {
+          continue;
         }
-      }
-
-      AbsState state_copy = state;
-      TransferOutcome outcome = semantics.Transfer(*insn, &state_copy);
-      if (outcome.review_reason != nullptr) {
-        sink.Add(Finding::Severity::kReview, pc, outcome.review_reason, insn_text);
-      }
-      if (outcome.indirect_branch) {
+        // .eh_frame declares one state per PC, so two edges arriving here
+        // with different values cannot both match the single row covering
+        // this address -- which makes this either the compiler bug we are
+        // hunting or a gap in our own reachability. This version has known
+        // gaps (it does not know which calls never return, and it does not
+        // resolve jump tables), so it reports rather than accuses.
         sink.Add(Finding::Severity::kReview, pc,
-                 "unresolved indirect jump; jump tables are not resolved in this version, so the code it reaches "
-                 "went unchecked",
-                 insn_text);
+                 absl::StrFormat("paths into this address disagree: %s -- one of them must contradict the single CFI "
+                                 "row here, unless one of them is not really reachable",
+                                 c.Describe()),
+                 "");
       }
+    }
+
+    AbsState state_copy = state;
+    TransferOutcome outcome = semantics.Transfer(*insn, &state_copy);
+    if (outcome.review_reason != nullptr) {
+      sink.Add(Finding::Severity::kReview, pc, outcome.review_reason, insn_text);
+    }
+    if (outcome.indirect_branch) {
+      sink.Add(Finding::Severity::kReview, pc,
+               "unresolved indirect jump; jump tables are not resolved in this version, so the code it reaches "
+               "went unchecked",
+               insn_text);
     }
 
     if (options_.report_coverage_gaps) {
