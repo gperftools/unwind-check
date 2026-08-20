@@ -342,7 +342,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       if (mem.base == X86_REG_RIP && mem.index == X86_REG_INVALID) {
         uint64_t target = insn.address + insn.size + static_cast<int64_t>(mem.disp);
         VLOG(1) << absl::StrFormat("0x%llx: lea rip-relative -> reg %d = kConst(0x%llx)",
-                                    (unsigned long long)insn.address, d, (unsigned long long)target);
+                                   (unsigned long long)insn.address, d, (unsigned long long)target);
         state->SetReg(d, AbsVal::Const(static_cast<int64_t>(target)));
         return out;
       }
@@ -471,7 +471,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
           }
           if (resolved.has_value()) {
             VLOG(1) << absl::StrFormat("0x%llx: %s -> reg %d = kJumpTarget(%s)", (unsigned long long)insn.address,
-                                        insn.id == X86_INS_ADD ? "add" : "sub", d0, resolved->ToString());
+                                       insn.id == X86_INS_ADD ? "add" : "sub", d0, resolved->ToString());
             state->SetReg(d0, *resolved);
             return out;
           }

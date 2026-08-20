@@ -65,7 +65,7 @@ std::optional<BoundGuard> FindGuardBound(uint64_t branch_pc, bool is_jae, const 
     const cs_insn* insn = bytes.empty() ? nullptr : disasm->DecodeOne(bytes.data(), bytes.size(), pc);
     if (insn == nullptr) {
       VLOG(1) << absl::StrFormat("FindGuardBound(0x%llx): could not decode instruction at 0x%llx, giving up",
-                                  (unsigned long long)branch_pc, (unsigned long long)pc);
+                                 (unsigned long long)branch_pc, (unsigned long long)pc);
       return std::nullopt;
     }
     cs_regs read;
@@ -101,20 +101,20 @@ std::optional<BoundGuard> FindGuardBound(uint64_t branch_pc, bool is_jae, const 
     int r = InsnSemantics::DWARFRegOf(a.reg);
     if (r < 0) {
       VLOG(1) << absl::StrFormat("FindGuardBound(0x%llx): cmp register at 0x%llx has no DWARF number, giving up",
-                                  (unsigned long long)branch_pc, (unsigned long long)pc);
+                                 (unsigned long long)branch_pc, (unsigned long long)pc);
       return std::nullopt;
     }
     uint64_t imm = static_cast<uint64_t>(b.imm);
     if (is_jae) {
       if (imm == 0) {
         VLOG(1) << absl::StrFormat("FindGuardBound(0x%llx): jae guard imm==0, imm-1 would underflow, giving up",
-                                    (unsigned long long)branch_pc);
+                                   (unsigned long long)branch_pc);
         return std::nullopt;  // imm-1 would underflow: not a usable bound
       }
       imm -= 1;
     }
     VLOG(1) << absl::StrFormat("FindGuardBound(0x%llx): found guard from cmp at 0x%llx -- reg %d ubound=%llu",
-                                (unsigned long long)branch_pc, (unsigned long long)pc, r, (unsigned long long)imm);
+                               (unsigned long long)branch_pc, (unsigned long long)pc, r, (unsigned long long)imm);
     return BoundGuard{r, imm};
   }
   VLOG(1) << absl::StrFormat("FindGuardBound(0x%llx): hop limit reached, giving up", (unsigned long long)branch_pc);
@@ -153,8 +153,8 @@ void UpdateUBoundsAfterTransfer(csh handle, const cs_insn& insn, AbsState* state
         std::optional<uint64_t> carried = state->UBound(s);
         if (carried.has_value()) {
           VLOG(1) << absl::StrFormat("0x%llx: %s carries ubound[%d]=%llu to ubound[%d]",
-                                      (unsigned long long)insn.address, Disassembler::Text(insn), s,
-                                      (unsigned long long)*carried, d);
+                                     (unsigned long long)insn.address, Disassembler::Text(insn), s,
+                                     (unsigned long long)*carried, d);
           state->SetUBound(d, *carried);
           return;
         }
@@ -167,7 +167,7 @@ void UpdateUBoundsAfterTransfer(csh handle, const cs_insn& insn, AbsState* state
   uint8_t write_count = 0;
   if (cs_regs_access(handle, &insn, read, &read_count, written, &write_count) != CS_ERR_OK) {
     VLOG(1) << absl::StrFormat("0x%llx: %s -- cs_regs_access failed, clearing all ubounds",
-                                (unsigned long long)insn.address, Disassembler::Text(insn));
+                               (unsigned long long)insn.address, Disassembler::Text(insn));
     for (int r = 0; r < kNumGPRs; r++) {
       state->ClearUBound(r);
     }
@@ -181,13 +181,13 @@ void UpdateUBoundsAfterTransfer(csh handle, const cs_insn& insn, AbsState* state
     const AbsVal& v = state->reg(d);
     if ((v.IsTableEntry() || v.IsJumpTarget()) && v.IndexReg() == d) {
       VLOG(1) << absl::StrFormat("0x%llx: %s writes reg %d, but it's the index reg of its own %s -- preserving ubound",
-                                  (unsigned long long)insn.address, Disassembler::Text(insn), d,
-                                  v.IsTableEntry() ? "kTableEntry" : "kJumpTarget");
+                                 (unsigned long long)insn.address, Disassembler::Text(insn), d,
+                                 v.IsTableEntry() ? "kTableEntry" : "kJumpTarget");
       continue;
     }
     if (state->UBound(d).has_value()) {
       VLOG(1) << absl::StrFormat("0x%llx: %s clears ubound[%d] (was %llu)", (unsigned long long)insn.address,
-                                  Disassembler::Text(insn), d, (unsigned long long)*state->UBound(d));
+                                 Disassembler::Text(insn), d, (unsigned long long)*state->UBound(d));
     }
     state->ClearUBound(d);
   }
@@ -579,24 +579,24 @@ bool FDEChecker::LandsInsideSomeFDE(uint64_t addr) const {
 
 std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table_addr, uint64_t entries) const {
   VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%llx, %llu entries)", (unsigned long long)table_addr,
-                              (unsigned long long)entries);
+                             (unsigned long long)entries);
   if (entries == 0 || entries > kMaxJumpTableEntries) {
     VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%llx): entries=%llu out of [1,%llu], rejecting",
-                                (unsigned long long)table_addr, (unsigned long long)entries,
-                                (unsigned long long)kMaxJumpTableEntries);
+                               (unsigned long long)table_addr, (unsigned long long)entries,
+                               (unsigned long long)kMaxJumpTableEntries);
     return std::nullopt;
   }
   uint64_t size = entries * 4;
   if (!image_.IsFileBackedNonExecutable(table_addr, size)) {
     VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%llx): not file-backed & non-executable for %llu bytes, rejecting",
-                                (unsigned long long)table_addr, (unsigned long long)size);
+                               (unsigned long long)table_addr, (unsigned long long)size);
     return std::nullopt;
   }
   std::span<const uint8_t> bytes = image_.BytesAt(table_addr, size);
   if (bytes.size() != size) {
     VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%llx): could only read %llu of %llu bytes, rejecting",
-                                (unsigned long long)table_addr, (unsigned long long)bytes.size(),
-                                (unsigned long long)size);
+                               (unsigned long long)table_addr, (unsigned long long)bytes.size(),
+                               (unsigned long long)size);
     return std::nullopt;
   }
   std::vector<uint64_t> targets;
@@ -606,9 +606,10 @@ std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table
     memcpy(&rel, bytes.data() + i * 4, 4);
     uint64_t target = table_addr + static_cast<int64_t>(rel);
     if (!LandsInsideSomeFDE(target)) {
-      VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%llx): entry %llu -> 0x%llx lands outside any FDE, rejecting "
-                                  "whole table",
-                                  (unsigned long long)table_addr, (unsigned long long)i, (unsigned long long)target);
+      VLOG(1) << absl::StrFormat(
+          "ResolveJumpTable(0x%llx): entry %llu -> 0x%llx lands outside any FDE, rejecting "
+          "whole table",
+          (unsigned long long)table_addr, (unsigned long long)i, (unsigned long long)target);
       return std::nullopt;
     }
     std::span<const uint8_t> tbytes = image_.BytesAt(target, 16);
@@ -622,7 +623,7 @@ std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table
     targets.push_back(target);
   }
   VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%llx): resolved all %llu entries", (unsigned long long)table_addr,
-                              (unsigned long long)entries);
+                             (unsigned long long)entries);
   return targets;
 }
 
@@ -790,8 +791,8 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
           std::optional<BoundGuard> guard = FindGuardBound(pc, is_jae, image_, disasm_, cfi.pc_end, fallthrough_pred);
           if (guard.has_value()) {
             VLOG(1) << absl::StrFormat("0x%llx: %s taken-edge guard sets ubound[%d]=%llu on fall-through to 0x%llx",
-                                        (unsigned long long)pc, is_jae ? "jae" : "ja", guard->reg,
-                                        (unsigned long long)guard->ubound, (unsigned long long)next);
+                                       (unsigned long long)pc, is_jae ? "jae" : "ja", guard->reg,
+                                       (unsigned long long)guard->ubound, (unsigned long long)next);
             fallthrough_state.SetUBound(guard->reg, guard->ubound);
           }
         }
