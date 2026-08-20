@@ -408,7 +408,8 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
         break;
       }
       uint64_t table = static_cast<uint64_t>(base_val.ConstValue()) + mem.disp;
-      state->SetReg(d, AbsVal::TableEntry(table, static_cast<uint8_t>(idx_reg), static_cast<uint64_t>(base_val.ConstValue())));
+      state->SetReg(
+          d, AbsVal::TableEntry(table, static_cast<uint8_t>(idx_reg), static_cast<uint64_t>(base_val.ConstValue())));
       return out;
     }
 

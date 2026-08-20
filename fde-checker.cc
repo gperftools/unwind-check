@@ -453,8 +453,7 @@ void CheckExitState(uint64_t pc, const AbsState& state, const std::string& insn_
                 insn_text);
     } else {
       sink->Add(Finding::Severity::kMismatch, pc,
-                absl::StrFormat("return with rsp at CFA%+d (should be CFA-8)", static_cast<int>(rsp.delta)),
-                insn_text);
+                absl::StrFormat("return with rsp at CFA%+d (should be CFA-8)", static_cast<int>(rsp.delta)), insn_text);
     }
   }
 
@@ -471,14 +470,14 @@ void CheckExitState(uint64_t pc, const AbsState& state, const std::string& insn_
     for (int r : kCalleeSaved) {
       const AbsVal& v = state.reg(r);
       if (v.is_unknown()) {
-        sink->Add(Finding::Severity::kReview, pc,
-                  absl::StrFormat("%s with untracked callee-saved register %s (%s)", context, DWARFRegName(r),
-                                  v.ToString()),
-                  insn_text);
+        sink->Add(
+            Finding::Severity::kReview, pc,
+            absl::StrFormat("%s with untracked callee-saved register %s (%s)", context, DWARFRegName(r), v.ToString()),
+            insn_text);
       } else if (!v.IsOrigReg(r)) {
         sink->Add(Finding::Severity::kMismatch, pc,
-                  absl::StrFormat("%s with callee-saved register %s holding %s (entry value was not restored)",
-                                  context, DWARFRegName(r), v.ToString()),
+                  absl::StrFormat("%s with callee-saved register %s holding %s (entry value was not restored)", context,
+                                  DWARFRegName(r), v.ToString()),
                   insn_text);
       }
     }
@@ -492,10 +491,10 @@ void CheckExitState(uint64_t pc, const AbsState& state, const std::string& insn_
                 absl::StrFormat("%s with untracked return address slot at [CFA-8] (%s)", context, ra.ToString()),
                 insn_text);
     } else if (!ra.IsOrigReg(kDWARFRip)) {
-      sink->Add(Finding::Severity::kMismatch, pc,
-                absl::StrFormat("%s with return address slot at [CFA-8] holding %s (overwritten)", context,
-                                ra.ToString()),
-                insn_text);
+      sink->Add(
+          Finding::Severity::kMismatch, pc,
+          absl::StrFormat("%s with return address slot at [CFA-8] holding %s (overwritten)", context, ra.ToString()),
+          insn_text);
     }
   }
 }
@@ -617,11 +616,10 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     result.verdict = Verdict::kReview;
     return result;
   }
-  bool is_canonical_entry = (first_row->cfa.kind == CFARule::Kind::kRegOffset &&
-                              first_row->cfa.reg == kDWARFRsp &&
-                              first_row->cfa.offset == 8 &&
-                              (first_row->regs[kDWARFRip].kind == RegRule::Kind::kAtCFAOffset &&
-                               first_row->regs[kDWARFRip].offset == -8));
+  bool is_canonical_entry =
+      (first_row->cfa.kind == CFARule::Kind::kRegOffset && first_row->cfa.reg == kDWARFRsp &&
+       first_row->cfa.offset == 8 &&
+       (first_row->regs[kDWARFRip].kind == RegRule::Kind::kAtCFAOffset && first_row->regs[kDWARFRip].offset == -8));
 
   if (at_function_entry) {
     // A function entered by `call` has rsp at CFA-8 on its first
@@ -747,7 +745,8 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       }
     }
     if (outcome.has_jump_table) {
-      std::optional<std::vector<uint64_t>> targets = ResolveJumpTable(outcome.jump_table_addr, outcome.jump_table_entries);
+      std::optional<std::vector<uint64_t>> targets =
+          ResolveJumpTable(outcome.jump_table_addr, outcome.jump_table_entries);
       if (targets.has_value()) {
         for (uint64_t target : *targets) {
           if (target >= cfi.pc_begin && target < cfi.pc_end) {
@@ -827,7 +826,8 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       sink.Add(Finding::Severity::kReview, pc, outcome.review_reason, insn_text);
     }
     if (outcome.has_jump_table) {
-      std::optional<std::vector<uint64_t>> targets = ResolveJumpTable(outcome.jump_table_addr, outcome.jump_table_entries);
+      std::optional<std::vector<uint64_t>> targets =
+          ResolveJumpTable(outcome.jump_table_addr, outcome.jump_table_entries);
       if (!targets.has_value()) {
         sink.Add(Finding::Severity::kReview, pc,
                  "unresolved indirect jump; jump tables are not resolved in this version, so the code it reaches "
