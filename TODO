@@ -24,3 +24,125 @@ switch table) could be simple-ish AbsVal extensions and get us some
 switch table handling. Different indexes we could either handle by
 trying to track ranges (e.g. %rax above) or just scanning from 0 until
 table is referring to "our" FDE.
+
+-----
+
+
+Quick impressions, from the histograms I already collected — unverified beyond that.
+
+The big four, roughly in order of how much volume they'd buy back:
+
+1. Cross-FDE jumps — unconditional jump out of FDE with rsp at CFA+N
+(should be CFA-8 for a tail call). 323 in libstdc++, 94 in gcc, 56 in
+libc. This is the biggest thing after jump tables and I suspect it's
+the cheapest real win. It's mostly .cold fragments and throw/noreturn
+helpers that live in their own FDE: the jump is legitimate, our state
+is mid-frame, and the check demands a tail-call exit state it was
+never going to have. The fix looks like the same machinery §6 of the
+plan already needs — if the target is the start of (or inside) another
+FDE, compare our state against that FDE's row at that address instead
+of demanding CFA-8. The sibling category tail call in an FDE that did
+not start at a canonical function entry (128 in gcc, 20 in libstdc++)
+is the same story from the other end.
+
+2. CFI says rN is saved at [CFA-N], but we cannot say what is stored
+there — 389+ in libstdc++, the single largest category there and the
+reason libstdc++'s number is so ugly. My guess is this is mostly the
+at_function_entry=false seeding path: an FDE fragment seeds
+unmentioned registers to kTop, so every slot the CFI names comes back
+unknowable. If that's right it's a seeding/precision question, not a
+semantics one. Worth confirming before anyone writes code, because the
+alternative explanation (spills through unmodelled instructions) needs
+a completely different fix.
+
+3. Realignment and DWARF expressions, concentrated in libcrypto — ~170
+return with untracked callee-saved register, 31 CFA declared as rsp+N
+but rsp holds unknown, 36 CFA is given by a DWARF expression. This is
+the hand-written perlasm plus and $-16,%rsp cluster, and it's exactly
+what the DRAP recogniser + tiny expression interpreter in AGENT.md's
+gap list is for. Bigger job, and it's one binary's problem more than a
+general one.
+
+4. Landing pads are much less of the story than AGENT.md says —
+lsda-reader.cc clearly did its job. What's left in the coverage-gap
+bucket is dominated by jump tables.
+
+Two oddities worth a look at some point: 11 cannot decode the
+instruction at this address in libcrypto (Capstone gaps or actual data
+in .text — either way, currently invisible), and libc's handful of CFA
+is declared as rdi+N, but rdi holds entry rdi, which smells like
+setcontext/swapcontext and is probably a true "this is genuinely
+weird" review rather than a gap.
+
+If I had to pick one thing to do after switch tables, it'd be #1 —
+it's a single structural idea, it's the top category in two of the
+five binaries, and it reuses work the jump-table change already forces
+you to do.
+
+✻ Churned for 35s
+
+❯ Also real quick without much thinking, give me a sketch of how #1
+could be done. I have my thoughts too,but prefer to see yours. Again,
+just a sketch. Give me answer "off the top of your head", brain-storm
+style (don't worry to be wrong)
+
+Off the top of my head, brainstorm quality:
+
+The core move: stop asking "is this a valid tail call?" and start
+asking "does the state I'm handing over agree with what the target's
+own FDE assumes?" That's the same state-vs-row comparison
+RowChecker::Check already does — nothing in it cares which FDE the row
+came from. So look up the target PC's FDE, get its row at that
+address, and run the existing check against our current state.
+
+Why this is compositional and doesn't blow up: we never walk into the
+other FDE. It already gets its own independent walk, seeded by
+SeedFromRow(..., at_function_entry=false). That seed is currently
+trusted unconditionally — that's the whole reason SeedFromRow
+exists. This change turns the assumption into a verified fact by
+checking it against every actual predecessor edge. So it's strictly
+stronger than today, and it costs one row lookup per cross-FDE edge,
+not a re-analysis.
+
+The load-bearing assumption: it only works because CFA is the same
+symbolic quantity in both FDEs. That's true for .cold fragments of one
+function — their CFI is written against the same canonical frame
+address, which is exactly what makes unwinding through them work — and
+false for a real tail call to a different function, where the callee's
+CFA is a different thing entirely and the slot offsets aren't
+comparable.
+
+Distinguishing the two without a naming convention (same shape as
+FallThroughIsReal's two-condition test): try the exit-state check
+first; if the state is a valid tail-call exit, bless and stop. If it
+isn't, then it can't be a tail call — a tail call with a
+half-torn-down frame is broken code — so the shared-CFA reading is the
+only one left, and the row comparison applies. Only if both fail do
+you report. No list of cold-fragment names, no .cold suffix matching.
+
+Plumbing: FDEChecker is one-FDE-at-a-time today, so it needs a global
+"row at any PC" service. Sorted (pc_begin, pc_end) index built during
+EnumerateFDEs — unwind-check.cc already builds something like that for
+the overlap check, so reuse it — plus a lazily-decoded, cached
+CFITable per FDE. Binary search, decode on miss.
+
+Severity: ship the disagreement as REVIEW with its own distinct
+message, measure, then decide about promoting. It's arguably a true
+MISMATCH (two FDEs of one function disagreeing about the frame at a
+transfer between them is a real defect), but it's a new check resting
+on a new assumption, so let it earn it.
+
+Freebies if it works: the jump-table out-of-FDE targets from the
+plan's §6 stop needing special handling, and tail call in an FDE that
+did not start at a canonical function entry (128 in gcc) is probably
+the same edge seen from the other side.
+
+Where I'd expect it to be wrong: the false-bless case where a
+genuinely broken tail call happens to match the target's row — I'd
+guess rare, and it's the _dl_runtime_resolve shape. And I'm not
+certain the shared-CFA claim holds for every cross-FDE jump; ICF'd
+shared blocks like that libstdc++ throw target at 0xb98fa are reached
+from multiple unrelated functions, so their CFI can't be relative to
+any one caller's CFA. Those probably need to fall out as reviews
+rather than be checked — worth looking at before committing to the
+design.
