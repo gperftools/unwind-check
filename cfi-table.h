@@ -79,6 +79,10 @@ struct FdeCfi {
   uint64_t pc_end = 0;
   int return_reg = kDwarfRip;
   bool signal_frame = false;
+  // vaddr of this FDE's LSDA (.gcc_except_table entry), or 0 when the FDE
+  // carries none. Landing pads named in it are code the CFG walk cannot
+  // otherwise reach, since nothing in the function body branches there.
+  uint64_t lsda_addr = 0;
   // True when the CFI mentioned a register outside 0..16 (SSE registers
   // and the like). Recorded, not checked.
   bool has_exotic_regs = false;

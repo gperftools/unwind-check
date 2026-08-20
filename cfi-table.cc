@@ -45,6 +45,13 @@ class TableBuilder : public UnwindVisitor {
     return true;
   }
 
+  bool HandleLSDA(uintptr_t lsda_ptr) {
+    if (lsda_ptr != 0) {
+      result_.lsda_addr = lsda_ptr - bias_;
+    }
+    return true;
+  }
+
   bool AfterCIE() {
     std::copy(std::begin(cur_regs_), std::end(cur_regs_), std::begin(cie_regs_));
     return true;

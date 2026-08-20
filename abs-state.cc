@@ -62,13 +62,12 @@ AbsState AbsState::SeedFromRow(const CfiRow& row) {
     }
   }
 
+  // No usable CFA rule at the start: we cannot anchor anything, so rsp
+  // is genuinely unknown rather than assumed.
+  s.gpr[kDwarfRsp] = AbsVal::Unknown();
   // Last, so that the CFA rule wins for its own register.
   if (row.cfa.kind == CfaRule::Kind::kRegOffset && row.cfa.reg < kNumGpRegs) {
     s.gpr[row.cfa.reg] = AbsVal::CfaRel(-row.cfa.offset);
-  } else {
-    // No usable CFA rule at the start: we cannot anchor anything, so rsp
-    // is genuinely unknown rather than assumed.
-    s.gpr[kDwarfRsp] = AbsVal::Unknown();
   }
   return s;
 }
@@ -112,11 +111,16 @@ bool Join(const AbsState& incoming, AbsState* state, std::vector<JoinConflict>* 
     if (state->gpr[r] == incoming.gpr[r]) {
       continue;
     }
-    if (!state->gpr[r].is_unknown() && !incoming.gpr[r].is_unknown() && conflicts != nullptr) {
-      conflicts->push_back(JoinConflict{r, 0, state->gpr[r], incoming.gpr[r]});
-    }
-    if (!state->gpr[r].is_unknown()) {
+    bool dest_unknown = state->gpr[r].is_unknown();
+    bool src_unknown = incoming.gpr[r].is_unknown();
+    if (!dest_unknown && !src_unknown) {
+      if (conflicts != nullptr) {
+        conflicts->push_back(JoinConflict{r, 0, state->gpr[r], incoming.gpr[r]});
+      }
       state->gpr[r] = AbsVal::Unknown();
+      changed = true;
+    } else if (dest_unknown) {
+      state->gpr[r] = incoming.gpr[r];
       changed = true;
     }
   }

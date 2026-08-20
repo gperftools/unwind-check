@@ -68,13 +68,21 @@ struct EHReaderInputs {
 // scaled. Scaled offsets are signed and are passed as uintptr_t simply
 // bit-casted from intptr_t.
 //
-// We currently don't expose any exception handling augmentation data
-// because we don't use it, but it could be easily added.
+// We currently don't expose the personality routine pointer because we
+// don't use it, but it could be easily added the same way HandleLSDA was.
 struct UnwindVisitor {
   bool StartFDE(uintptr_t return_reg, uintptr_t pc_start, uintptr_t pc_end);
 
   bool HandleAugS();  // when 'S' aug character signals this is signal trampoline
   bool AfterCIE();    // i.e. to snapshot "table" after CIE is read
+
+  // Called once per FDE, only when the CIE augmentation string contains
+  // 'L'. lsda_ptr is the resolved address of this FDE's LSDA
+  // (.gcc_except_table entry), in the same live-pointer address space as
+  // every other pointer this reader hands out. Some FDEs sharing a CIE
+  // that has 'L' still carry no real LSDA of their own; that shows up as
+  // lsda_ptr == 0 and is not itself an error.
+  bool HandleLSDA(uintptr_t lsda_ptr);
 
   // Note, when the FDE's instructions run out we invoke this one last
   // time with function_end. So the final row is closed just like every
@@ -492,6 +500,9 @@ void Decoder<V>::ParseFDE(uintptr_t raw_fde_ptr) {
   // character). If/when that data is missing, we use 64-bit absolute
   // encoding as noted in the spec.
   uint8_t fde_ptr_enc = DW_EH_PE_absptr;
+  // Encoding of the per-FDE LSDA pointer field, from the CIE's 'L' aug
+  // data. DW_EH_PE_omitted means this CIE never carries an LSDA.
+  uint8_t lsda_ptr_enc = DW_EH_PE_omitted;
 
   // empty aug string is allowed
   if (*aug_str) {
@@ -514,9 +525,8 @@ void Decoder<V>::ParseFDE(uintptr_t raw_fde_ptr) {
       if (ch == 'L') {
         // L is for some LSDA pointer encoding. In this case cie
         // augmentation contains lsda field encoding and FDE
-        // augmentation will hold the actual field. So skip over
-        // encoding.
-        (void)ReadObject<uint8_t>(&aug_data);
+        // augmentation will hold the actual field.
+        lsda_ptr_enc = ReadObject<uint8_t>(&aug_data);
         continue;
       }
       if (ch == 'S') {
@@ -577,10 +587,19 @@ void Decoder<V>::ParseFDE(uintptr_t raw_fde_ptr) {
     return;
   }
 
-  // We always skip aug data of FDE (it may contain some exception-related stuff)
+  // FDE augmentation data. The only field it can ever carry is the LSDA
+  // pointer (present iff the CIE's augmentation string had 'L'); 'P' and
+  // 'R' only ever contribute to the CIE's own augmentation data, never
+  // the FDE's.
   if (*orig_aug_str == 'z') {
     uintptr_t aug_len = ReadUleb128(&fde_slice);
-    (void)ReadSubslice<uint8_t>(&fde_slice, aug_len);  // skip aug_len bytes
+    byte_slice fde_aug_data = ReadSubslice<uint8_t>(&fde_slice, aug_len);
+    if (lsda_ptr_enc != DW_EH_PE_omitted) {
+      uintptr_t lsda_ptr = ReadEncodedPtr(&fde_aug_data, lsda_ptr_enc);
+      if (!v_->HandleLSDA(lsda_ptr)) {
+        return;
+      }
+    }
   }
 
   if (!v_->AfterCIE()) {

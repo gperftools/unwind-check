@@ -8,7 +8,9 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_format.h"
+#include "eh-frame-reader.h"
 #include "insn-semantics.h"
+#include "lsda-reader.h"
 
 namespace unwind_analysis {
 
@@ -397,6 +399,39 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
       }
     }
   }
+
+  // Exception landing pads are reachable only through the unwinder, via
+  // the LSDA -- nothing in the function body branches to one, so the
+  // ordinary control-flow walk below would never find them, and their
+  // bytes would be reported as an unchecked coverage gap. Seed each one
+  // as its own root instead, exactly like the FDE's own start: a landing
+  // pad is jumped to, not called, so there is nothing to inherit from a
+  // caller and the declared row is trusted the same way a `.cold`
+  // fragment's is.
+  if (cfi.lsda_addr != 0) {
+    std::vector<uint64_t> landing_pads;
+    try {
+      landing_pads = ReadLsdaLandingPads(image_, cfi.lsda_addr, cfi.pc_begin);
+    } catch (const EhFrameError& e) {
+      sink.Add(Finding::Severity::kReview, cfi.pc_begin,
+               absl::StrFormat("failed to parse this FDE's LSDA (.gcc_except_table) at 0x%016llx: %s",
+                               static_cast<unsigned long long>(cfi.lsda_addr), e.what()),
+               "");
+      landing_pads.clear();
+    }
+    for (uint64_t lp : landing_pads) {
+      if (lp < cfi.pc_begin || lp >= cfi.pc_end) {
+        continue;  // a malformed LSDA shouldn't be able to walk us outside the FDE
+      }
+      const CfiRow* row = cfi.RowAt(lp);
+      if (row == nullptr) {
+        continue;  // reported as a missing-row finding once the walk reaches nearby code
+      }
+      propagate(lp, AbsState::SeedFromRow(*row));
+    }
+  }
+
+  // Start with "normal" instructions. Landing pads don't have known rsp state.
   propagate(cfi.pc_begin, AbsState::SeedFromRow(*first_row));
 
   size_t iterations = 0;
