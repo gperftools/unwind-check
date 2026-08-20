@@ -115,10 +115,6 @@ void EraseSlots(AbsState* state, int64_t start, int64_t size) {
 void HandleUnplacedMemWrite(AbsState*) {
 }
 
-bool InGroup(csh handle, const cs_insn& insn, unsigned group) {
-  return cs_insn_group(handle, &insn, group);
-}
-
 }  // namespace
 
 int InsnSemantics::DwarfRegOf(unsigned reg) {
@@ -180,13 +176,13 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
 
   // Control flow first: the classification is independent of what the
   // instruction does to the stack.
-  if (InGroup(handle_, insn, X86_GRP_RET) || insn.id == X86_INS_IRET || insn.id == X86_INS_IRETD ||
+  if (cs_insn_group(handle_, &insn, X86_GRP_RET) || insn.id == X86_INS_IRET || insn.id == X86_INS_IRETD ||
       insn.id == X86_INS_IRETQ) {
     out.is_return = true;
     out.falls_through = false;
     return out;
   }
-  if (InGroup(handle_, insn, X86_GRP_JUMP)) {
+  if (cs_insn_group(handle_, &insn, X86_GRP_JUMP)) {
     bool conditional = insn.id != X86_INS_JMP && insn.id != X86_INS_LJMP;
     out.falls_through = conditional;
     if (x.op_count >= 1 && x.operands[0].type == X86_OP_IMM) {
