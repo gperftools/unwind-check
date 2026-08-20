@@ -225,17 +225,18 @@ absl::StatusOr<std::unique_ptr<ElfImage>> ElfImage::Open(const std::string& path
   std::sort(img->segments_.begin(), img->segments_.end(),
             [](const LoadSegment& a, const LoadSegment& b) { return a.vaddr < b.vaddr; });
 
-  // The fake load. One anonymous mapping covering every PT_LOAD's vaddr
-  // range, so that the vaddr deltas between sections are the real ones.
+  // The fake load. One PROT_NONE reservation covering every PT_LOAD's vaddr
+  // range, with each segment mapped into place via MAP_FIXED, so that the
+  // vaddr deltas between sections are the real ones.
   min_vaddr = RoundDown(min_vaddr, kPageSize);
   uint64_t span = RoundUp(max_end, kPageSize) - min_vaddr;
   if (span > (uint64_t{1} << 40)) {
     return absl::InvalidArgumentError(
         absl::StrFormat("%s spans %u GiB of vaddr space; refusing to map", path, static_cast<unsigned>(span >> 30)));
   }
-  void* image = mmap(nullptr, span, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  void* image = mmap(nullptr, span, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   if (image == MAP_FAILED) {
-    return absl::ResourceExhaustedError(absl::StrFormat("cannot map %u bytes of image space for %s: %s",
+    return absl::ResourceExhaustedError(absl::StrFormat("cannot reserve %u bytes of image space for %s: %s",
                                                         static_cast<unsigned>(span), path, strerror(errno)));
   }
   img->image_ = static_cast<uint8_t*>(image);
@@ -243,9 +244,24 @@ absl::StatusOr<std::unique_ptr<ElfImage>> ElfImage::Open(const std::string& path
   img->bias_ = reinterpret_cast<uintptr_t>(image) - static_cast<uintptr_t>(min_vaddr);
 
   for (const LoadSegment& seg : img->segments_) {
-    memcpy(img->image_ + (seg.vaddr - min_vaddr), file + seg.offset, seg.filesz);
+    if (seg.filesz == 0) {
+      continue;
+    }
+    if ((seg.vaddr % kPageSize) != (seg.offset % kPageSize)) {
+      return absl::InvalidArgumentError(
+          absl::StrFormat("%s has a PT_LOAD with unaligned vaddr 0x%x vs offset 0x%x", path, seg.vaddr, seg.offset));
+    }
+    uint64_t seg_vaddr_start = RoundDown(seg.vaddr, kPageSize);
+    uint64_t file_offset = RoundDown(seg.offset, kPageSize);
+    uint64_t page_offset = seg.vaddr - seg_vaddr_start;
+    uint64_t map_len = RoundUp(seg.filesz + page_offset, kPageSize);
+    void* target_addr = reinterpret_cast<void*>(img->ToImage(seg_vaddr_start));
+    void* mapped_seg = mmap(target_addr, map_len, PROT_READ, MAP_PRIVATE | MAP_FIXED, fd, file_offset);
+    if (mapped_seg == MAP_FAILED) {
+      return absl::InternalError(
+          absl::StrFormat("cannot mmap segment at 0x%x for %s: %s", seg.vaddr, path, strerror(errno)));
+    }
   }
-  mprotect(image, span, PROT_READ);
 
   // Sections, when they are there. A stripped .so has none, hence the
   // .eh_frame_hdr fallback below.

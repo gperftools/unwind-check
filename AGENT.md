@@ -81,11 +81,11 @@ slice it is reading. Mapping the file raw and handing it file offsets would
 silently corrupt every `pc_begin`, because the `.eh_frame`-to-`.text` delta is
 different in file-offset space than in vaddr space.
 
-So `ElfImage` materialises one anonymous mapping spanning every PT_LOAD's vaddr
-range, with each segment's bytes copied to the offset its `p_vaddr` asks for.
-Downstream lives in one consistent address space; `bias()` converts back to
-link-time vaddrs for the report. This is checked directly by
-`elf-image-test.cc`'s `PreservesVaddrDistancesAcrossSections`.
+So `ElfImage` materialises one address space reservation spanning every
+PT_LOAD's vaddr range, with each segment mmap'd via `MAP_FIXED` at the offset
+its `p_vaddr` asks for. Downstream lives in one consistent address space;
+`bias()` converts back to link-time vaddrs for the report. This is checked
+directly by `elf-image-test.cc`'s `PreservesVaddrDistancesAcrossSections`.
 
 ### 4.2 The copied reader
 

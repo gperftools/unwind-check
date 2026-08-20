@@ -39,9 +39,9 @@ struct FuncSymbol {
 // .eh_frame-to-.text delta is different in file-offset space than it is
 // in vaddr space.
 //
-// So ElfImage performs a "fake load": one anonymous mapping spanning
-// every PT_LOAD's vaddr range, with each segment's file bytes copied to
-// the offset its p_vaddr asks for. Downstream everything then lives in
+// So ElfImage performs a "fake load": an address space reservation spanning
+// every PT_LOAD's vaddr range, with each segment mmap'd via MAP_FIXED
+// at the offset its p_vaddr asks for. Downstream everything then lives in
 // one consistent address space, and bias() converts back to the
 // link-time vaddrs a human wants to read in a report.
 class ElfImage {
