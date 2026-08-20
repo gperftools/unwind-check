@@ -1,7 +1,10 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
 #include "insn-semantics.h"
 
+#include <memory>
 #include <optional>
+
+#include "absl/container/flat_hash_map.h"
 
 namespace unwind_analysis {
 
@@ -13,38 +16,45 @@ struct RegAlias {
   bool full64;
 };
 
-// DWARF numbering for x86-64 is the psABI's, not the encoding order:
-// rax rdx rcx rbx rsi rdi rbp rsp, then r8..r15.
-constexpr RegAlias kAliases[] = {
-    {X86_REG_RAX, 0, true},  {X86_REG_EAX, 0, false},   {X86_REG_AX, 0, false},    {X86_REG_AL, 0, false},
-    {X86_REG_AH, 0, false},  {X86_REG_RDX, 1, true},    {X86_REG_EDX, 1, false},   {X86_REG_DX, 1, false},
-    {X86_REG_DL, 1, false},  {X86_REG_DH, 1, false},    {X86_REG_RCX, 2, true},    {X86_REG_ECX, 2, false},
-    {X86_REG_CX, 2, false},  {X86_REG_CL, 2, false},    {X86_REG_CH, 2, false},    {X86_REG_RBX, 3, true},
-    {X86_REG_EBX, 3, false}, {X86_REG_BX, 3, false},    {X86_REG_BL, 3, false},    {X86_REG_BH, 3, false},
-    {X86_REG_RSI, 4, true},  {X86_REG_ESI, 4, false},   {X86_REG_SI, 4, false},    {X86_REG_SIL, 4, false},
-    {X86_REG_RDI, 5, true},  {X86_REG_EDI, 5, false},   {X86_REG_DI, 5, false},    {X86_REG_DIL, 5, false},
-    {X86_REG_RBP, 6, true},  {X86_REG_EBP, 6, false},   {X86_REG_BP, 6, false},    {X86_REG_BPL, 6, false},
-    {X86_REG_RSP, 7, true},  {X86_REG_ESP, 7, false},   {X86_REG_SP, 7, false},    {X86_REG_SPL, 7, false},
-    {X86_REG_R8, 8, true},   {X86_REG_R8D, 8, false},   {X86_REG_R8W, 8, false},   {X86_REG_R8B, 8, false},
-    {X86_REG_R9, 9, true},   {X86_REG_R9D, 9, false},   {X86_REG_R9W, 9, false},   {X86_REG_R9B, 9, false},
-    {X86_REG_R10, 10, true}, {X86_REG_R10D, 10, false}, {X86_REG_R10W, 10, false}, {X86_REG_R10B, 10, false},
-    {X86_REG_R11, 11, true}, {X86_REG_R11D, 11, false}, {X86_REG_R11W, 11, false}, {X86_REG_R11B, 11, false},
-    {X86_REG_R12, 12, true}, {X86_REG_R12D, 12, false}, {X86_REG_R12W, 12, false}, {X86_REG_R12B, 12, false},
-    {X86_REG_R13, 13, true}, {X86_REG_R13D, 13, false}, {X86_REG_R13W, 13, false}, {X86_REG_R13B, 13, false},
-    {X86_REG_R14, 14, true}, {X86_REG_R14D, 14, false}, {X86_REG_R14W, 14, false}, {X86_REG_R14B, 14, false},
-    {X86_REG_R15, 15, true}, {X86_REG_R15D, 15, false}, {X86_REG_R15W, 15, false}, {X86_REG_R15B, 15, false},
-};
-
 // Registers a call may destroy, per the x86-64 psABI.
 constexpr int kCallerSaved[] = {0, 1, 2, 4, 5, 8, 9, 10, 11};
 
 const RegAlias* FindAlias(unsigned reg) {
-  for (const RegAlias& a : kAliases) {
-    if (static_cast<unsigned>(a.reg) == reg) {
-      return &a;
+  // DWARF numbering for x86-64 is the psABI's, not the encoding order:
+  // rax rdx rcx rbx rsi rdi rbp rsp, then r8..r15.
+  static constexpr RegAlias kAliases[] = {
+      {X86_REG_RAX, 0, true},  {X86_REG_EAX, 0, false},   {X86_REG_AX, 0, false},    {X86_REG_AL, 0, false},
+      {X86_REG_AH, 0, false},  {X86_REG_RDX, 1, true},    {X86_REG_EDX, 1, false},   {X86_REG_DX, 1, false},
+      {X86_REG_DL, 1, false},  {X86_REG_DH, 1, false},    {X86_REG_RCX, 2, true},    {X86_REG_ECX, 2, false},
+      {X86_REG_CX, 2, false},  {X86_REG_CL, 2, false},    {X86_REG_CH, 2, false},    {X86_REG_RBX, 3, true},
+      {X86_REG_EBX, 3, false}, {X86_REG_BX, 3, false},    {X86_REG_BL, 3, false},    {X86_REG_BH, 3, false},
+      {X86_REG_RSI, 4, true},  {X86_REG_ESI, 4, false},   {X86_REG_SI, 4, false},    {X86_REG_SIL, 4, false},
+      {X86_REG_RDI, 5, true},  {X86_REG_EDI, 5, false},   {X86_REG_DI, 5, false},    {X86_REG_DIL, 5, false},
+      {X86_REG_RBP, 6, true},  {X86_REG_EBP, 6, false},   {X86_REG_BP, 6, false},    {X86_REG_BPL, 6, false},
+      {X86_REG_RSP, 7, true},  {X86_REG_ESP, 7, false},   {X86_REG_SP, 7, false},    {X86_REG_SPL, 7, false},
+      {X86_REG_R8, 8, true},   {X86_REG_R8D, 8, false},   {X86_REG_R8W, 8, false},   {X86_REG_R8B, 8, false},
+      {X86_REG_R9, 9, true},   {X86_REG_R9D, 9, false},   {X86_REG_R9W, 9, false},   {X86_REG_R9B, 9, false},
+      {X86_REG_R10, 10, true}, {X86_REG_R10D, 10, false}, {X86_REG_R10W, 10, false}, {X86_REG_R10B, 10, false},
+      {X86_REG_R11, 11, true}, {X86_REG_R11D, 11, false}, {X86_REG_R11W, 11, false}, {X86_REG_R11B, 11, false},
+      {X86_REG_R12, 12, true}, {X86_REG_R12D, 12, false}, {X86_REG_R12W, 12, false}, {X86_REG_R12B, 12, false},
+      {X86_REG_R13, 13, true}, {X86_REG_R13D, 13, false}, {X86_REG_R13W, 13, false}, {X86_REG_R13B, 13, false},
+      {X86_REG_R14, 14, true}, {X86_REG_R14D, 14, false}, {X86_REG_R14W, 14, false}, {X86_REG_R14B, 14, false},
+      {X86_REG_R15, 15, true}, {X86_REG_R15D, 15, false}, {X86_REG_R15W, 15, false}, {X86_REG_R15B, 15, false},
+  };
+
+  static const absl::flat_hash_map<x86_reg, RegAlias>& kMap = ([]() {
+    auto map = std::make_unique<absl::flat_hash_map<x86_reg, RegAlias>>();
+    for (const RegAlias& a : kAliases) {
+      map->emplace(a.reg, a);
     }
+    return *map.release();
+  })();
+
+  auto it = kMap.find(static_cast<x86_reg>(reg));
+  if (it == kMap.end()) {
+    return nullptr;
   }
-  return nullptr;
+  return &it->second;
 }
 
 const cs_x86& X86(const cs_insn& insn) {

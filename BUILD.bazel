@@ -92,6 +92,7 @@ cc_library(
     deps = [
         ":abs-state",
         ":capstone",
+        "@abseil-cpp//absl/container:flat_hash_map",
     ],
 )
 
@@ -182,7 +183,6 @@ cc_test(
     name = "fixtures-test",
     srcs = ["fixtures-test.cc"],
     copts = DEFAULT_COPTS,
-    size = "small",
     data = ["testdata/libfixtures.so"],
     target_compatible_with = [
         "@platforms//os:linux",
@@ -203,7 +203,6 @@ cc_test(
 
 cc_test(
     name = "abs-state-test",
-    size = "small",
     srcs = ["abs-state-test.cc"],
     copts = DEFAULT_COPTS,
     deps = [
@@ -214,7 +213,6 @@ cc_test(
 
 cc_test(
     name = "insn-semantics-test",
-    size = "small",
     srcs = ["insn-semantics-test.cc"],
     copts = DEFAULT_COPTS,
     target_compatible_with = [
@@ -232,7 +230,6 @@ cc_test(
     name = "elf-image-test",
     srcs = ["elf-image-test.cc"],
     copts = DEFAULT_COPTS,
-    size = "small",
     data = [
         "testdata/fixtures.S",
         "testdata/libfixtures.so",
@@ -251,7 +248,6 @@ cc_test(
     name = "cfi-table-test",
     srcs = ["cfi-table-test.cc"],
     copts = DEFAULT_COPTS,
-    size = "small",
     data = ["testdata/libfixtures.so"],
     target_compatible_with = [
         "@platforms//os:linux",
