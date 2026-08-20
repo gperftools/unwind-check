@@ -115,19 +115,44 @@ The anchor: **CFA is defined once as `rsp` on entry plus 8** and never
 redefined. Every tracked value is expressed relative to it, which is what makes
 a declared CFI rule directly checkable instead of something to re-derive.
 
-A value is `kUnknown`, `kCfaRel(delta)`, or `kOrigReg(r)` — "whatever DWARF
-register r held on entry". The state is those for the 16 GPRs plus a map from
-CFA-relative stack offset to value, holding only the slots we can name.
+A value is `kTop`, `kBottom`, `kCfaRel(delta)`, or `kOrigReg(r)` — "whatever
+DWARF register r held on entry". `kTop` and `kBottom` used to be a single
+conflated `kUnknown`; they are kept apart because they behave oppositely under
+`Join`. `kTop` means *truly unknown* — nothing has been tracked, or precision
+was deliberately dropped (an unmodelled instruction, a clobber) — and is the
+meet's identity element: meeting it with anything yields that thing back.
+`kBottom` means *error/conflict* — two paths each claimed a different concrete
+value — and is absorbing: once a register or slot drops to `kBottom` it stays
+there, rather than a later join quietly overwriting the recorded conflict with
+whatever a third path happens to say. The state is those for the 16 GPRs plus
+a map from CFA-relative stack offset to value; a slot absent from the map
+reads as `kTop`, so `kBottom` must be stored explicitly there while `kTop`
+never is.
 
 `Join` is pointwise, and **reports** what disagreed rather than silently
 widening. `.eh_frame` declares one state per PC, so two edges arriving with
-different values cannot both match the single row there.
+different values cannot both match the single row there. It is also
+order-independent: joining `a` into a copy of `b` and `b` into a copy of `a`
+land on the same state, which `abs-state-test.cc` checks directly.
 
 **Seeding is not `Entry()`.** Plenty of FDEs cover a *fragment* of a function —
 cold parts split out of a function, PLT stubs — and start with registers already
 spilled and rsp well below the CFA. `AbsState::SeedFromRow` reads the start
 state off the FDE's own first row. Assuming `Entry()` everywhere produced 28
 false mismatches on `/bin/ls` alone.
+
+`SeedFromRow` also takes `at_function_entry`, which decides what an
+*unmentioned* register (`RegRule::Kind::kUnset`, the row saying nothing at
+all) seeds to. At a genuine function entry nothing has executed yet, so
+silence trivially means "still holds what the caller passed in," the same
+fact `Entry()` assumes outright — so it seeds to `kOrigReg(r)`. Anywhere else
+— a `.cold` fragment reached by a jump after the hot part already ran, an
+exception landing pad reached by the unwinder mid-function — the CFI's
+silence only means nothing needed unwinding that register, not that it is
+unchanged, so it seeds to `kTop` instead. An *explicit* `kSameValue` rule is a
+real CFI assertion either way and is always trusted. `FdeChecker` passes its
+own `at_function_entry` (see below) through for the FDE's own first row, and
+`false` for every landing pad, since a pad is reached only by the unwinder.
 
 Where a function symbol starts the FDE, `FdeChecker` separately notes it if the
 first row is not the canonical `CFA = rsp+8` with `ra` at `[CFA-8]`. That is a

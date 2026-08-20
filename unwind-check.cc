@@ -262,6 +262,12 @@ int Run(const std::string& path) {
   // guarantee. Getting this wrong is expensive: a statically linked
   // binary has dozens of them, and every one would be accused of an
   // impossible entry row.
+  //
+  // This same set decides what AbsState::SeedFromRow assumes about a
+  // register the first row says nothing about: still its entry value at
+  // a real entry point (nothing has run yet to make that untrue), just
+  // unknown everywhere else (a `.cold` fragment's silence means nothing
+  // needed unwinding that register, not that it is unchanged).
   absl::flat_hash_set<uint64_t> function_starts;
   for (const FuncSymbol& sym : image.func_symbols()) {
     if (IsEntryPointName(sym.name)) {

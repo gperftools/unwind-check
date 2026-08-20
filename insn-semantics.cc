@@ -64,7 +64,7 @@ const cs_x86& X86(const cs_insn& insn) {
 // The value a register operand reads, as far as we track it.
 AbsVal ReadReg(const AbsState& state, unsigned reg) {
   if (!InsnSemantics::IsFull64(reg)) {
-    return AbsVal::Unknown();
+    return AbsVal::Top();
   }
   return state.reg(InsnSemantics::DwarfRegOf(reg));
 }
@@ -91,7 +91,7 @@ std::optional<int64_t> MemSlot(const AbsState& state, const x86_op_mem& mem) {
 AbsVal LeaValue(const AbsState& state, const x86_op_mem& mem) {
   std::optional<int64_t> slot = MemSlot(state, mem);
   if (!slot.has_value()) {
-    return AbsVal::Unknown();
+    return AbsVal::Top();
   }
   return AbsVal::CfaRel(*slot);
 }
@@ -231,14 +231,14 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
         state->ClobberReg(kDwarfRsp);
         return out;
       }
-      AbsVal pushed = AbsVal::Unknown();
+      AbsVal pushed = AbsVal::Top();
       if (insn.id == X86_INS_PUSH) {
         const cs_x86_op& op = x.operands[0];
         if (op.type == X86_OP_REG) {
           pushed = ReadReg(*state, op.reg);
         } else if (op.type == X86_OP_MEM) {
           std::optional<int64_t> slot = MemSlot(*state, op.mem);
-          pushed = slot.has_value() ? state->Slot(*slot) : AbsVal::Unknown();
+          pushed = slot.has_value() ? state->Slot(*slot) : AbsVal::Top();
         }
       }
       const AbsVal rsp = state->reg(kDwarfRsp);
@@ -259,7 +259,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
         return out;
       }
       const AbsVal rsp = state->reg(kDwarfRsp);
-      AbsVal popped = AbsVal::Unknown();
+      AbsVal popped = AbsVal::Top();
       if (rsp.kind == AbsVal::Kind::kCfaRel) {
         popped = state->Slot(rsp.delta);
         state->SetReg(kDwarfRsp, AbsVal::CfaRel(rsp.delta + 8));
@@ -270,7 +270,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
         if (op.type == X86_OP_REG) {
           int d = DwarfRegOf(op.reg);
           if (d >= 0) {
-            state->SetReg(d, IsFull64(op.reg) ? popped : AbsVal::Unknown());
+            state->SetReg(d, IsFull64(op.reg) ? popped : AbsVal::Top());
           }
         } else if (op.type == X86_OP_MEM) {
           std::optional<int64_t> slot = MemSlot(*state, op.mem);
@@ -304,7 +304,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       if (d < 0) {
         break;
       }
-      state->SetReg(d, IsFull64(x.operands[0].reg) ? LeaValue(*state, x.operands[1].mem) : AbsVal::Unknown());
+      state->SetReg(d, IsFull64(x.operands[0].reg) ? LeaValue(*state, x.operands[1].mem) : AbsVal::Top());
       return out;
     }
 
@@ -329,7 +329,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
           state->SetReg(d, ReadReg(*state, src.reg));
         } else if (src.type == X86_OP_MEM) {
           std::optional<int64_t> slot = MemSlot(*state, src.mem);
-          state->SetReg(d, (slot.has_value() && src.size == 8) ? state->Slot(*slot) : AbsVal::Unknown());
+          state->SetReg(d, (slot.has_value() && src.size == 8) ? state->Slot(*slot) : AbsVal::Top());
         } else {
           state->ClobberReg(d);
         }
@@ -345,7 +345,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
           EraseSlots(state, *slot, dst.size);
           return out;
         }
-        state->SetSlot(*slot, src.type == X86_OP_REG ? ReadReg(*state, src.reg) : AbsVal::Unknown());
+        state->SetSlot(*slot, src.type == X86_OP_REG ? ReadReg(*state, src.reg) : AbsVal::Top());
         return out;
       }
       break;

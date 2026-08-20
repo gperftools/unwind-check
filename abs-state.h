@@ -20,17 +20,32 @@ namespace unwind_analysis {
 // directly checkable instead of something we have to re-derive.
 struct AbsVal {
   enum class Kind : uint8_t {
-    kUnknown,  // top: we cannot say anything
+    // Top of the lattice: truly unknown. No path has told us anything
+    // about this value -- it has not been tracked, or precision was
+    // deliberately dropped (an unmodelled instruction, a clobber). Top
+    // is the meet's identity element: meeting it with anything yields
+    // that thing back, because "anything is possible" contributes no
+    // constraint of its own.
+    kTop,
+    // Bottom of the lattice: error/conflict. Two paths each claimed a
+    // concrete, different value for this register or slot, so nothing
+    // can be trusted here. Bottom is absorbing under meet -- once a
+    // value drops to bottom it stays there, since the conflict that
+    // produced it does not go away when a third path shows up.
+    kBottom,
     kCfaRel,   // the value is CFA + delta
     kOrigReg,  // the value is whatever DWARF register `reg` held on entry
   };
 
-  Kind kind = Kind::kUnknown;
+  Kind kind = Kind::kTop;
   int64_t delta = 0;
   uint8_t reg = 0;
 
-  static AbsVal Unknown() {
+  static AbsVal Top() {
     return {};
+  }
+  static AbsVal Bottom() {
+    return AbsVal{Kind::kBottom, 0, 0};
   }
   static AbsVal CfaRel(int64_t delta) {
     return AbsVal{Kind::kCfaRel, delta, 0};
@@ -39,8 +54,17 @@ struct AbsVal {
     return AbsVal{Kind::kOrigReg, 0, static_cast<uint8_t>(reg)};
   }
 
+  bool is_top() const {
+    return kind == Kind::kTop;
+  }
+  bool is_bottom() const {
+    return kind == Kind::kBottom;
+  }
+  // Neither top nor bottom names a concrete value, so both read as
+  // "cannot verify a declared CFI rule against this" to every call site
+  // that just wants to know whether it has something to compare.
   bool is_unknown() const {
-    return kind == Kind::kUnknown;
+    return kind == Kind::kTop || kind == Kind::kBottom;
   }
   bool IsCfaRel(int64_t d) const {
     return kind == Kind::kCfaRel && delta == d;
@@ -69,7 +93,9 @@ struct AbsState {
   static AbsState Entry();
 
   // The state to start an FDE's analysis from, read off the FDE's own
-  // first CFI row.
+  // first CFI row -- or, for an exception landing pad, off the row
+  // covering the pad's address, since a pad is reached only by the
+  // unwinder rather than by falling or branching in from earlier code.
   //
   // Assuming Entry() would be wrong: plenty of FDEs cover a *fragment*
   // of a function rather than a whole one -- cold parts split out to
@@ -83,7 +109,22 @@ struct AbsState {
   // strict generalisation of Entry() -- and FdeChecker separately
   // verifies that claim wherever a function symbol says the FDE starts
   // one.
-  static AbsState SeedFromRow(const CfiRow& row);
+  //
+  // `at_function_entry` decides what an *unmentioned* register
+  // (RegRule::Kind::kUnset) seeds to. A row's silence about a register
+  // is not the same claim everywhere: at a genuine function entry
+  // nothing has executed yet, so silence trivially means "still holds
+  // whatever the caller passed in" -- the same conclusion Entry()
+  // reaches, just read off the CFI instead of assumed outright. At any
+  // other seed point -- a `.cold` fragment reached by a jump after the
+  // hot part has already run, a landing pad reached by the unwinder
+  // after arbitrary code between the `try` and the `throw` -- the CFI's
+  // silence only means nothing needed unwinding that register, not that
+  // it still holds its function-entry value. There an unmentioned
+  // register seeds to kTop instead. An *explicit* RegRule::Kind::kSameValue
+  // is a real CFI assertion either way, and is trusted regardless of
+  // `at_function_entry`.
+  static AbsState SeedFromRow(const CfiRow& row, bool at_function_entry);
 
   const AbsVal& reg(int r) const {
     return gpr[r];
@@ -92,7 +133,7 @@ struct AbsState {
     gpr[r] = v;
   }
   void ClobberReg(int r) {
-    gpr[r] = AbsVal::Unknown();
+    gpr[r] = AbsVal::Top();
   }
 
   // Slot lookup; absent slots read as unknown.
@@ -138,8 +179,9 @@ struct JoinConflict {
 };
 
 // Meets `incoming` into `*state`. Components that agree survive;
-// components that disagree drop to unknown *and* are reported in
-// `conflicts`.
+// components that disagree drop to kBottom *and* are reported in
+// `conflicts`. A component only one side has an opinion on (kTop on the
+// other) takes that opinion, since kTop is the identity element.
 //
 // The reporting is the point. .eh_frame declares exactly one state per
 // PC, so two edges reaching the same PC with different real stack states

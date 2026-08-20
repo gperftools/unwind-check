@@ -427,12 +427,12 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
       if (row == nullptr) {
         continue;  // reported as a missing-row finding once the walk reaches nearby code
       }
-      propagate(lp, AbsState::SeedFromRow(*row));
+      propagate(lp, AbsState::SeedFromRow(*row, /*at_function_entry=*/false));
     }
   }
 
   // Start with "normal" instructions. Landing pads don't have known rsp state.
-  propagate(cfi.pc_begin, AbsState::SeedFromRow(*first_row));
+  propagate(cfi.pc_begin, AbsState::SeedFromRow(*first_row, at_function_entry));
 
   size_t iterations = 0;
   bool hit_cap = false;
