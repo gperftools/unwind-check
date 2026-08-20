@@ -1,0 +1,12 @@
+* so vaddr and bias stuff is currently borked when pointer encoding
+  (e.g. for LSDA) is absolute (e.g. u4 without pcrel). Keep testing
+  with pic/pie for now.
+
+* ret locations should be checked, perhaps, to have RSP at CFA-8 and
+  all callee-saved regs restored. etc.
+
+* one type of indirect jumps: jmp-ing via c++ vtable. One way to
+  detect is state "compatible" with tail-call (Entry state).
+
+* _start seems to be always wrong. Bad unwind info. Report upstream?
+
