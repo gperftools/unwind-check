@@ -13,6 +13,8 @@
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/flags/usage.h"
+#include "absl/log/globals.h"
+#include "absl/log/initialize.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
 #include "cfi-table.h"
@@ -23,7 +25,7 @@
 #include "report.h"
 #include "symbolizer.h"
 
-ABSL_FLAG(bool, verbose, false, "List blessed FDEs too, not just the ones needing attention.");
+ABSL_FLAG(bool, show_blessed, false, "List blessed FDEs too, not just the ones needing attention.");
 ABSL_FLAG(bool, summary_only, false, "Print only the trailing histogram.");
 ABSL_FLAG(std::string, function, "",
           "Only check FDEs whose symbol name matches this ECMAScript regex. Matched against the name in the "
@@ -324,7 +326,7 @@ int Run(const std::string& path) {
   }
 
   ReportOptions report_options;
-  report_options.verbose = absl::GetFlag(FLAGS_verbose);
+  report_options.show_blessed = absl::GetFlag(FLAGS_show_blessed);
   report_options.summary_only = absl::GetFlag(FLAGS_summary_only);
   PrintReport(results, &symbolizer, report_options);
 
@@ -350,7 +352,9 @@ int main(int argc, char** argv) {
       "Checks that an x86-64 ELF binary's .eh_frame CFI matches what its code actually does to the stack.\n"
       "Usage: unwind-check [flags] <binary>\n"
       "Exit codes: 0 all blessed, 1 a mismatch was found, 2 something needs review, 3 the run failed.");
+  absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfo);
   std::vector<char*> positional = absl::ParseCommandLine(argc, argv);
+  absl::InitializeLog();
   if (positional.size() != 2) {
     absl::FPrintF(stderr, "unwind-check: expected exactly one binary to check\n");
     return 3;

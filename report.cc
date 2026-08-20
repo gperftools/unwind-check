@@ -66,7 +66,7 @@ void PrintReport(const std::vector<FDEResult>& results, Symbolizer* symbolizer, 
     // run rather than one per finding.
     std::vector<uint64_t> interesting;
     for (const FDEResult& r : results) {
-      if (r.verdict == Verdict::kBlessed && !options.verbose) {
+      if (r.verdict == Verdict::kBlessed && !options.show_blessed) {
         continue;
       }
       interesting.push_back(r.pc_begin);
@@ -81,7 +81,7 @@ void PrintReport(const std::vector<FDEResult>& results, Symbolizer* symbolizer, 
     std::vector<const FDEResult*> ordered;
     ordered.reserve(results.size());
     for (const FDEResult& r : results) {
-      if (r.verdict == Verdict::kBlessed && !options.verbose) {
+      if (r.verdict == Verdict::kBlessed && !options.show_blessed) {
         continue;
       }
       ordered.push_back(&r);

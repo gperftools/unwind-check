@@ -12,7 +12,7 @@
 namespace unwind_analysis {
 
 struct ReportOptions {
-  bool verbose = false;       // also list blessed FDEs
+  bool show_blessed = false;  // also list blessed FDEs
   bool summary_only = false;  // just the histogram
 };
 
