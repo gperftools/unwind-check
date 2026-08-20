@@ -99,6 +99,12 @@ class ELFImage {
   // True iff [vaddr, vaddr+size) lies entirely inside one executable PT_LOAD.
   bool IsExecutable(uint64_t vaddr, uint64_t size) const;
 
+  // True iff [vaddr, vaddr+size) lies entirely inside one non-executable
+  // PT_LOAD's *file-backed* region -- i.e. within filesz, not just
+  // memsz, so a .bss range never qualifies. Used to bound where a
+  // resolved switch table may live: real data, never code.
+  bool IsFileBackedNonExecutable(uint64_t vaddr, uint64_t size) const;
+
   // Code (or any mapped) bytes at a vaddr. Returns a short span, or an
   // empty one, when the range runs past what is mapped.
   std::span<const uint8_t> BytesAt(uint64_t vaddr, uint64_t size) const;

@@ -5,6 +5,20 @@
 
 namespace unwind_analysis {
 
+namespace {
+
+// The three switch-table-resolution kinds (see abs-state.h). A CFI row
+// can never assert anything about a scratch register holding a
+// `.rodata` pointer or table-derived offset, so a join disagreement
+// between two of these is not the compiler-bug signal Join() exists to
+// report -- it just means precision was lost, and the result should be
+// kTop like any other lost-precision case, not a reported kBottom.
+bool IsTableResolutionKind(AbsVal::Kind k) {
+  return k == AbsVal::Kind::kConst || k == AbsVal::Kind::kTableEntry || k == AbsVal::Kind::kJumpTarget;
+}
+
+}  // namespace
+
 std::string AbsVal::ToString() const {
   switch (kind) {
     case Kind::kTop:
@@ -15,6 +29,14 @@ std::string AbsVal::ToString() const {
       return absl::StrFormat("CFA%+d", static_cast<int>(delta));
     case Kind::kOrigReg:
       return absl::StrFormat("entry %s", DWARFRegName(reg));
+    case Kind::kConst:
+      return absl::StrFormat("const 0x%llx", static_cast<unsigned long long>(delta));
+    case Kind::kTableEntry:
+      return absl::StrFormat("table[%s] entry (table@0x%llx)", DWARFRegName(reg),
+                             static_cast<unsigned long long>(TableAddr()));
+    case Kind::kJumpTarget:
+      return absl::StrFormat("jump target table@0x%llx[%s]", static_cast<unsigned long long>(TableAddr()),
+                             DWARFRegName(reg));
   }
   return "?";
 }
@@ -146,12 +168,34 @@ bool Join(const AbsState& incoming, AbsState* state, std::vector<JoinConflict>* 
       continue;
     }
     // Both sides name a concrete value and, per the equality check
-    // above, disagree about what it is -- a genuine conflict.
+    // above, disagree about what it is. Ordinarily that is a genuine
+    // conflict -- but not when both sides are one of the switch-table
+    // resolution kinds, which no CFI row can ever consult; see
+    // IsTableResolutionKind.
+    if (IsTableResolutionKind(state->gpr[r].kind) && IsTableResolutionKind(incoming.gpr[r].kind)) {
+      state->gpr[r] = AbsVal::Top();
+      changed = true;
+      continue;
+    }
     if (conflicts != nullptr) {
       conflicts->push_back(JoinConflict{r, 0, state->gpr[r], incoming.gpr[r]});
     }
     state->gpr[r] = AbsVal::Bottom();
     changed = true;
+  }
+
+  // Per-register switch-table bounds (§3.2): keep a bound only where
+  // both paths recorded exactly the same one. Unioning (taking the max)
+  // would let an unrelated, differently-bounded dispatch on the same
+  // register validate a table it never guarded; dropping to top here,
+  // rather than reporting a conflict, mirrors the carve-out above for
+  // the same reason -- no CFI row ever reads this either.
+  for (int r = 0; r < kNumGPRs; r++) {
+    std::optional<uint64_t> merged = (state->ubound[r] == incoming.ubound[r]) ? state->ubound[r] : std::nullopt;
+    if (merged != state->ubound[r]) {
+      state->ubound[r] = merged;
+      changed = true;
+    }
   }
 
   // Slots mirror the register logic above exactly, except a slot's

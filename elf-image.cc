@@ -134,6 +134,20 @@ bool ELFImage::IsExecutable(uint64_t vaddr, uint64_t size) const {
   return false;
 }
 
+bool ELFImage::IsFileBackedNonExecutable(uint64_t vaddr, uint64_t size) const {
+  for (const LoadSegment& seg : segments_) {
+    if (seg.executable() || vaddr < seg.vaddr) {
+      continue;
+    }
+    uint64_t off = vaddr - seg.vaddr;
+    if (off > seg.filesz || size > seg.filesz - off) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 std::span<const uint8_t> ELFImage::BytesAt(uint64_t vaddr, uint64_t size) const {
   for (const LoadSegment& seg : segments_) {
     if (vaddr < seg.vaddr) {

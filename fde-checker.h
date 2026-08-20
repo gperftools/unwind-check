@@ -4,7 +4,9 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "abs-state.h"
@@ -59,8 +61,16 @@ class FDEChecker {
     size_t max_iterations = 200000;
   };
 
-  FDEChecker(const ELFImage& image, Disassembler* disasm, const Options& options)
-      : image_(image), disasm_(disasm), options_(options) {
+  // `all_fde_ranges` is every known FDE's [pc_begin, pc_end), sorted by
+  // pc_begin. It is used only to validate that a resolved switch-table
+  // entry lands inside *some* FDE (initial-switch-tables-plan.md §3.3) --
+  // not necessarily this one: a shared, ICF'd throw block can be reached
+  // from a table 1.2 MB away in a different FDE (§5). Leaving it empty
+  // simply means no table ever validates, which is safe -- it just costs
+  // the coverage this feature exists to recover.
+  FDEChecker(const ELFImage& image, Disassembler* disasm, const Options& options,
+             std::vector<std::pair<uint64_t, uint64_t>> all_fde_ranges = {})
+      : image_(image), disasm_(disasm), options_(options), all_fde_ranges_(std::move(all_fde_ranges)) {
   }
 
   // `at_function_entry` says a function symbol starts exactly at
@@ -71,9 +81,17 @@ class FDEChecker {
   FDEResult Check(const CFI& cfi, bool at_function_entry) const;
 
  private:
+  // Reads and validates the switch table at `table_addr` with `entries`
+  // int32 entries, all-or-nothing per initial-switch-tables-plan.md §3.3:
+  // any entry failing any check discards the whole table. Returns the
+  // resolved absolute targets, or nullopt.
+  std::optional<std::vector<uint64_t>> ResolveJumpTable(uint64_t table_addr, uint64_t entries) const;
+  bool LandsInsideSomeFDE(uint64_t addr) const;
+
   const ELFImage& image_;
   Disassembler* const disasm_;
   Options options_;
+  std::vector<std::pair<uint64_t, uint64_t>> all_fde_ranges_;
 };
 
 }  // namespace unwind_analysis

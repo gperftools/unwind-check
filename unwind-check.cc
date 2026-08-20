@@ -243,11 +243,21 @@ int Run(const std::string& path) {
     }
   }
 
+  // Every structurally valid FDE's PC range, sorted, so the checker can
+  // tell whether a resolved switch-table entry lands inside *some* FDE
+  // (not necessarily the one being checked -- see fde-checker.h).
+  std::vector<std::pair<uint64_t, uint64_t>> all_fde_ranges;
+  all_fde_ranges.reserve(checkable.size());
+  for (const CFI* cfi : checkable) {
+    all_fde_ranges.emplace_back(cfi->pc_begin, cfi->pc_end);
+  }
+  std::sort(all_fde_ranges.begin(), all_fde_ranges.end());
+
   FDEChecker::Options options;
   options.check_unmentioned_callee_saved = absl::GetFlag(FLAGS_check_unmentioned_callee_saved);
   options.report_coverage_gaps = absl::GetFlag(FLAGS_report_coverage_gaps);
   options.max_findings_per_fde = static_cast<size_t>(std::max(1, absl::GetFlag(FLAGS_max_findings)));
-  FDEChecker checker{image, disasm, options};
+  FDEChecker checker{image, disasm, options, all_fde_ranges};
 
   // Where a function symbol starts, the FDE's first row is checkable
   // against the canonical entry state. Elsewhere -- PLT stubs, the cold

@@ -538,6 +538,89 @@ TEST(AbsStateTest, SeedFromRowLeavesRspTopWhenTheCFAIsNotRspBased) {
   EXPECT_TRUE(s.reg(kDWARFRsp).is_top()) << "nothing anchors rsp when the CFA is based on another register";
 }
 
+// --- Join: switch-table resolution kinds (§3.1 of the switch-tables plan) -
+
+TEST(AbsStateTest, JoinOfDifferingConstantsGoesToTopWithoutAConflict) {
+  // No CFI row ever asserts anything about a scratch register holding a
+  // .rodata pointer, so two paths disagreeing about one is lost
+  // precision, not the compiler-bug signal Join() otherwise reports.
+  AbsState a;
+  a.SetReg(kDWARFRax, AbsVal::Const(0x1000));
+  AbsState b;
+  b.SetReg(kDWARFRax, AbsVal::Const(0x2000));
+
+  std::vector<JoinConflict> conflicts;
+  EXPECT_TRUE(Join(b, &a, &conflicts));
+  EXPECT_TRUE(a.reg(kDWARFRax).is_top());
+  EXPECT_TRUE(conflicts.empty());
+}
+
+TEST(AbsStateTest, JoinOfATableEntryAndAJumpTargetAlsoGoesToTopWithoutAConflict) {
+  AbsState a;
+  a.SetReg(kDWARFRax, AbsVal::TableEntry(0x1000, kDWARFRcx, 0x1000));
+  AbsState b;
+  b.SetReg(kDWARFRax, AbsVal::JumpTarget(0x2000, kDWARFRcx));
+
+  std::vector<JoinConflict> conflicts;
+  EXPECT_TRUE(Join(b, &a, &conflicts));
+  EXPECT_TRUE(a.reg(kDWARFRax).is_top());
+  EXPECT_TRUE(conflicts.empty());
+}
+
+TEST(AbsStateTest, JoinOfAConstantAndAnUnrelatedConcreteValueStillConflicts) {
+  // The carve-out is scoped to the three switch-table kinds meeting each
+  // other; a constant meeting a kCFARel or kOrigReg is a normal
+  // disagreement and must still be reported.
+  AbsState a;
+  a.SetReg(kDWARFRax, AbsVal::Const(0x1000));
+  AbsState b;
+  b.SetReg(kDWARFRax, AbsVal::CFARel(-8));
+
+  std::vector<JoinConflict> conflicts;
+  EXPECT_TRUE(Join(b, &a, &conflicts));
+  EXPECT_TRUE(a.reg(kDWARFRax).is_bottom());
+  ASSERT_EQ(conflicts.size(), 1u);
+  EXPECT_EQ(conflicts[0].reg, kDWARFRax);
+}
+
+// --- Join: per-register switch-table bounds (§3.2) -----------------------
+
+TEST(AbsStateTest, JoinKeepsAUBoundOnlyWhenBothSidesAgree) {
+  AbsState a;
+  a.SetUBound(kDWARFRax, 4);
+  AbsState b;
+  b.SetUBound(kDWARFRax, 4);
+
+  std::vector<JoinConflict> conflicts;
+  EXPECT_FALSE(Join(b, &a, &conflicts));
+  EXPECT_EQ(a.UBound(kDWARFRax), 4u);
+}
+
+TEST(AbsStateTest, JoinDropsADisagreeingUBoundWithoutReportingAConflict) {
+  AbsState a;
+  a.SetUBound(kDWARFRax, 4);
+  AbsState b;
+  b.SetUBound(kDWARFRax, 7);
+
+  std::vector<JoinConflict> conflicts;
+  EXPECT_TRUE(Join(b, &a, &conflicts));
+  EXPECT_FALSE(a.UBound(kDWARFRax).has_value());
+  EXPECT_TRUE(conflicts.empty());
+}
+
+TEST(AbsStateTest, JoinDropsAUBoundOnlyOneSideRecorded) {
+  // A register bounded on only one incoming path is not really bounded
+  // at the merged point: some other path reaches the same PC with no
+  // guard at all.
+  AbsState a;
+  a.SetUBound(kDWARFRax, 4);
+  AbsState b;  // no bound
+
+  std::vector<JoinConflict> conflicts;
+  EXPECT_TRUE(Join(b, &a, &conflicts));
+  EXPECT_FALSE(a.UBound(kDWARFRax).has_value());
+}
+
 TEST(AbsStateTest, SeedFromRowRefusesToGuessWhenTheCFAIsAnExpression) {
   CFIRow row;
   row.cfa = CFARule{CFARule::Kind::kExpression, 0, 0};

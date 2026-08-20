@@ -360,3 +360,122 @@ review_cfa_expression:
         ret
         .cfi_endproc
         .size   review_cfa_expression, .-review_cfa_expression
+
+/* ---------------------------------------------------------------- */
+/*
+ * A PIC switch table: lea the table base (in one block), cmp/ja bound
+ * the index, movslq loads a table[index] int32 offset, add resolves it
+ * to an absolute target, and an indirect jmp (with the CET `notrack`
+ * prefix GCC actually emits on these) dispatches. The CFA never moves
+ * across any case, so this should come out fully BLESSED only if the
+ * checker actually resolves the table and walks every case body.
+ */
+        .section .rodata
+        .align  4
+.Lswitch_good_table:
+        .long   .Lswitch_good_case0-.Lswitch_good_table
+        .long   .Lswitch_good_case1-.Lswitch_good_table
+        .long   .Lswitch_good_case2-.Lswitch_good_table
+        .text
+
+        .globl  good_switch_table
+        .type   good_switch_table, @function
+good_switch_table:
+        .cfi_startproc
+        subq    $8, %rsp
+        .cfi_def_cfa_offset 16
+        movl    %edi, %eax
+        cmpl    $2, %eax
+        ja      .Lswitch_good_default
+        leaq    .Lswitch_good_table(%rip), %rcx
+        movslq  (%rcx,%rax,4), %rdx
+        addq    %rcx, %rdx
+        notrack jmp *%rdx
+.Lswitch_good_case0:
+        movl    $10, %eax
+        jmp     .Lswitch_good_out
+.Lswitch_good_case1:
+        movl    $20, %eax
+        jmp     .Lswitch_good_out
+.Lswitch_good_case2:
+        movl    $30, %eax
+.Lswitch_good_default:
+.Lswitch_good_out:
+        addq    $8, %rsp
+        .cfi_def_cfa_offset 8
+        ret
+        .cfi_endproc
+        .size   good_switch_table, .-good_switch_table
+
+/* ---------------------------------------------------------------- */
+/* Same shape, but one case body pushes a register without updating the
+ * CFI -- the stale CFI this whole feature exists to catch, now reachable
+ * only through a resolved switch table. */
+        .section .rodata
+        .align  4
+.Lswitch_bad_table:
+        .long   .Lswitch_bad_case0-.Lswitch_bad_table
+        .long   .Lswitch_bad_case1-.Lswitch_bad_table
+        .text
+
+        .globl  bad_switch_table_case
+        .type   bad_switch_table_case, @function
+bad_switch_table_case:
+        .cfi_startproc
+        subq    $8, %rsp
+        .cfi_def_cfa_offset 16
+        movl    %edi, %eax
+        cmpl    $1, %eax
+        ja      .Lswitch_bad_default
+        leaq    .Lswitch_bad_table(%rip), %rcx
+        movslq  (%rcx,%rax,4), %rdx
+        addq    %rcx, %rdx
+        jmp     *%rdx
+.Lswitch_bad_case0:
+        movl    $10, %eax
+        jmp     .Lswitch_bad_out
+.Lswitch_bad_case1:
+        pushq   %rbx
+        movl    $20, %eax
+        popq    %rbx
+.Lswitch_bad_default:
+.Lswitch_bad_out:
+        addq    $8, %rsp
+        .cfi_def_cfa_offset 8
+        ret
+        .cfi_endproc
+        .size   bad_switch_table_case, .-bad_switch_table_case
+
+/* ---------------------------------------------------------------- */
+/* Same table-load shape, but with no cmp/ja bound guarding the index --
+ * must stay REVIEW rather than being resolved on a guess at some assumed
+ * bound. */
+        .section .rodata
+        .align  4
+.Lswitch_review_table:
+        .long   .Lswitch_review_case0-.Lswitch_review_table
+        .long   .Lswitch_review_case1-.Lswitch_review_table
+        .text
+
+        .globl  review_switch_table_unguarded
+        .type   review_switch_table_unguarded, @function
+review_switch_table_unguarded:
+        .cfi_startproc
+        subq    $8, %rsp
+        .cfi_def_cfa_offset 16
+        movl    %edi, %eax
+        leaq    .Lswitch_review_table(%rip), %rcx
+        movslq  (%rcx,%rax,4), %rdx
+        addq    %rcx, %rdx
+        jmp     *%rdx
+.Lswitch_review_case0:
+        movl    $1, %eax
+        jmp     .Lswitch_review_out
+.Lswitch_review_case1:
+        movl    $2, %eax
+.Lswitch_review_out:
+        addq    $8, %rsp
+        .cfi_def_cfa_offset 8
+        ret
+        .cfi_endproc
+        .size   review_switch_table_unguarded, .-review_switch_table_unguarded

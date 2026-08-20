@@ -1,6 +1,8 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
 #include "fde-checker.h"
 
+#include <string.h>
+
 #include <algorithm>
 #include <optional>
 #include <string>
@@ -17,9 +19,136 @@ namespace unwind_analysis {
 namespace {
 
 constexpr int kCalleeSaved[] = {kDWARFRbx, kDWARFRbp, 12, 13, 14, 15};
+constexpr uint64_t kMaxJumpTableEntries = 512;
 
 bool IsCalleeSaved(int reg) {
   return std::find(std::begin(kCalleeSaved), std::end(kCalleeSaved), reg) != std::end(kCalleeSaved);
+}
+
+// Switch-table bound tracking (initial-switch-tables-plan.md §3.2). One
+// register's fact: a `cmp $imm,%r; ja/jae default` guard was found
+// dominating this point, so %r's value is known to be at most `ubound`
+// on the in-bounds edge.
+struct BoundGuard {
+  int reg;
+  uint64_t ubound;
+};
+
+// Walks backward from a ja/jae at `branch_pc` over the straight-line
+// fall-through predecessor chain, stopping at the first instruction that
+// writes EFLAGS. `fallthrough_pred` records, for every address reached
+// via ordinary fall-through during pass 1, the single instruction that
+// falls through to it -- which is exactly "the previous instruction in
+// this straight-line block", so this walk naturally stops at a block
+// boundary (a predecessor reached only by a jump has no entry there)
+// without needing real dominance.
+//
+// Relaxing this to "the nearest preceding cmp on some register" was
+// measured and is wrong: it picks up an unrelated cmp in glibc's
+// nss_database_check_reload_and_get, which is a genuinely unbounded
+// data-driven dispatch with no guard at all.
+std::optional<BoundGuard> FindGuardBound(uint64_t branch_pc, bool is_jae, const ELFImage& image, Disassembler* disasm,
+                                         uint64_t pc_end,
+                                         const absl::flat_hash_map<uint64_t, uint64_t>& fallthrough_pred) {
+  uint64_t pc = branch_pc;
+  for (int hops = 0; hops < 64; hops++) {
+    auto it = fallthrough_pred.find(pc);
+    if (it == fallthrough_pred.end()) {
+      return std::nullopt;
+    }
+    pc = it->second;
+    std::span<const uint8_t> bytes = image.BytesAt(pc, std::min<uint64_t>(16, pc_end - pc));
+    const cs_insn* insn = bytes.empty() ? nullptr : disasm->DecodeOne(bytes.data(), bytes.size(), pc);
+    if (insn == nullptr) {
+      return std::nullopt;
+    }
+    cs_regs read;
+    cs_regs written;
+    uint8_t read_count = 0;
+    uint8_t write_count = 0;
+    bool writes_eflags = false;
+    if (cs_regs_access(disasm->handle(), insn, read, &read_count, written, &write_count) == CS_ERR_OK) {
+      for (uint8_t i = 0; i < write_count; i++) {
+        if (written[i] == X86_REG_EFLAGS) {
+          writes_eflags = true;
+          break;
+        }
+      }
+    }
+    if (!writes_eflags) {
+      continue;
+    }
+    if (insn->id != X86_INS_CMP || insn->detail->x86.op_count != 2) {
+      return std::nullopt;
+    }
+    const cs_x86_op& a = insn->detail->x86.operands[0];
+    const cs_x86_op& b = insn->detail->x86.operands[1];
+    if (a.type != X86_OP_REG || b.type != X86_OP_IMM || b.imm < 0) {
+      return std::nullopt;
+    }
+    int r = InsnSemantics::DWARFRegOf(a.reg);
+    if (r < 0) {
+      return std::nullopt;
+    }
+    uint64_t imm = static_cast<uint64_t>(b.imm);
+    if (is_jae) {
+      if (imm == 0) {
+        return std::nullopt;  // imm-1 would underflow: not a usable bound
+      }
+      imm -= 1;
+    }
+    return BoundGuard{r, imm};
+  }
+  return std::nullopt;
+}
+
+// Drops a register's tracked bound on any write to it, with two
+// exceptions:
+//
+//  * a zero-extending mov/movzx of the register into itself (`movzbl
+//    %al,%eax` and friends) -- GCC's tables insert exactly that between
+//    the guard and the table load, and the numeric bound still applies
+//    to the widened value;
+//  * `movslq disp(%B,%I,4),%I` and `add %B,%I` writing back into their
+//    own index register `%I` -- a compiler is free to reuse the index
+//    register as the destination once it no longer needs the plain
+//    index value (measured: sqlite's own case, `movslq
+//    (%r8,%rcx,4),%rcx`), and by construction (checked below via
+//    `state`, already updated by Transfer) `%I` is still exactly the
+//    register the eventual `jmp` will look the bound up under.
+void UpdateUBoundsAfterTransfer(csh handle, const cs_insn& insn, AbsState* state) {
+  if ((insn.id == X86_INS_MOV || insn.id == X86_INS_MOVZX) && insn.detail->x86.op_count == 2) {
+    const cs_x86_op& dst = insn.detail->x86.operands[0];
+    const cs_x86_op& src = insn.detail->x86.operands[1];
+    if (dst.type == X86_OP_REG && src.type == X86_OP_REG) {
+      int d = InsnSemantics::DWARFRegOf(dst.reg);
+      int s = InsnSemantics::DWARFRegOf(src.reg);
+      if (d >= 0 && d == s && !InsnSemantics::IsFull64(dst.reg)) {
+        return;
+      }
+    }
+  }
+  cs_regs read;
+  cs_regs written;
+  uint8_t read_count = 0;
+  uint8_t write_count = 0;
+  if (cs_regs_access(handle, &insn, read, &read_count, written, &write_count) != CS_ERR_OK) {
+    for (int r = 0; r < kNumGPRs; r++) {
+      state->ClearUBound(r);
+    }
+    return;
+  }
+  for (uint8_t i = 0; i < write_count; i++) {
+    int d = InsnSemantics::DWARFRegOf(written[i]);
+    if (d < 0) {
+      continue;
+    }
+    const AbsVal& v = state->reg(d);
+    if ((v.IsTableEntry() || v.IsJumpTarget()) && v.IndexReg() == d) {
+      continue;
+    }
+    state->ClearUBound(d);
+  }
 }
 
 // Collects findings, folding repeats of the same message into one entry.
@@ -397,6 +526,47 @@ const char* VerdictName(Verdict v) {
   return "?";
 }
 
+bool FDEChecker::LandsInsideSomeFDE(uint64_t addr) const {
+  auto it = std::upper_bound(all_fde_ranges_.begin(), all_fde_ranges_.end(), addr,
+                             [](uint64_t a, const std::pair<uint64_t, uint64_t>& r) { return a < r.first; });
+  if (it == all_fde_ranges_.begin()) {
+    return false;
+  }
+  --it;
+  return addr >= it->first && addr < it->second;
+}
+
+std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table_addr, uint64_t entries) const {
+  if (entries == 0 || entries > kMaxJumpTableEntries) {
+    return std::nullopt;
+  }
+  uint64_t size = entries * 4;
+  if (!image_.IsFileBackedNonExecutable(table_addr, size)) {
+    return std::nullopt;
+  }
+  std::span<const uint8_t> bytes = image_.BytesAt(table_addr, size);
+  if (bytes.size() != size) {
+    return std::nullopt;
+  }
+  std::vector<uint64_t> targets;
+  targets.reserve(entries);
+  for (uint64_t i = 0; i < entries; i++) {
+    int32_t rel;
+    memcpy(&rel, bytes.data() + i * 4, 4);
+    uint64_t target = table_addr + static_cast<int64_t>(rel);
+    if (!LandsInsideSomeFDE(target)) {
+      return std::nullopt;
+    }
+    std::span<const uint8_t> tbytes = image_.BytesAt(target, 16);
+    const cs_insn* tinsn = tbytes.empty() ? nullptr : disasm_->DecodeOne(tbytes.data(), tbytes.size(), target);
+    if (tinsn == nullptr) {
+      return std::nullopt;
+    }
+    targets.push_back(target);
+  }
+  return targets;
+}
+
 FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
   FDEResult result;
   result.fde_addr = cfi.fde_addr;
@@ -414,6 +584,10 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
   absl::flat_hash_map<uint64_t, AbsState> in_states;
   absl::flat_hash_map<uint64_t, size_t> insn_sizes;
   absl::flat_hash_map<uint64_t, std::vector<JoinConflict>> join_conflicts;
+  // Records, for every address reached via ordinary fall-through, the
+  // single instruction that falls through to it. Used only to walk
+  // backward for a switch-table bound guard (§3.2) -- see FindGuardBound.
+  absl::flat_hash_map<uint64_t, uint64_t> fallthrough_pred;
   std::vector<uint64_t> worklist;
 
   auto propagate = [&](uint64_t pc, const AbsState& state) {
@@ -541,16 +715,27 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     }
     size_t insn_size = insn->size;
     insn_sizes[pc] = insn_size;
+    bool is_ja_or_jae = insn->id == X86_INS_JA || insn->id == X86_INS_JAE;
+    bool is_jae = insn->id == X86_INS_JAE;
 
     const CFIRow* row = cfi.RowAt(pc);
     AbsVal before[kNumGPRs];
     std::copy(std::begin(state.gpr), std::end(state.gpr), std::begin(before));
     TransferOutcome outcome = semantics.Transfer(*insn, &state);
+    UpdateUBoundsAfterTransfer(disasm_->handle(), *insn, &state);
 
     if (outcome.falls_through) {
       uint64_t next = pc + insn_size;
       if (next < cfi.pc_end && FallThroughIsReal(cfi, row, next, before, state)) {
-        propagate(next, state);
+        AbsState fallthrough_state = state;
+        if (is_ja_or_jae) {
+          std::optional<BoundGuard> guard = FindGuardBound(pc, is_jae, image_, disasm_, cfi.pc_end, fallthrough_pred);
+          if (guard.has_value()) {
+            fallthrough_state.SetUBound(guard->reg, guard->ubound);
+          }
+        }
+        propagate(next, fallthrough_state);
+        fallthrough_pred[next] = pc;
       }
     }
     if (outcome.has_direct_target) {
@@ -559,6 +744,19 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       // ours to follow.
       if (target >= cfi.pc_begin && target < cfi.pc_end) {
         propagate(target, state);
+      }
+    }
+    if (outcome.has_jump_table) {
+      std::optional<std::vector<uint64_t>> targets = ResolveJumpTable(outcome.jump_table_addr, outcome.jump_table_entries);
+      if (targets.has_value()) {
+        for (uint64_t target : *targets) {
+          if (target >= cfi.pc_begin && target < cfi.pc_end) {
+            propagate(target, state);
+          }
+          // A target outside our own FDE is cross-FDE dispatch (§6); that
+          // FDE gets its own walk, and pass 2 below notes it without
+          // trying to follow.
+        }
       }
     }
   }
@@ -628,7 +826,27 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     if (outcome.review_reason != nullptr) {
       sink.Add(Finding::Severity::kReview, pc, outcome.review_reason, insn_text);
     }
-    if (outcome.is_return) {
+    if (outcome.has_jump_table) {
+      std::optional<std::vector<uint64_t>> targets = ResolveJumpTable(outcome.jump_table_addr, outcome.jump_table_entries);
+      if (!targets.has_value()) {
+        sink.Add(Finding::Severity::kReview, pc,
+                 "unresolved indirect jump; jump tables are not resolved in this version, so the code it reaches "
+                 "went unchecked",
+                 insn_text);
+      } else {
+        for (uint64_t target : *targets) {
+          if (target < cfi.pc_begin || target >= cfi.pc_end) {
+            sink.Add(Finding::Severity::kReview, pc,
+                     absl::StrFormat("resolved switch-table entry at 0x%llx lands outside this FDE's range; it is "
+                                     "not followed here and is checked on its own as part of whatever FDE covers it",
+                                     static_cast<unsigned long long>(target)),
+                     insn_text);
+          }
+        }
+        // In-range targets were walked in pass 1 and are checked in their
+        // own right when pass 2 reaches them; nothing further to say here.
+      }
+    } else if (outcome.is_return) {
       CheckExitState(pc, state, insn_text, &sink, is_canonical_entry, /*is_tail_call=*/false);
     } else if (!outcome.falls_through && outcome.has_direct_target &&
                (outcome.direct_target < cfi.pc_begin || outcome.direct_target >= cfi.pc_end)) {

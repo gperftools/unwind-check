@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -35,11 +36,23 @@ struct AbsVal {
     kBottom,
     kCFARel,   // the value is CFA + delta
     kOrigReg,  // the value is whatever DWARF register `reg` held on entry
+    // The three kinds below exist only to resolve PIC switch-table
+    // dispatches (initial-switch-tables-plan.md §3.1). No CFI row ever
+    // asserts anything about them, so a conflict between two of these
+    // kinds is not a CFI/code disagreement -- see the carve-out in
+    // Join().
+    kConst,       // a known absolute address/constant, in `delta`
+    kTableEntry,  // result of a table load: table base `delta`, index reg
+                  // `reg`, and the undisplaced constant the table base was
+                  // computed from in `aux` (see the `add` transfer rule)
+    kJumpTarget,  // a resolved `table + table[index]`: table addr `delta`,
+                  // index reg `reg`
   };
 
   Kind kind = Kind::kTop;
   int64_t delta = 0;
   uint8_t reg = 0;
+  uint64_t aux = 0;
 
   static AbsVal Top() {
     return {};
@@ -52,6 +65,15 @@ struct AbsVal {
   }
   static AbsVal OrigReg(int reg) {
     return AbsVal{Kind::kOrigReg, 0, static_cast<uint8_t>(reg)};
+  }
+  static AbsVal Const(int64_t value) {
+    return AbsVal{Kind::kConst, value, 0};
+  }
+  static AbsVal TableEntry(uint64_t table_addr, uint8_t index_reg, uint64_t base_const) {
+    return AbsVal{Kind::kTableEntry, static_cast<int64_t>(table_addr), index_reg, base_const};
+  }
+  static AbsVal JumpTarget(uint64_t table_addr, uint8_t index_reg) {
+    return AbsVal{Kind::kJumpTarget, static_cast<int64_t>(table_addr), index_reg};
   }
 
   bool is_top() const {
@@ -72,6 +94,31 @@ struct AbsVal {
   bool IsOrigReg(int r) const {
     return kind == Kind::kOrigReg && reg == r;
   }
+  bool IsConst() const {
+    return kind == Kind::kConst;
+  }
+  int64_t ConstValue() const {
+    return delta;
+  }
+  bool IsTableEntry() const {
+    return kind == Kind::kTableEntry;
+  }
+  bool IsJumpTarget() const {
+    return kind == Kind::kJumpTarget;
+  }
+  // Valid for kTableEntry and kJumpTarget.
+  uint64_t TableAddr() const {
+    return static_cast<uint64_t>(delta);
+  }
+  int IndexReg() const {
+    return reg;
+  }
+  // Valid for kTableEntry only: the undisplaced constant `table` was
+  // derived from, which the `add %B,%T` transfer rule must match against
+  // `%B` before it will resolve to a kJumpTarget.
+  uint64_t TableBaseConst() const {
+    return aux;
+  }
 
   bool operator==(const AbsVal&) const = default;
   std::string ToString() const;
@@ -86,6 +133,27 @@ struct AbsVal {
 struct AbsState {
   AbsVal gpr[kNumGPRs];
   std::map<int64_t, AbsVal> slots;
+
+  // Per-register unsigned upper bound learned from a `cmp $imm,%r; ja
+  // default` switch-table guard, valid only on the in-bounds
+  // (fall-through) edge -- see initial-switch-tables-plan.md §3.2. This
+  // is not part of AbsVal: no CFI row ever asserts anything about it, it
+  // exists purely so FDEChecker can size-bound a resolved jump table.
+  std::optional<uint64_t> ubound[kNumGPRs];
+
+  std::optional<uint64_t> UBound(int r) const {
+    return (r >= 0 && r < kNumGPRs) ? ubound[r] : std::nullopt;
+  }
+  void SetUBound(int r, uint64_t v) {
+    if (r >= 0 && r < kNumGPRs) {
+      ubound[r] = v;
+    }
+  }
+  void ClearUBound(int r) {
+    if (r >= 0 && r < kNumGPRs) {
+      ubound[r] = std::nullopt;
+    }
+  }
 
   // The state on entry to a function: rsp is CFA-8 (the call pushed the
   // return address), every register still holds its own entry value, and

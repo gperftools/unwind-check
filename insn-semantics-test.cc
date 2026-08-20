@@ -143,6 +143,72 @@ TEST_F(SemanticsTest, UnmodelledInstructionsLoseTrackRatherThanLie) {
   EXPECT_TRUE(state_.reg(kDWARFRsp).IsCFARel(-8)) << "and leaves everything else alone";
 }
 
+// --- Switch-table resolution transfer rules -------------------------------
+
+TEST_F(SemanticsTest, RipRelativeLeaProducesAConstant) {
+  // lea 0x10(%rip),%rcx -- the table-base load. The target is relative
+  // to the end of this instruction, not its start.
+  Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});
+  ASSERT_TRUE(state_.reg(kDWARFRcx).IsConst());
+  EXPECT_EQ(state_.reg(kDWARFRcx).ConstValue(), static_cast<int64_t>(kBase + 7 + 0x10));
+}
+
+TEST_F(SemanticsTest, MovslqWithScale4FromAConstantBaseProducesATableEntry) {
+  // lea 0x10(%rip),%rcx ; movslq (%rcx,%rax,4),%rdx
+  Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});
+  int64_t table = state_.reg(kDWARFRcx).ConstValue();
+  Run({0x48, 0x63, 0x14, 0x81});
+  ASSERT_TRUE(state_.reg(kDWARFRdx).IsTableEntry());
+  EXPECT_EQ(state_.reg(kDWARFRdx).TableAddr(), static_cast<uint64_t>(table));
+  EXPECT_EQ(state_.reg(kDWARFRdx).IndexReg(), kDWARFRax);
+  EXPECT_EQ(state_.reg(kDWARFRdx).TableBaseConst(), static_cast<uint64_t>(table));
+}
+
+TEST_F(SemanticsTest, AddResolvesATableEntryToAJumpTargetRegardlessOfOperandOrder) {
+  // lea 0x10(%rip),%rcx ; movslq (%rcx,%rax,4),%rdx ; add %rcx,%rdx
+  Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});
+  int64_t table = state_.reg(kDWARFRcx).ConstValue();
+  Run({0x48, 0x63, 0x14, 0x81});
+  Run({0x48, 0x01, 0xca});  // add %rcx,%rdx
+  ASSERT_TRUE(state_.reg(kDWARFRdx).IsJumpTarget());
+  EXPECT_EQ(state_.reg(kDWARFRdx).TableAddr(), static_cast<uint64_t>(table));
+  EXPECT_EQ(state_.reg(kDWARFRdx).IndexReg(), kDWARFRax);
+}
+
+TEST_F(SemanticsTest, AddDoesNotResolveWhenTheConstantDoesNotMatchTheTablesBase) {
+  // A constant that was never the base the table entry was computed from
+  // must not resolve -- this is the equality check the `add` handler
+  // makes against kTableEntry's remembered base.
+  Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});  // rcx = const(table)
+  Run({0x48, 0x63, 0x14, 0x81});                    // rdx = table_entry(table, index=rax)
+  Run({0x48, 0xc7, 0xc3, 0x00, 0x10, 0x00, 0x00});  // mov $0x1000,%rbx -- unrelated constant
+  Run({0x48, 0x01, 0xda});                          // add %rbx,%rdx
+  EXPECT_FALSE(state_.reg(kDWARFRdx).IsJumpTarget());
+}
+
+TEST_F(SemanticsTest, IndirectJumpThroughAJumpTargetResolvesOnlyWithAKnownBound) {
+  Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});  // rcx = const(table)
+  Run({0x48, 0x63, 0x14, 0x81});                    // rdx = table_entry(table, index=rax)
+  Run({0x48, 0x01, 0xca});                          // rdx = jump_target(table, index=rax)
+  {
+    TransferOutcome out = Run({0xff, 0xe2});  // jmp *%rdx -- no bound on rax yet
+    EXPECT_FALSE(out.has_jump_table);
+    EXPECT_TRUE(out.indirect_branch);
+  }
+}
+
+TEST_F(SemanticsTest, IndirectJumpResolvesOnceTheIndexRegisterHasAKnownBound) {
+  Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});  // rcx = const(table)
+  int64_t table = state_.reg(kDWARFRcx).ConstValue();
+  Run({0x48, 0x63, 0x14, 0x81});  // rdx = table_entry(table, index=rax)
+  Run({0x48, 0x01, 0xca});        // rdx = jump_target(table, index=rax)
+  state_.SetUBound(kDWARFRax, 4);
+  TransferOutcome out = Run({0xff, 0xe2});  // jmp *%rdx
+  EXPECT_TRUE(out.has_jump_table);
+  EXPECT_EQ(out.jump_table_addr, static_cast<uint64_t>(table));
+  EXPECT_EQ(out.jump_table_entries, 5u);
+}
+
 TEST_F(SemanticsTest, StoresThroughAnUntrackedPointerDoNotWipeTheFrame) {
   Run({0x53});  // push %rbx
   ASSERT_TRUE(state_.Slot(-16).IsOrigReg(kDWARFRbx));

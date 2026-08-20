@@ -4,9 +4,11 @@
 // is hand-written so that the right answer is fixed by the fixture and
 // not by whatever compiler happened to build it.
 
+#include <algorithm>
 #include <map>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
@@ -53,23 +55,33 @@ class FixturesTest : public testing::Test {
       starts.insert(sym.vaddr);
     }
 
-    FDEChecker checker{*image_, disasm_, FDEChecker::Options{}};
-    by_name_ = new std::map<std::string, Checked>();
+    std::vector<CFI> all_cfis;
     EnumerateFDEs(static_cast<uintptr_t>(image_->eh_frame_start()) + image_->bias(),
                   static_cast<uintptr_t>(image_->eh_frame_end()) + image_->bias(), [&](uintptr_t fde_addr) {
-                    CFI cfi = ReadFDE(image_->ToVaddr(fde_addr), image_->eh_frame_start(), image_->eh_frame_end(),
-                                      image_->bias());
-                    std::string name = symbolizer_->Name(cfi.pc_begin);
-                    if (name.empty()) {
-                      return;
-                    }
-                    Checked c;
-                    c.result = checker.Check(cfi, starts.contains(cfi.pc_begin));
-                    for (const Finding& f : c.result.findings) {
-                      c.messages.push_back(f.message);
-                    }
-                    by_name_->emplace(name, std::move(c));
+                    all_cfis.push_back(ReadFDE(image_->ToVaddr(fde_addr), image_->eh_frame_start(),
+                                               image_->eh_frame_end(), image_->bias()));
                   });
+    std::vector<std::pair<uint64_t, uint64_t>> all_fde_ranges;
+    all_fde_ranges.reserve(all_cfis.size());
+    for (const CFI& cfi : all_cfis) {
+      all_fde_ranges.emplace_back(cfi.pc_begin, cfi.pc_end);
+    }
+    std::sort(all_fde_ranges.begin(), all_fde_ranges.end());
+
+    FDEChecker checker{*image_, disasm_, FDEChecker::Options{}, all_fde_ranges};
+    by_name_ = new std::map<std::string, Checked>();
+    for (const CFI& cfi : all_cfis) {
+      std::string name = symbolizer_->Name(cfi.pc_begin);
+      if (name.empty()) {
+        continue;
+      }
+      Checked c;
+      c.result = checker.Check(cfi, starts.contains(cfi.pc_begin));
+      for (const Finding& f : c.result.findings) {
+        c.messages.push_back(f.message);
+      }
+      by_name_->emplace(name, std::move(c));
+    }
   }
 
   static const Checked& Get(std::string_view name) {
@@ -110,7 +122,8 @@ TEST_F(FixturesTest, EveryFixtureIsPresent) {
         "good_call", "good_tail_call", "good_indirect_tail_call", "bad_hoisted_add", "bad_late_push_cfi",
         "review_unusual_entry_row", "bad_wrong_register_saved", "bad_ret_stack_not_restored",
         "bad_ret_wrong_reg_restored", "bad_tail_call_wrong_reg_restored", "review_ret_callee_saved_untracked",
-        "review_indirect_jump", "review_cfa_expression"}) {
+        "review_indirect_jump", "review_cfa_expression", "good_switch_table", "bad_switch_table_case",
+        "review_switch_table_unguarded"}) {
     EXPECT_TRUE(by_name_->contains(name)) << name << " has no FDE";
   }
 }
@@ -189,6 +202,23 @@ TEST_F(FixturesTest, ReturnWithUntrackedCalleeSavedIsReview) {
 
 TEST_F(FixturesTest, IndirectJumpIsFlaggedNotGuessed) {
   EXPECT_THAT(Get("review_indirect_jump").messages, Contains(HasSubstr("unresolved indirect jump")));
+}
+
+TEST_F(FixturesTest, SwitchTableCasesGetWalked) {
+  // A blessed verdict on the dispatcher is only worth something if the
+  // case bodies -- reachable only through the resolved table -- were
+  // actually checked rather than silently skipped.
+  const Checked& c = Get("good_switch_table");
+  EXPECT_EQ(c.result.verdict, Verdict::kBlessed);
+  EXPECT_GE(c.result.instructions_checked, 8u);
+}
+
+TEST_F(FixturesTest, StaleCFIInASwitchCaseBodyIsCaught) {
+  EXPECT_THAT(Get("bad_switch_table_case").messages, Contains(HasSubstr("declared CFA is")));
+}
+
+TEST_F(FixturesTest, UnguardedIndirectJumpStaysReviewRatherThanBeingResolvedOnAGuess) {
+  EXPECT_THAT(Get("review_switch_table_unguarded").messages, Contains(HasSubstr("unresolved indirect jump")));
 }
 
 TEST_F(FixturesTest, CFAExpressionIsFlaggedNotEvaluated) {

@@ -19,6 +19,15 @@ struct TransferOutcome {
   bool is_return = false;
   bool is_call = false;
 
+  // Set when this is `jmp *%reg` and reg resolved to a PIC switch-table
+  // dispatch: a kJumpTarget value whose index register carries a known
+  // upper bound (see AbsState::ubound). The table itself still has to be
+  // read and validated by the caller, which owns the ELF image and the
+  // FDE's PC range -- see initial-switch-tables-plan.md §3.3.
+  bool has_jump_table = false;
+  uint64_t jump_table_addr = 0;
+  uint64_t jump_table_entries = 0;
+
   // Set when the instruction does something to the stack we decline to
   // model exactly. The FDE gets flagged for review rather than analysed
   // on a guess.

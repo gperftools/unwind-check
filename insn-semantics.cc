@@ -188,9 +188,22 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
     if (x.op_count >= 1 && x.operands[0].type == X86_OP_IMM) {
       out.has_direct_target = true;
       out.direct_target = static_cast<uint64_t>(x.operands[0].imm);
-    } else {
-      out.indirect_branch = true;
+      return out;
     }
+    if (x.op_count >= 1 && x.operands[0].type == X86_OP_REG) {
+      int r = DWARFRegOf(x.operands[0].reg);
+      const AbsVal v = r >= 0 ? state->reg(r) : AbsVal::Top();
+      if (v.IsJumpTarget()) {
+        std::optional<uint64_t> bound = state->UBound(v.IndexReg());
+        if (bound.has_value()) {
+          out.has_jump_table = true;
+          out.jump_table_addr = v.TableAddr();
+          out.jump_table_entries = *bound + 1;
+          return out;
+        }
+      }
+    }
+    out.indirect_branch = true;
     return out;
   }
   if (insn.id == X86_INS_UD0 || insn.id == X86_INS_UD1 || insn.id == X86_INS_UD2 || insn.id == X86_INS_HLT ||
@@ -304,7 +317,20 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       if (d < 0) {
         break;
       }
-      state->SetReg(d, IsFull64(x.operands[0].reg) ? LeaValue(*state, x.operands[1].mem) : AbsVal::Top());
+      if (!IsFull64(x.operands[0].reg)) {
+        state->ClobberReg(d);
+        return out;
+      }
+      const x86_op_mem& mem = x.operands[1].mem;
+      // `lea disp(%rip),%B` -- the switch-table base load. Capstone's
+      // `disp` is the raw encoded displacement; the effective address is
+      // relative to the end of this instruction, not its start.
+      if (mem.base == X86_REG_RIP && mem.index == X86_REG_INVALID) {
+        uint64_t target = insn.address + insn.size + static_cast<int64_t>(mem.disp);
+        state->SetReg(d, AbsVal::Const(static_cast<int64_t>(target)));
+        return out;
+      }
+      state->SetReg(d, LeaValue(*state, mem));
       return out;
     }
 
@@ -331,6 +357,11 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
           std::optional<int64_t> slot = MemSlot(*state, src.mem);
           state->SetReg(d, (slot.has_value() && src.size == 8) ? state->Slot(*slot) : AbsVal::Top());
         } else {
+          // `mov $imm,%r` is deliberately left untracked rather than
+          // turned into a kConst: nothing in the switch-table pattern
+          // needs it (the table base always comes from a rip-relative
+          // lea), and check_unmentioned_callee_saved fixtures rely on an
+          // immediate load clobbering a register to unknown.
           state->ClobberReg(d);
         }
         return out;
@@ -351,8 +382,67 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       break;
     }
 
+    case X86_INS_MOVSXD: {
+      // `movslq disp(%B,%I,4),%T` -- the switch-table load: T becomes the
+      // table entry once %B is a known constant and the scale is 4 (an
+      // int32 table). Anything else falls through to the generic clobber
+      // below, same as any other unmodelled case.
+      if (x.op_count != 2 || x.operands[0].type != X86_OP_REG || x.operands[1].type != X86_OP_MEM) {
+        break;
+      }
+      int d = DWARFRegOf(x.operands[0].reg);
+      if (d < 0 || !IsFull64(x.operands[0].reg)) {
+        break;
+      }
+      const x86_op_mem& mem = x.operands[1].mem;
+      if (mem.index == X86_REG_INVALID || mem.scale != 4 || mem.base == X86_REG_INVALID) {
+        break;
+      }
+      int idx_reg = DWARFRegOf(mem.index);
+      int base_reg = DWARFRegOf(mem.base);
+      if (idx_reg < 0 || base_reg < 0 || !IsFull64(mem.base)) {
+        break;
+      }
+      const AbsVal& base_val = state->reg(base_reg);
+      if (!base_val.IsConst()) {
+        break;
+      }
+      uint64_t table = static_cast<uint64_t>(base_val.ConstValue()) + mem.disp;
+      state->SetReg(d, AbsVal::TableEntry(table, static_cast<uint8_t>(idx_reg), static_cast<uint64_t>(base_val.ConstValue())));
+      return out;
+    }
+
     case X86_INS_ADD:
     case X86_INS_SUB: {
+      // `add %B,%T` (either operand order) where %B is the same known
+      // constant %T's table was derived from -- the switch-table
+      // dispatch address. Capstone's operands[0] is always the
+      // destination for a 2-operand ADD/SUB, regardless of which
+      // register held the constant and which held the table entry.
+      if (insn.id == X86_INS_ADD && x.op_count == 2 && x.operands[0].type == X86_OP_REG &&
+          x.operands[1].type == X86_OP_REG) {
+        int d0 = DWARFRegOf(x.operands[0].reg);
+        int d1 = DWARFRegOf(x.operands[1].reg);
+        if (d0 >= 0 && d1 >= 0 && IsFull64(x.operands[0].reg) && IsFull64(x.operands[1].reg)) {
+          const AbsVal op0 = state->reg(d0);
+          const AbsVal op1 = state->reg(d1);
+          auto resolve = [](const AbsVal& base_candidate, const AbsVal& entry_candidate) -> std::optional<AbsVal> {
+            if (base_candidate.IsConst() && entry_candidate.IsTableEntry() &&
+                entry_candidate.TableBaseConst() == static_cast<uint64_t>(base_candidate.ConstValue())) {
+              return AbsVal::JumpTarget(entry_candidate.TableAddr(), static_cast<uint8_t>(entry_candidate.IndexReg()));
+            }
+            return std::nullopt;
+          };
+          std::optional<AbsVal> resolved = resolve(op0, op1);
+          if (!resolved.has_value()) {
+            resolved = resolve(op1, op0);
+          }
+          if (resolved.has_value()) {
+            state->SetReg(d0, *resolved);
+            return out;
+          }
+        }
+      }
       if (x.op_count != 2 || x.operands[0].type != X86_OP_REG || x.operands[1].type != X86_OP_IMM) {
         break;
       }
