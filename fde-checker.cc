@@ -331,6 +331,7 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
   // and functions are small enough that it does not matter.
   absl::flat_hash_map<uint64_t, AbsState> in_states;
   absl::flat_hash_map<uint64_t, size_t> insn_sizes;
+  absl::flat_hash_map<uint64_t, std::vector<JoinConflict>> join_conflicts;
   std::vector<uint64_t> worklist;
 
   auto propagate = [&](uint64_t pc, const AbsState& state) {
@@ -342,22 +343,11 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
     }
     std::vector<JoinConflict> conflicts;
     bool changed = Join(state, &it->second, &conflicts);
-    const CfiRow* merge_row = cfi.RowAt(pc);
-    for (const JoinConflict& c : conflicts) {
-      if (merge_row == nullptr || !RowDependsOn(*merge_row, c)) {
-        continue;
+    if (!conflicts.empty()) {
+      auto& list = join_conflicts[pc];
+      for (auto& c : conflicts) {
+        list.push_back(std::move(c));
       }
-      // .eh_frame declares one state per PC, so two edges arriving here
-      // with different values cannot both match the single row covering
-      // this address -- which makes this either the compiler bug we are
-      // hunting or a gap in our own reachability. This version has known
-      // gaps (it does not know which calls never return, and it does not
-      // resolve jump tables), so it reports rather than accuses.
-      sink.Add(Finding::Severity::kReview, pc,
-               absl::StrFormat("paths into this address disagree: %s -- one of them must contradict the single CFI "
-                               "row here, unless one of them is not really reachable",
-                               c.Describe()),
-               "");
     }
     if (changed) {
       worklist.push_back(pc);
@@ -434,6 +424,7 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
   // Start with "normal" instructions. Landing pads don't have known rsp state.
   propagate(cfi.pc_begin, AbsState::SeedFromRow(*first_row, at_function_entry));
 
+  // Pass 1: Forward dataflow until the abstract state settles across all reached instructions.
   size_t iterations = 0;
   bool hit_cap = false;
   while (!worklist.empty()) {
@@ -447,41 +438,16 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
 
     std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
     const cs_insn* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
-    if (insn == nullptr) {
-      sink.Add(Finding::Severity::kReview, pc, "cannot decode the instruction at this address", "");
+    if (insn == nullptr || pc + insn->size > cfi.pc_end) {
       continue;
     }
-    if (pc + insn->size > cfi.pc_end) {
-      sink.Add(Finding::Severity::kReview, pc, "instruction runs past the end of the FDE's PC range",
-               Disassembler::Text(*insn));
-      continue;
-    }
-    std::string insn_text = Disassembler::Text(*insn);
     size_t insn_size = insn->size;
     insn_sizes[pc] = insn_size;
-    result.instructions_checked++;
 
-    // The row at pc describes the state when RIP == pc, so compare
-    // before applying the instruction, not after.
     const CfiRow* row = cfi.RowAt(pc);
-    if (row == nullptr) {
-      sink.Add(Finding::Severity::kReview, pc, "no CFI row covers this address", insn_text);
-    } else {
-      row_checker.Check(pc, *row, state, insn_text);
-    }
-
     AbsVal before[kNumGpRegs];
     std::copy(std::begin(state.gpr), std::end(state.gpr), std::begin(before));
     TransferOutcome outcome = semantics.Transfer(*insn, &state);
-    if (outcome.review_reason != nullptr) {
-      sink.Add(Finding::Severity::kReview, pc, outcome.review_reason, insn_text);
-    }
-    if (outcome.indirect_branch) {
-      sink.Add(Finding::Severity::kReview, pc,
-               "unresolved indirect jump; jump tables are not resolved in this version, so the code it reaches "
-               "went unchecked",
-               insn_text);
-    }
 
     if (outcome.falls_through) {
       uint64_t next = pc + insn_size;
@@ -503,37 +469,106 @@ FdeResult FdeChecker::Check(const FdeCfi& cfi, bool at_function_entry) const {
     sink.Add(Finding::Severity::kReview, cfi.pc_begin,
              absl::StrFormat("analysis gave up after %d dataflow steps", static_cast<int>(options_.max_iterations)),
              "");
-  } else if (options_.report_coverage_gaps) {
-    // Bytes the walk never reached were never checked, so saying the FDE
-    // is blessed would be a lie. Padding does not count.
-    uint64_t pc = cfi.pc_begin;
-    while (pc < cfi.pc_end) {
-      auto it = insn_sizes.find(pc);
-      if (it != insn_sizes.end()) {
-        pc += it->second;
+  } else {
+    // Pass 2: Verify settled states against declared CFI rows in deterministic (sorted PC) order.
+    std::vector<uint64_t> reached_pcs;
+    reached_pcs.reserve(in_states.size());
+    for (const auto& [pc, _] : in_states) {
+      reached_pcs.push_back(pc);
+    }
+    std::sort(reached_pcs.begin(), reached_pcs.end());
+
+    for (uint64_t pc : reached_pcs) {
+      const AbsState& state = in_states[pc];
+
+      std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
+      const cs_insn* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
+      if (insn == nullptr) {
+        sink.Add(Finding::Severity::kReview, pc, "cannot decode the instruction at this address", "");
         continue;
       }
-      uint64_t gap_start = pc;
-      bool all_padding = true;
-      while (pc < cfi.pc_end && insn_sizes.find(pc) == insn_sizes.end()) {
-        std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
-        const cs_insn* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
-        if (insn == nullptr) {
-          all_padding = false;
-          pc++;
+      if (pc + insn->size > cfi.pc_end) {
+        sink.Add(Finding::Severity::kReview, pc, "instruction runs past the end of the FDE's PC range",
+                 Disassembler::Text(*insn));
+        continue;
+      }
+      std::string insn_text = Disassembler::Text(*insn);
+      result.instructions_checked++;
+
+      // The row at pc describes the state when RIP == pc, so compare
+      // before applying the instruction, not after.
+      const CfiRow* row = cfi.RowAt(pc);
+      if (row == nullptr) {
+        sink.Add(Finding::Severity::kReview, pc, "no CFI row covers this address", insn_text);
+      } else {
+        row_checker.Check(pc, *row, state, insn_text);
+      }
+
+      auto it_conflicts = join_conflicts.find(pc);
+      if (it_conflicts != join_conflicts.end()) {
+        for (const JoinConflict& c : it_conflicts->second) {
+          if (row == nullptr || !RowDependsOn(*row, c)) {
+            continue;
+          }
+          // .eh_frame declares one state per PC, so two edges arriving here
+          // with different values cannot both match the single row covering
+          // this address -- which makes this either the compiler bug we are
+          // hunting or a gap in our own reachability. This version has known
+          // gaps (it does not know which calls never return, and it does not
+          // resolve jump tables), so it reports rather than accuses.
+          sink.Add(Finding::Severity::kReview, pc,
+                   absl::StrFormat("paths into this address disagree: %s -- one of them must contradict the single CFI "
+                                   "row here, unless one of them is not really reachable",
+                                   c.Describe()),
+                   "");
+        }
+      }
+
+      AbsState state_copy = state;
+      TransferOutcome outcome = semantics.Transfer(*insn, &state_copy);
+      if (outcome.review_reason != nullptr) {
+        sink.Add(Finding::Severity::kReview, pc, outcome.review_reason, insn_text);
+      }
+      if (outcome.indirect_branch) {
+        sink.Add(Finding::Severity::kReview, pc,
+                 "unresolved indirect jump; jump tables are not resolved in this version, so the code it reaches "
+                 "went unchecked",
+                 insn_text);
+      }
+    }
+
+    if (options_.report_coverage_gaps) {
+      // Bytes the walk never reached were never checked, so saying the FDE
+      // is blessed would be a lie. Padding does not count.
+      uint64_t pc = cfi.pc_begin;
+      while (pc < cfi.pc_end) {
+        auto it = insn_sizes.find(pc);
+        if (it != insn_sizes.end()) {
+          pc += it->second;
           continue;
         }
-        if (insn->id != X86_INS_NOP && insn->id != X86_INS_INT3) {
-          all_padding = false;
+        uint64_t gap_start = pc;
+        bool all_padding = true;
+        while (pc < cfi.pc_end && insn_sizes.find(pc) == insn_sizes.end()) {
+          std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
+          const cs_insn* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
+          if (insn == nullptr) {
+            all_padding = false;
+            pc++;
+            continue;
+          }
+          if (insn->id != X86_INS_NOP && insn->id != X86_INS_INT3) {
+            all_padding = false;
+          }
+          pc += insn->size;
         }
-        pc += insn->size;
-      }
-      if (!all_padding) {
-        sink.Add(Finding::Severity::kReview, gap_start,
-                 absl::StrFormat("%d bytes from here were not reached by the control-flow walk, so their CFI went "
-                                 "unchecked (exception landing pads and jump-table targets look like this)",
-                                 static_cast<int>(pc - gap_start)),
-                 "");
+        if (!all_padding) {
+          sink.Add(Finding::Severity::kReview, gap_start,
+                   absl::StrFormat("%d bytes from here were not reached by the control-flow walk, so their CFI went "
+                                   "unchecked (exception landing pads and jump-table targets look like this)",
+                                   static_cast<int>(pc - gap_start)),
+                   "");
+        }
       }
     }
   }

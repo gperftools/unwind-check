@@ -194,10 +194,16 @@ Two deliberate approximations, both commented at their definitions:
 
 ### 4.5 The walk, and the one inference in it
 
-Recursive descent within `[pc_begin, pc_end)` following direct branches, with a
-per-instruction worklist dataflow. At each address the row is compared **before**
-the transfer function runs, because the row at pc describes the state when
-`RIP == pc`.
+Analysis runs in two passes:
+
+1. **Forward dataflow (abstract interpretation):** Recursive descent within
+   `[pc_begin, pc_end)` following direct branches, with a per-instruction
+   worklist dataflow until the state settles across all reachable instructions.
+2. **Verification and reporting:** Once the dataflow has converged to a fixed
+   point, reached instructions are inspected in deterministic (sorted PC) order.
+   At each address the declared CFI row is compared against the settled state
+   **before** the transfer function runs, because the row at pc describes the
+   state when `RIP == pc`.
 
 The subtle part is `FallThroughIsReal`. Falling off the end of an instruction is
 usually a real edge, but not when the call never returns (`call abort`) or the
