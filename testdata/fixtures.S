@@ -246,18 +246,103 @@ good_call:
         .size   good_call, .-good_call
 
 /* ---------------------------------------------------------------- */
-/* An indirect jump: this version does not resolve jump tables. */
+/* An indirect jump with an active stack frame: jump table inside a function. */
         .globl  review_indirect_jump
         .type   review_indirect_jump, @function
 review_indirect_jump:
         .cfi_startproc
+        subq    $8, %rsp
+        .cfi_def_cfa_offset 16
         testl   %edi, %edi
         je      .Lrij_out
         jmp     *%rsi
 .Lrij_out:
+        addq    $8, %rsp
+        .cfi_def_cfa_offset 8
         ret
         .cfi_endproc
         .size   review_indirect_jump, .-review_indirect_jump
+
+/* ---------------------------------------------------------------- */
+/* A direct tail call with the frame cleanly dismantled. */
+        .globl  good_tail_call
+        .type   good_tail_call, @function
+good_tail_call:
+        .cfi_startproc
+        movl    %edi, %eax
+        jmp     good_leaf
+        .cfi_endproc
+        .size   good_tail_call, .-good_tail_call
+
+/* ---------------------------------------------------------------- */
+/* An indirect tail call (e.g. vtable / function pointer tail call). */
+        .globl  good_indirect_tail_call
+        .type   good_indirect_tail_call, @function
+good_indirect_tail_call:
+        .cfi_startproc
+        movl    %edi, %eax
+        jmp     *%rsi
+        .cfi_endproc
+        .size   good_indirect_tail_call, .-good_indirect_tail_call
+
+/* ---------------------------------------------------------------- */
+/* Return with stack pointer not restored to CFA-8. */
+        .globl  bad_ret_stack_not_restored
+        .type   bad_ret_stack_not_restored, @function
+bad_ret_stack_not_restored:
+        .cfi_startproc
+        subq    $8, %rsp
+        .cfi_def_cfa_offset 16
+        ret
+        .cfi_endproc
+        .size   bad_ret_stack_not_restored, .-bad_ret_stack_not_restored
+
+/* ---------------------------------------------------------------- */
+/* Return with wrong callee-saved register restored. */
+        .globl  bad_ret_wrong_reg_restored
+        .type   bad_ret_wrong_reg_restored, @function
+bad_ret_wrong_reg_restored:
+        .cfi_startproc
+        pushq   %rbx
+        .cfi_def_cfa_offset 16
+        pushq   %r12
+        .cfi_def_cfa_offset 24
+        popq    %rbx
+        .cfi_def_cfa_offset 16
+        popq    %r12
+        .cfi_def_cfa_offset 8
+        ret
+        .cfi_endproc
+        .size   bad_ret_wrong_reg_restored, .-bad_ret_wrong_reg_restored
+
+/* ---------------------------------------------------------------- */
+/* Tail call with wrong callee-saved register restored. */
+        .globl  bad_tail_call_wrong_reg_restored
+        .type   bad_tail_call_wrong_reg_restored, @function
+bad_tail_call_wrong_reg_restored:
+        .cfi_startproc
+        pushq   %rbx
+        .cfi_def_cfa_offset 16
+        pushq   %r12
+        .cfi_def_cfa_offset 24
+        popq    %rbx
+        .cfi_def_cfa_offset 16
+        popq    %r12
+        .cfi_def_cfa_offset 8
+        jmp     good_leaf
+        .cfi_endproc
+        .size   bad_tail_call_wrong_reg_restored, .-bad_tail_call_wrong_reg_restored
+
+/* ---------------------------------------------------------------- */
+/* Return with untracked callee-saved register. */
+        .globl  review_ret_callee_saved_untracked
+        .type   review_ret_callee_saved_untracked, @function
+review_ret_callee_saved_untracked:
+        .cfi_startproc
+        movq    $123, %rbx
+        ret
+        .cfi_endproc
+        .size   review_ret_callee_saved_untracked, .-review_ret_callee_saved_untracked
 
 /* ---------------------------------------------------------------- */
 /*

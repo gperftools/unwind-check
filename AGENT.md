@@ -34,9 +34,15 @@ Exit codes follow: 0 all blessed, 1 a mismatch, 2 review only, 3 the run failed.
 
 ```
 bazel test :all                              # five test targets, all hermetic
-bazel run :unwind-check -- /bin/ls           # a real binary
-bazel build :unwind-check && ./bazel-bin/unwind-check --summary_only /bin/ls
+bazel build -c opt :unwind-check && ./bazel-bin/unwind-check --summary_only /bin/ls
 ```
+
+**Use `-c opt` for anything that runs on a real binary.** A dbg build is slow
+enough that even a single medium binary like `/usr/bin/gcc` can run for
+minutes instead of under a second; `libc.so.6` under dbg is enough to time out
+an interactive session. `bazel test` is fine either way since the fixtures are
+tiny, but `bazel run` / `bazel-bin/unwind-check` against anything real should
+always be `-c opt`.
 
 * `.bazelversion` pins 9.2.0.
 * Capstone is the locally installed `libcapstone-dev` (5.0.9 here), linked with
@@ -66,7 +72,7 @@ instead of checking; compare against `readelf --debug-dump=frames-interp`),
 | `abs-state.{h,cc}` | the lattice and its join (§4.3) |
 | `insn-semantics.{h,cc}` | the *computed* side: what each instruction does to the stack (§4.4) |
 | `fde-checker.{h,cc}` | CFG walk, worklist dataflow, and the comparison (§4.5) |
-| `symbolizer.{h,cc}` | symbol names and source lines (§4.6) |
+| `symbolizer.{h,cc}` | symbol names and source lines (§4.7) |
 | `report.{h,cc}`, `unwind-check.cc` | flags, structural checks, output |
 | `testdata/fixtures.S` | hand-written CFI whose right answer is fixed by the fixture |
 | `robustness-sweep.sh` | the non-hermetic counterpart to `bazel test`: does it survive real binaries |
@@ -150,9 +156,29 @@ fact `Entry()` assumes outright — so it seeds to `kOrigReg(r)`. Anywhere else
 exception landing pad reached by the unwinder mid-function — the CFI's
 silence only means nothing needed unwinding that register, not that it is
 unchanged, so it seeds to `kTop` instead. An *explicit* `kSameValue` rule is a
-real CFI assertion either way and is always trusted. `FDEChecker` passes its
-own `at_function_entry` (see below) through for the FDE's own first row, and
+real CFI assertion either way and is always trusted. `FDEChecker` passes
 `false` for every landing pad, since a pad is reached only by the unwinder.
+
+For the FDE's own first row, `FDEChecker` deliberately does **not** pass its
+own `at_function_entry` parameter through here — it passes `is_canonical_entry`
+instead, a structural fact about the row itself (`CFA = rsp+8`, `ra` at
+`[CFA-8]`) rather than a claim from the symbol table. The two sound like they
+should agree, and for a normal, symbolized function they do. But a stripped
+binary — the common case — has no `.symtab`, and dynsym only names exported
+functions: on a stock `/bin/ls` here, 339 of its 341 FDEs carry no symbol at
+all, so `at_function_entry` is false for nearly everything. Seeding on it
+anyway made unmentioned callee-saved registers seed to `kTop` almost
+everywhere, which cascades into a wrong-looking mismatch or review at nearly
+every `ret` — dropping `/bin/ls` from 327/341 blessed to 31/341 in testing.
+`is_canonical_entry` needs no symbol and is sound for the same reason
+`at_function_entry` is: a callee-saved register cannot be clobbered without
+first being spilled, and spilling one requires moving off `CFA = rsp+8` — so
+an unmoved, canonical CFA is itself proof nothing relevant has run yet. The
+one thing this trades away is precision on a genuine entry with a
+*non-canonical* first row (`_dl_runtime_resolve_fxsave` again): such an FDE
+now seeds unmentioned registers to `kTop` rather than their entry value, but
+it already earns its own review below for not looking like an entry, so
+nothing is lost silently.
 
 Where a function symbol starts the FDE, `FDEChecker` separately notes it if the
 first row is not the canonical `CFA = rsp+8` with `ra` at `[CFA-8]`. That is a
@@ -230,7 +256,55 @@ at that address actually consults the register or slot that disagreed. A
 disagreement the CFI never reads cannot make the row wrong, and this version has
 known reachability gaps, so it reports rather than accuses.
 
-### 4.6 Symbolization
+### 4.6 Exit-state validation
+
+Everything above checks the declared CFI against the code. `CheckExitState`
+(in `fde-checker.cc`) checks something orthogonal: whether the code, at the
+point it actually leaves the FDE, obeys the x86-64 return convention —
+independent of what any CFI row says. It runs at every `ret` and at every
+*unconditional* direct jump whose target falls outside `[pc_begin, pc_end)`,
+the latter standing in for a tail call. Conditional jumps out of the FDE
+(`jne .Lcold`) are left alone, same as before this existed — a taken branch
+out is normal control flow this tool was never trying to follow.
+
+Three things must hold at that point: rsp back at `CFA-8`, every callee-saved
+register (`rbx`, `rbp`, `r12`-`r15`) still holding its entry value, and the
+return-address slot at `[CFA-8]` still holding what the call originally put
+there. A `ret` that fails any of these is a `MISMATCH` — the ABI is not
+optional. A tail-call jump is softer: rsp not being back at `CFA-8` is only a
+`REVIEW`, because the jump might be an ordinary branch to a `.cold` fragment
+or a noreturn call rather than a real tail call, and in that ambiguous case
+the frame legitimately is not torn down yet. When that ambiguity fires, the
+callee-saved and return-address checks are skipped entirely rather than
+compared against a CFA that may not mean "the frame is gone" here — one review
+naming the ambiguity is the useful signal; asserting against the wrong
+reference point on top of it would just be noise. All three checks also
+degrade to a named `REVIEW` (never silence) when the relevant value is
+untracked rather than concretely wrong, matching the rest of this tool's
+"say why, don't guess" rule.
+
+This only runs when the FDE's first row was canonical (see `is_canonical_entry`
+in §4.3) — otherwise there is no "should be `CFA-8`" to check against, and the
+FDE gets one review saying so instead.
+
+**Indirect tail calls.** An unresolved indirect jump (`jmp *%rax`) is
+ordinarily a named `REVIEW` — jump tables are not resolved (§6). But if the
+state at that jump already looks like a clean exit (rsp at `CFA-8`, every
+callee-saved register at its entry value — see `IsExitState`), it is blessed
+instead, on the theory that this is a virtual call or function-pointer tail
+call rather than an in-function jump table, and whatever it jumps to is
+somebody else's FDE, checked on its own. This is a heuristic, not a proof: a
+small dispatcher function that hasn't touched the stack yet can have exactly
+this shape at a genuine jump-table dispatch, and its case targets would then
+go unwalked without a word at that PC. The safety net is
+`--report_coverage_gaps` (on by default): bytes inside the FDE the walk never
+reached still surface as a `REVIEW` naming the gap, so this can turn a
+specific "unresolved indirect jump" diagnostic into a vaguer "N bytes not
+reached" one, but it cannot turn into a silent, fully wrong `BLESSED` unless
+that flag is turned off, or every one of the jump's real targets happens to
+be reached some other way regardless.
+
+### 4.7 Symbolization
 
 Names come from `.symtab`, or `.dynsym` when there is no `.symtab`, and always
 work. Source lines come from a single batched `addr2line` run over every address
@@ -244,7 +318,7 @@ source line came with it — given no debug info at all it still answers `-f` by
 naming the nearest preceding dynamic symbol, size be damned, which is how every
 one of gcc's 2448 FDEs comes back as `_obstack_newchunk`.
 
-### 4.7 Structural checks
+### 4.8 Structural checks
 
 Before any disassembly, in `unwind-check.cc`: `.eh_frame` must exist; each FDE range
 must be non-empty and inside one executable PT_LOAD; ranges must not overlap.
@@ -290,8 +364,12 @@ indirect jumps.
 
 Deliberately out of scope for this version, in rough order of value:
 
-* **Jump tables.** An indirect jump is a `REVIEW` naming the PC. The heuristics
-  to implement are already written down in
+* **Jump tables.** An indirect jump is a `REVIEW` naming the PC, unless the
+  state at that point already looks like a clean function exit, in which case
+  it is blessed as a probable indirect tail call instead (§4.6) — a real jump
+  table dispatching from that same shape is the failure mode, caught only by
+  `--report_coverage_gaps` rather than by name. The heuristics to properly
+  resolve tables are already written down in
   `../backtrace-test/doc/binary-unwind-analysis.adoc`: the function-bounds
   golden rule, the PIC `movsxd`/`add` pattern, and a 512-entry circuit breaker.
   This plus landing pads is most of the review volume.

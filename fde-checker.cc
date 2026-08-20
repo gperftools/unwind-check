@@ -301,6 +301,88 @@ bool FallThroughIsReal(const CFI& cfi, const CFIRow* here, uint64_t next, const 
   return CFASatisfiedBy(row->cfa, now) || CFASatisfiedBy(row->cfa, was);
 }
 
+void CheckExitState(uint64_t pc, const AbsState& state, const std::string& insn_text, FindingSink* sink,
+                    bool at_function_entry, bool is_tail_call) {
+  const char* context = is_tail_call ? "tail call" : "return";
+  if (!at_function_entry) {
+    sink->Add(Finding::Severity::kReview, pc,
+              absl::StrFormat("%s in an FDE that did not start at a canonical function entry", context), insn_text);
+    return;
+  }
+
+  // 1. Check stack pointer
+  const AbsVal& rsp = state.reg(kDWARFRsp);
+  if (rsp.is_unknown()) {
+    sink->Add(Finding::Severity::kReview, pc, absl::StrFormat("%s with untracked rsp (%s)", context, rsp.ToString()),
+              insn_text);
+  } else if (!rsp.IsCFARel(-8)) {
+    if (is_tail_call) {
+      sink->Add(Finding::Severity::kReview, pc,
+                absl::StrFormat("unconditional jump out of FDE with rsp at CFA%+d (should be CFA-8 for a tail call; "
+                                "could be a branch to a cold fragment or noreturn call)",
+                                static_cast<int>(rsp.delta)),
+                insn_text);
+    } else {
+      sink->Add(Finding::Severity::kMismatch, pc,
+                absl::StrFormat("return with rsp at CFA%+d (should be CFA-8)", static_cast<int>(rsp.delta)),
+                insn_text);
+    }
+  }
+
+  // A tail call whose rsp is not back at CFA-8 already earned the review
+  // above and might just be a branch to a `.cold` fragment rather than a
+  // real tail call -- in which case the frame is not really torn down yet
+  // either, so checking callee-saved registers and the return-address slot
+  // against the ABI's return convention would only add redundant noise on
+  // top of that one review.
+  bool ambiguous_tail_call = is_tail_call && !rsp.IsCFARel(-8);
+
+  // 2. Check callee-saved registers
+  if (!ambiguous_tail_call) {
+    for (int r : kCalleeSaved) {
+      const AbsVal& v = state.reg(r);
+      if (v.is_unknown()) {
+        sink->Add(Finding::Severity::kReview, pc,
+                  absl::StrFormat("%s with untracked callee-saved register %s (%s)", context, DWARFRegName(r),
+                                  v.ToString()),
+                  insn_text);
+      } else if (!v.IsOrigReg(r)) {
+        sink->Add(Finding::Severity::kMismatch, pc,
+                  absl::StrFormat("%s with callee-saved register %s holding %s (entry value was not restored)",
+                                  context, DWARFRegName(r), v.ToString()),
+                  insn_text);
+      }
+    }
+  }
+
+  // 3. Check return address slot at [CFA-8]
+  if (!ambiguous_tail_call) {
+    AbsVal ra = state.Slot(-8);
+    if (ra.is_unknown()) {
+      sink->Add(Finding::Severity::kReview, pc,
+                absl::StrFormat("%s with untracked return address slot at [CFA-8] (%s)", context, ra.ToString()),
+                insn_text);
+    } else if (!ra.IsOrigReg(kDWARFRip)) {
+      sink->Add(Finding::Severity::kMismatch, pc,
+                absl::StrFormat("%s with return address slot at [CFA-8] holding %s (overwritten)", context,
+                                ra.ToString()),
+                insn_text);
+    }
+  }
+}
+
+bool IsExitState(const AbsState& state) {
+  if (!state.reg(kDWARFRsp).IsCFARel(-8)) {
+    return false;
+  }
+  for (int r : kCalleeSaved) {
+    if (!state.reg(r).IsOrigReg(r)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 const char* VerdictName(Verdict v) {
@@ -361,6 +443,12 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     result.verdict = Verdict::kReview;
     return result;
   }
+  bool is_canonical_entry = (first_row->cfa.kind == CFARule::Kind::kRegOffset &&
+                              first_row->cfa.reg == kDWARFRsp &&
+                              first_row->cfa.offset == 8 &&
+                              (first_row->regs[kDWARFRip].kind == RegRule::Kind::kAtCFAOffset &&
+                               first_row->regs[kDWARFRip].offset == -8));
+
   if (at_function_entry) {
     // A function entered by `call` has rsp at CFA-8 on its first
     // instruction, with the return address in the word it points at.
@@ -421,8 +509,18 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     }
   }
 
-  // Start with "normal" instructions. Landing pads don't have known rsp state.
-  propagate(cfi.pc_begin, AbsState::SeedFromRow(*first_row, at_function_entry));
+  // Start with "normal" instructions. Landing pads don't have known rsp
+  // state. Seeded on is_canonical_entry, not at_function_entry: symbol
+  // tables are frequently absent (a stripped binary has one for maybe a
+  // third of its FDEs), but a callee-saved register cannot be clobbered
+  // without first being spilled, and spilling one requires moving off
+  // CFA=rsp+8 -- so an unmoved, canonical CFA is itself proof nothing
+  // relevant has run yet, no symbol required. This does mean a genuine
+  // function entry with a non-canonical first row (_dl_runtime_resolve_fxsave)
+  // seeds unmentioned registers to kTop instead of their entry value; that
+  // costs precision, never soundness, and such rows already earn their own
+  // review above.
+  propagate(cfi.pc_begin, AbsState::SeedFromRow(*first_row, is_canonical_entry));
 
   // Pass 1: Forward dataflow until the abstract state settles across all reached instructions.
   size_t iterations = 0;
@@ -530,11 +628,21 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     if (outcome.review_reason != nullptr) {
       sink.Add(Finding::Severity::kReview, pc, outcome.review_reason, insn_text);
     }
-    if (outcome.indirect_branch) {
-      sink.Add(Finding::Severity::kReview, pc,
-               "unresolved indirect jump; jump tables are not resolved in this version, so the code it reaches "
-               "went unchecked",
-               insn_text);
+    if (outcome.is_return) {
+      CheckExitState(pc, state, insn_text, &sink, is_canonical_entry, /*is_tail_call=*/false);
+    } else if (!outcome.falls_through && outcome.has_direct_target &&
+               (outcome.direct_target < cfi.pc_begin || outcome.direct_target >= cfi.pc_end)) {
+      CheckExitState(pc, state, insn_text, &sink, is_canonical_entry, /*is_tail_call=*/true);
+    } else if (outcome.indirect_branch) {
+      if (is_canonical_entry && IsExitState(state)) {
+        // Indirect tail call (e.g. virtual call or function pointer tail call)
+        // with valid exit state -- blessed.
+      } else {
+        sink.Add(Finding::Severity::kReview, pc,
+                 "unresolved indirect jump; jump tables are not resolved in this version, so the code it reaches "
+                 "went unchecked",
+                 insn_text);
+      }
     }
 
     if (options_.report_coverage_gaps) {

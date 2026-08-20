@@ -107,7 +107,9 @@ TEST_F(FixturesTest, EveryFixtureIsPresent) {
   // .eh_frame is a failure rather than a quietly smaller test.
   for (const char* name :
        {"good_leaf", "good_frame_pointer", "good_callee_saved", "good_leave", "good_shared_epilogue", "good_mov_spill",
-        "good_call", "bad_hoisted_add", "bad_late_push_cfi", "review_unusual_entry_row", "bad_wrong_register_saved",
+        "good_call", "good_tail_call", "good_indirect_tail_call", "bad_hoisted_add", "bad_late_push_cfi",
+        "review_unusual_entry_row", "bad_wrong_register_saved", "bad_ret_stack_not_restored",
+        "bad_ret_wrong_reg_restored", "bad_tail_call_wrong_reg_restored", "review_ret_callee_saved_untracked",
         "review_indirect_jump", "review_cfa_expression"}) {
     EXPECT_TRUE(by_name_->contains(name)) << name << " has no FDE";
   }
@@ -163,6 +165,26 @@ TEST_F(FixturesTest, UnusualEntryRowIsFlaggedButNotCalledABug) {
 TEST_F(FixturesTest, SlotHoldingTheWrongRegisterIsCaught) {
   EXPECT_THAT(Get("bad_wrong_register_saved").messages,
               Contains(HasSubstr("CFI says rbx is saved at [CFA-16], but that slot holds entry rbp")));
+}
+
+TEST_F(FixturesTest, ReturnWithUnrestoredStackIsCaught) {
+  EXPECT_THAT(Get("bad_ret_stack_not_restored").messages,
+              Contains(HasSubstr("return with rsp at CFA-16 (should be CFA-8)")));
+}
+
+TEST_F(FixturesTest, ReturnWithWrongCalleeSavedRegisterIsCaught) {
+  EXPECT_THAT(Get("bad_ret_wrong_reg_restored").messages,
+              Contains(HasSubstr("return with callee-saved register rbx holding entry r12")));
+}
+
+TEST_F(FixturesTest, TailCallWithWrongCalleeSavedRegisterIsCaught) {
+  EXPECT_THAT(Get("bad_tail_call_wrong_reg_restored").messages,
+              Contains(HasSubstr("tail call with callee-saved register rbx holding entry r12")));
+}
+
+TEST_F(FixturesTest, ReturnWithUntrackedCalleeSavedIsReview) {
+  EXPECT_THAT(Get("review_ret_callee_saved_untracked").messages,
+              Contains(HasSubstr("return with untracked callee-saved register rbx")));
 }
 
 TEST_F(FixturesTest, IndirectJumpIsFlaggedNotGuessed) {
