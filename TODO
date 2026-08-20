@@ -10,3 +10,5 @@
 
 * _start seems to be always wrong. Bad unwind info. Report upstream?
 
+* for exception pads at least when they land in our FDE check that CFI
+  state matches CFI state for the range of instructions of "call-site".
