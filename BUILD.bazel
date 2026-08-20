@@ -106,6 +106,8 @@ cc_library(
         ":abs-state",
         ":capstone",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/strings:str_format",
     ],
 )
 
@@ -123,6 +125,7 @@ cc_library(
         ":insn-semantics",
         ":lsda-reader",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/strings:str_format",
     ],
 )

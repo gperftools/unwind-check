@@ -5,6 +5,8 @@
 #include <optional>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/log/log.h"
+#include "absl/strings/str_format.h"
 
 namespace unwind_analysis {
 
@@ -193,8 +195,15 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
     if (x.op_count >= 1 && x.operands[0].type == X86_OP_REG) {
       int r = DWARFRegOf(x.operands[0].reg);
       const AbsVal v = r >= 0 ? state->reg(r) : AbsVal::Top();
+      VLOG(1) << absl::StrFormat("0x%llx: indirect jmp via reg %d, value=%s", (unsigned long long)insn.address, r,
+                                  v.ToString());
       if (v.IsJumpTarget()) {
         std::optional<uint64_t> bound = state->UBound(v.IndexReg());
+        VLOG(1) << absl::StrFormat("0x%llx:   jump target table=0x%llx index_reg=%d ubound[%d]=%s",
+                                    (unsigned long long)insn.address, (unsigned long long)v.TableAddr(),
+                                    v.IndexReg(), v.IndexReg(),
+                                    bound.has_value() ? absl::StrFormat("%llu", (unsigned long long)*bound)
+                                                       : std::string("<none>"));
         if (bound.has_value()) {
           out.has_jump_table = true;
           out.jump_table_addr = v.TableAddr();
@@ -203,6 +212,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
         }
       }
     }
+    VLOG(1) << absl::StrFormat("0x%llx: indirect jmp not resolved to a switch table", (unsigned long long)insn.address);
     out.indirect_branch = true;
     return out;
   }
@@ -327,6 +337,8 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       // relative to the end of this instruction, not its start.
       if (mem.base == X86_REG_RIP && mem.index == X86_REG_INVALID) {
         uint64_t target = insn.address + insn.size + static_cast<int64_t>(mem.disp);
+        VLOG(1) << absl::StrFormat("0x%llx: lea rip-relative -> reg %d = kConst(0x%llx)",
+                                    (unsigned long long)insn.address, d, (unsigned long long)target);
         state->SetReg(d, AbsVal::Const(static_cast<int64_t>(target)));
         return out;
       }
@@ -405,9 +417,14 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       }
       const AbsVal& base_val = state->reg(base_reg);
       if (!base_val.IsConst()) {
+        VLOG(1) << absl::StrFormat(
+            "0x%llx: movslq disp(%%B,%%I,4),%%T base reg %d is not a known constant (value=%s) -- not a table load",
+            (unsigned long long)insn.address, base_reg, base_val.ToString());
         break;
       }
       uint64_t table = static_cast<uint64_t>(base_val.ConstValue()) + mem.disp;
+      VLOG(1) << absl::StrFormat("0x%llx: movslq -> reg %d = kTableEntry(table=0x%llx, index_reg=%d)",
+                                  (unsigned long long)insn.address, d, (unsigned long long)table, idx_reg);
       state->SetReg(
           d, AbsVal::TableEntry(table, static_cast<uint8_t>(idx_reg), static_cast<uint64_t>(base_val.ConstValue())));
       return out;
@@ -439,6 +456,8 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
             resolved = resolve(op1, op0);
           }
           if (resolved.has_value()) {
+            VLOG(1) << absl::StrFormat("0x%llx: %s -> reg %d = kJumpTarget(%s)", (unsigned long long)insn.address,
+                                        insn.id == X86_INS_ADD ? "add" : "sub", d0, resolved->ToString());
             state->SetReg(d0, *resolved);
             return out;
           }
