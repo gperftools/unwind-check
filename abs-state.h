@@ -53,27 +53,39 @@ struct AbsVal {
   int64_t delta = 0;
   uint8_t reg = 0;
   uint64_t aux = 0;
+  // Valid for kTableEntry and kJumpTarget only: the index register's
+  // switch-table upper bound (initial-switch-tables-plan.md §3.2),
+  // captured once at `movslq`-time from AbsState::UBound and carried
+  // forward through kJumpTarget, rather than re-derived with a live
+  // AbsState::UBound lookup at the eventual `jmp` (switch-table-amend-plan.md
+  // §2). A live lookup at the `jmp` is a narrow hazard: an intervening
+  // instruction between the table load and the `jmp` could reuse the same
+  // register number for an unrelated guard, and a live lookup would
+  // silently pick that bound up instead of the one that actually sized
+  // this table. A snapshot taken when the index's job is already done is
+  // immune to anything that happens afterward.
+  std::optional<uint64_t> table_bound;
 
   static AbsVal Top() {
     return {};
   }
   static AbsVal Bottom() {
-    return AbsVal{Kind::kBottom, 0, 0};
+    return AbsVal{Kind::kBottom, 0, 0, 0, std::nullopt};
   }
   static AbsVal CFARel(int64_t delta) {
-    return AbsVal{Kind::kCFARel, delta, 0};
+    return AbsVal{Kind::kCFARel, delta, 0, 0, std::nullopt};
   }
   static AbsVal OrigReg(int reg) {
-    return AbsVal{Kind::kOrigReg, 0, static_cast<uint8_t>(reg)};
+    return AbsVal{Kind::kOrigReg, 0, static_cast<uint8_t>(reg), 0, std::nullopt};
   }
   static AbsVal Const(int64_t value) {
-    return AbsVal{Kind::kConst, value, 0};
+    return AbsVal{Kind::kConst, value, 0, 0, std::nullopt};
   }
-  static AbsVal TableEntry(uint64_t table_addr, uint8_t index_reg, uint64_t base_const) {
-    return AbsVal{Kind::kTableEntry, static_cast<int64_t>(table_addr), index_reg, base_const};
+  static AbsVal TableEntry(uint64_t table_addr, uint8_t index_reg, uint64_t base_const, std::optional<uint64_t> bound) {
+    return AbsVal{Kind::kTableEntry, static_cast<int64_t>(table_addr), index_reg, base_const, bound};
   }
-  static AbsVal JumpTarget(uint64_t table_addr, uint8_t index_reg) {
-    return AbsVal{Kind::kJumpTarget, static_cast<int64_t>(table_addr), index_reg};
+  static AbsVal JumpTarget(uint64_t table_addr, uint8_t index_reg, std::optional<uint64_t> bound) {
+    return AbsVal{Kind::kJumpTarget, static_cast<int64_t>(table_addr), index_reg, 0, bound};
   }
 
   bool is_top() const {
@@ -118,6 +130,12 @@ struct AbsVal {
   // `%B` before it will resolve to a kJumpTarget.
   uint64_t TableBaseConst() const {
     return aux;
+  }
+  // Valid for kTableEntry and kJumpTarget: the index register's bound
+  // captured at movslq-time, if a guard had established one -- see
+  // `table_bound` above.
+  std::optional<uint64_t> CapturedBound() const {
+    return table_bound;
   }
 
   bool operator==(const AbsVal&) const = default;

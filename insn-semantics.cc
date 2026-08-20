@@ -196,14 +196,18 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       int r = DWARFRegOf(x.operands[0].reg);
       const AbsVal v = r >= 0 ? state->reg(r) : AbsVal::Top();
       VLOG(1) << absl::StrFormat("0x%llx: indirect jmp via reg %d, value=%s", (unsigned long long)insn.address, r,
-                                  v.ToString());
+                                 v.ToString());
       if (v.IsJumpTarget()) {
-        std::optional<uint64_t> bound = state->UBound(v.IndexReg());
-        VLOG(1) << absl::StrFormat("0x%llx:   jump target table=0x%llx index_reg=%d ubound[%d]=%s",
-                                    (unsigned long long)insn.address, (unsigned long long)v.TableAddr(),
-                                    v.IndexReg(), v.IndexReg(),
-                                    bound.has_value() ? absl::StrFormat("%llu", (unsigned long long)*bound)
-                                                       : std::string("<none>"));
+        // The bound was captured once at movslq-time and carried through
+        // the `add` into this kJumpTarget -- not re-derived with a live
+        // AbsState::UBound lookup here, which would be vulnerable to an
+        // intervening instruction reusing the same register number for an
+        // unrelated guard (switch-table-amend-plan.md §2).
+        std::optional<uint64_t> bound = v.CapturedBound();
+        VLOG(1) << absl::StrFormat(
+            "0x%llx:   jump target table=0x%llx index_reg=%d captured_bound=%s", (unsigned long long)insn.address,
+            (unsigned long long)v.TableAddr(), v.IndexReg(),
+            bound.has_value() ? absl::StrFormat("%llu", (unsigned long long)*bound) : std::string("<none>"));
         if (bound.has_value()) {
           out.has_jump_table = true;
           out.jump_table_addr = v.TableAddr();
@@ -423,10 +427,19 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
         break;
       }
       uint64_t table = static_cast<uint64_t>(base_val.ConstValue()) + mem.disp;
-      VLOG(1) << absl::StrFormat("0x%llx: movslq -> reg %d = kTableEntry(table=0x%llx, index_reg=%d)",
-                                  (unsigned long long)insn.address, d, (unsigned long long)table, idx_reg);
-      state->SetReg(
-          d, AbsVal::TableEntry(table, static_cast<uint8_t>(idx_reg), static_cast<uint64_t>(base_val.ConstValue())));
+      // Snapshot the index register's bound now, while its job is still
+      // fresh, rather than re-deriving it with a live lookup at the
+      // eventual `jmp` (switch-table-amend-plan.md §2) -- an intervening
+      // instruction reusing the same register number for an unrelated
+      // guard would otherwise be able to hand the resolver the wrong
+      // bound.
+      std::optional<uint64_t> bound = state->UBound(idx_reg);
+      VLOG(1) << absl::StrFormat(
+          "0x%llx: movslq -> reg %d = kTableEntry(table=0x%llx, index_reg=%d, captured_bound=%s)",
+          (unsigned long long)insn.address, d, (unsigned long long)table, idx_reg,
+          bound.has_value() ? absl::StrFormat("%llu", (unsigned long long)*bound) : std::string("<none>"));
+      state->SetReg(d, AbsVal::TableEntry(table, static_cast<uint8_t>(idx_reg),
+                                          static_cast<uint64_t>(base_val.ConstValue()), bound));
       return out;
     }
 
@@ -447,7 +460,8 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
           auto resolve = [](const AbsVal& base_candidate, const AbsVal& entry_candidate) -> std::optional<AbsVal> {
             if (base_candidate.IsConst() && entry_candidate.IsTableEntry() &&
                 entry_candidate.TableBaseConst() == static_cast<uint64_t>(base_candidate.ConstValue())) {
-              return AbsVal::JumpTarget(entry_candidate.TableAddr(), static_cast<uint8_t>(entry_candidate.IndexReg()));
+              return AbsVal::JumpTarget(entry_candidate.TableAddr(), static_cast<uint8_t>(entry_candidate.IndexReg()),
+                                        entry_candidate.CapturedBound());
             }
             return std::nullopt;
           };

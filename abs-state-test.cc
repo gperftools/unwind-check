@@ -557,9 +557,9 @@ TEST(AbsStateTest, JoinOfDifferingConstantsGoesToTopWithoutAConflict) {
 
 TEST(AbsStateTest, JoinOfATableEntryAndAJumpTargetAlsoGoesToTopWithoutAConflict) {
   AbsState a;
-  a.SetReg(kDWARFRax, AbsVal::TableEntry(0x1000, kDWARFRcx, 0x1000));
+  a.SetReg(kDWARFRax, AbsVal::TableEntry(0x1000, kDWARFRcx, 0x1000, std::nullopt));
   AbsState b;
-  b.SetReg(kDWARFRax, AbsVal::JumpTarget(0x2000, kDWARFRcx));
+  b.SetReg(kDWARFRax, AbsVal::JumpTarget(0x2000, kDWARFRcx, std::nullopt));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));

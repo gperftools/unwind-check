@@ -198,15 +198,34 @@ TEST_F(SemanticsTest, IndirectJumpThroughAJumpTargetResolvesOnlyWithAKnownBound)
 }
 
 TEST_F(SemanticsTest, IndirectJumpResolvesOnceTheIndexRegisterHasAKnownBound) {
+  // The bound is snapshotted at movslq-time (switch-table-amend-plan.md
+  // §2), so it must be set on the index register before that instruction
+  // runs -- a bound set afterwards, as this test used to do, is no longer
+  // picked up, on purpose: the whole point is to stop the resolver from
+  // re-reading AbsState::UBound live at the `jmp`.
   Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});  // rcx = const(table)
   int64_t table = state_.reg(kDWARFRcx).ConstValue();
-  Run({0x48, 0x63, 0x14, 0x81});  // rdx = table_entry(table, index=rax)
-  Run({0x48, 0x01, 0xca});        // rdx = jump_target(table, index=rax)
   state_.SetUBound(kDWARFRax, 4);
+  Run({0x48, 0x63, 0x14, 0x81});            // rdx = table_entry(table, index=rax), captures ubound[rax]=4
+  Run({0x48, 0x01, 0xca});                  // rdx = jump_target(table, index=rax), carries the captured bound
   TransferOutcome out = Run({0xff, 0xe2});  // jmp *%rdx
   EXPECT_TRUE(out.has_jump_table);
   EXPECT_EQ(out.jump_table_addr, static_cast<uint64_t>(table));
   EXPECT_EQ(out.jump_table_entries, 5u);
+}
+
+TEST_F(SemanticsTest, IndirectJumpDoesNotResolveFromABoundSetAfterTheTableLoad) {
+  // The mirror image of the test above: a live AbsState::UBound at the
+  // `jmp` is deliberately no longer consulted, so a bound that only shows
+  // up after the movslq/add sequence (e.g. from an unrelated guard that
+  // happens to reuse the index register) must not resolve the table.
+  Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});  // rcx = const(table)
+  Run({0x48, 0x63, 0x14, 0x81});                    // rdx = table_entry(table, index=rax), no bound yet
+  Run({0x48, 0x01, 0xca});                          // rdx = jump_target(table, index=rax), still no bound
+  state_.SetUBound(kDWARFRax, 4);
+  TransferOutcome out = Run({0xff, 0xe2});  // jmp *%rdx
+  EXPECT_FALSE(out.has_jump_table);
+  EXPECT_TRUE(out.indirect_branch);
 }
 
 TEST_F(SemanticsTest, StoresThroughAnUntrackedPointerDoNotWipeTheFrame) {
