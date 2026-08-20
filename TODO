@@ -34,7 +34,10 @@ table is referring to "our" FDE.
 
 * replace <Various>::ToString() with AbslStringify
 
-
+* IsFileBackedNonExecutable logic for table jumps might be a bit too
+  pessimistic. I think I've seen binaries that for various reasons
+  combined entire exec+read-only-data into big PT_LOAD segment
+  (possibly huge-page aligned).
 
 -----
 
