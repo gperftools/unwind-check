@@ -809,6 +809,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       landing_pads.clear();
     }
     for (uint64_t lp : landing_pads) {
+      VLOG(1) << absl::StrFormat("processing landing_pad into 0x%016zx", lp);
       if (lp < cfi.pc_begin || lp >= cfi.pc_end) {
         continue;  // a malformed LSDA shouldn't be able to walk us outside the FDE
       }
