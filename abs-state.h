@@ -37,10 +37,9 @@ struct AbsVal {
     kCFARel,   // the value is CFA + delta
     kOrigReg,  // the value is whatever DWARF register `reg` held on entry
     // The three kinds below exist only to resolve PIC switch-table
-    // dispatches (initial-switch-tables-plan.md §3.1). No CFI row ever
-    // asserts anything about them, so a conflict between two of these
-    // kinds is not a CFI/code disagreement -- see the carve-out in
-    // Join().
+    // dispatches. No CFI row ever asserts anything about them, so a conflict
+    // between two of these kinds is not a CFI/code disagreement -- see the
+    // carve-out in Join().
     kConst,       // a known absolute address/constant, in `delta`
     kTableEntry,  // result of a table load: table base `delta`, index reg
                   // `reg`, and the undisplaced constant the table base was
@@ -55,22 +54,20 @@ struct AbsVal {
   uint64_t aux = 0;
   // An unsigned upper bound on this value's true numeric content, if one
   // has been established by a `cmp $imm,%r; ja default` switch-table guard
-  // (initial-switch-tables-plan.md §3.2) -- valid regardless of `kind`,
-  // since the guard is a fact about the register's number, not about
-  // whatever else this AbsVal happens to track. This is auxiliary,
-  // precision-only metadata: no CFI row ever asserts anything about it
-  // (see the identity/auxiliary split in Join()), so it is joined
-  // independently of `kind`/`delta`/`reg`/`aux` -- see AbsVal::SameIdentity
-  // and JoinValue in abs-state.cc.
+  // -- valid regardless of `kind`, since the guard is a fact about the
+  // register's number, not about whatever else this AbsVal happens to track.
+  // This is auxiliary, precision-only metadata: no CFI row ever asserts
+  // anything about it (see the identity/auxiliary split in Join()), so it is
+  // joined independently of `kind`/`delta`/`reg`/`aux` -- see
+  // AbsVal::SameIdentity and JoinValue in abs-state.cc.
   //
   // For kTableEntry and kJumpTarget specifically, this is captured once at
   // `movslq`-time rather than re-derived with a live bound lookup at the
-  // eventual `jmp` (switch-table-amend-plan.md §2): an intervening
-  // instruction between the table load and the `jmp` could reuse the same
-  // register number for an unrelated guard, and a live lookup would
-  // silently pick that bound up instead of the one that actually sized
-  // this table. A snapshot taken when the index's job is already done is
-  // immune to anything that happens afterward.
+  // eventual `jmp`: an intervening instruction between the table load and
+  // the `jmp` could reuse the same register number for an unrelated guard,
+  // and a live lookup would silently pick that bound up instead of the one
+  // that actually sized this table. A snapshot taken when the index's job is
+  // already done is immune to anything that happens afterward.
   std::optional<uint64_t> bound;
 
   static AbsVal Top() {
@@ -189,13 +186,12 @@ struct AbsState {
     }
   }
 
-  // The most recent `cmp $imm,%reg` seen (initial-switch-tables-plan.md
-  // §3.2), still valid because nothing has written EFLAGS since -- see the
-  // "clear on any EFLAGS write that isn't a fresh matching cmp" rule in
-  // InsnSemantics::Transfer. This is a fact about the instruction stream,
-  // not about any one register's value, so unlike `bound` it is not part
-  // of AbsVal; there is exactly one EFLAGS, so exactly one of these,
-  // rather than one per register.
+  // The most recent `cmp $imm,%reg` seen, still valid because nothing has
+  // written EFLAGS since -- see the "clear on any EFLAGS write that isn't a
+  // fresh matching cmp" rule in InsnSemantics::Transfer. This is a fact about
+  // the instruction stream, not about any one register's value, so unlike
+  // `bound` it is not part of AbsVal; there is exactly one EFLAGS, so
+  // exactly one of these, rather than one per register.
   struct FlagsGuard {
     int reg = 0;
     uint8_t width_bits = 0;

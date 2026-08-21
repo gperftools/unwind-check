@@ -159,11 +159,10 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
   TransferOutcome out;
 
   // Any instruction that writes EFLAGS invalidates whatever `cmp` guard
-  // was last seen (initial-switch-tables-plan.md §3.2), except a fresh
-  // matching `cmp` itself, which sets state->last_cmp again below,
-  // overwriting this clear. Doing this unconditionally, once, up front
-  // means no case below -- or the unmodelled-instruction fallback -- has
-  // to remember to do it by hand.
+  // was last seen, except a fresh matching `cmp` itself, which sets
+  // state->last_cmp again below, overwriting this clear. Doing this
+  // unconditionally, once, up front means no case below -- or the
+  // unmodelled-instruction fallback -- has to remember to do it by hand.
   if (WritesEflags(insn)) {
     state->last_cmp = std::nullopt;
   }
@@ -198,7 +197,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
         // the `add` into this kJumpTarget -- not re-derived with a live
         // AbsState::Bound lookup here, which would be vulnerable to an
         // intervening instruction reusing the same register number for an
-        // unrelated guard (switch-table-amend-plan.md §2).
+        // unrelated guard.
         std::optional<uint64_t> bound = v.Bound();
         VLOG(1) << absl::StrFormat(
             "0x%llx:   jump target table=0x%llx index_reg=%d captured_bound=%s", (unsigned long long)insn.address,
@@ -384,7 +383,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
           // as movzx) carry a numeric bound across exactly the way movzx
           // does, and for the same reason: GCC frequently widens the
           // guard register into whatever register the table load actually
-          // reads (switch-table-amend-plan.md §1).
+          // reads.
           std::optional<uint64_t> carried;
           if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
             int s = DWARFRegOf(src.reg.value);
@@ -497,10 +496,9 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       uint64_t table = static_cast<uint64_t>(base_val.ConstValue()) + mem.disp.value;
       // Snapshot the index register's bound now, while its job is still
       // fresh, rather than re-deriving it with a live lookup at the
-      // eventual `jmp` (switch-table-amend-plan.md §2) -- an intervening
-      // instruction reusing the same register number for an unrelated
-      // guard would otherwise be able to hand the resolver the wrong
-      // bound.
+      // eventual `jmp` -- an intervening instruction reusing the same
+      // register number for an unrelated guard would otherwise be able to
+      // hand the resolver the wrong bound.
       std::optional<uint64_t> bound = state->Bound(idx_reg);
       VLOG(1) << absl::StrFormat(
           "0x%llx: movslq -> reg %d = kTableEntry(table=0x%llx, index_reg=%d, captured_bound=%s)",
@@ -568,8 +566,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
     }
 
     case ZYDIS_MNEMONIC_CMP: {
-      // `cmp $imm,%reg` -- the switch-table guard
-      // (initial-switch-tables-plan.md §3.2). cmp writes no register or
+      // `cmp $imm,%reg` -- the switch-table guard. cmp writes no register or
       // memory, only EFLAGS, which the unconditional check at the top of
       // this function already cleared; a matching cmp sets it again here.
       // Anything else (cmp of two registers, a memory operand) simply
@@ -594,10 +591,10 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       // `movzbl %r8b,%ecx`, `movsbl %al,%edx` and friends: the destination's own identity
       // does not survive the truncation in general, but a numeric bound
       // established on the source does -- GCC routinely widens the guard
-      // register into whatever register the table load actually reads
-      // (switch-table-amend-plan.md §1), so carrying just the bound
-      // across, rather than the whole value, is what lets the guard and
-      // the table load disagree on register without losing the guard.
+      // register into whatever register the table load actually reads,
+      // so carrying just the bound across, rather than the whole value, is
+      // what lets the guard and the table load disagree on register without
+      // losing the guard.
       //
       // For sign-extension (`movsx`), the bound is valid only when the immediate
       // bound is small enough that the sign bit is guaranteed to be 0 (i.e.

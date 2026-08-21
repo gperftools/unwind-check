@@ -538,7 +538,7 @@ TEST(AbsStateTest, SeedFromRowLeavesRspTopWhenTheCFAIsNotRspBased) {
   EXPECT_TRUE(s.reg(kDWARFRsp).is_top()) << "nothing anchors rsp when the CFA is based on another register";
 }
 
-// --- Join: switch-table resolution kinds (§3.1 of the switch-tables plan) -
+// --- Join: switch-table resolution kinds -----------------------------------
 
 TEST(AbsStateTest, JoinOfDifferingConstantsGoesToBottomWithoutAConflict) {
   // No CFI row ever asserts anything about a scratch register holding a

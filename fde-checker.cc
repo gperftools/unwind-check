@@ -28,11 +28,11 @@ bool IsCalleeSaved(int reg) {
   return std::find(std::begin(kCalleeSaved), std::end(kCalleeSaved), reg) != std::end(kCalleeSaved);
 }
 
-// Switch-table bound tracking (initial-switch-tables-plan.md §3.2): the
-// guard (`cmp $imm,%r; ja/jae default`) is now tracked forward as part of
-// AbsState (AbsState::last_cmp, joined like any other lattice field), so
-// there is no backward byte-walk or parallel bound-clearing pass to
-// maintain here any more -- see AbsVal::bound and InsnSemantics::Transfer.
+// Switch-table bound tracking: the guard (`cmp $imm,%r; ja/jae default`) is
+// now tracked forward as part of AbsState (AbsState::last_cmp, joined like
+// any other lattice field), so there is no backward byte-walk or parallel
+// bound-clearing pass to maintain here any more -- see AbsVal::bound and
+// InsnSemantics::Transfer.
 
 // Collects findings, folding repeats of the same message into one entry.
 class FindingSink {

@@ -23,7 +23,7 @@ struct TransferOutcome {
   // dispatch: a kJumpTarget value whose index register carries a known
   // upper bound (see AbsVal::bound). The table itself still has to be
   // read and validated by the caller, which owns the ELF image and the
-  // FDE's PC range -- see initial-switch-tables-plan.md §3.3.
+  // FDE's PC range.
   bool has_jump_table = false;
   uint64_t jump_table_addr = 0;
   uint64_t jump_table_entries = 0;

@@ -199,11 +199,10 @@ TEST_F(SemanticsTest, IndirectJumpThroughAJumpTargetResolvesOnlyWithAKnownBound)
 }
 
 TEST_F(SemanticsTest, IndirectJumpResolvesOnceTheIndexRegisterHasAKnownBound) {
-  // The bound is snapshotted at movslq-time (switch-table-amend-plan.md
-  // §2), so it must be set on the index register before that instruction
-  // runs -- a bound set afterwards, as this test used to do, is no longer
-  // picked up, on purpose: the whole point is to stop the resolver from
-  // re-reading AbsState::Bound live at the `jmp`.
+  // The bound is snapshotted at movslq-time, so it must be set on the index
+  // register before that instruction runs -- a bound set afterwards, as this
+  // test used to do, is no longer picked up, on purpose: the whole point is to
+  // stop the resolver from re-reading AbsState::Bound live at the `jmp`.
   Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});  // rcx = const(table)
   int64_t table = state_.reg(kDWARFRcx).ConstValue();
   state_.SetBound(kDWARFRax, 4);
