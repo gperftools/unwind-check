@@ -25,7 +25,7 @@ If the selected item is too confusing/impossible/wrong. Mark it as
   instead. and keep the entries for efficiency, but set to false on
   dequeue
 
-* consider some sort of reserve call for all kinds of containers in
+* (DONE) consider some sort of reserve call for all kinds of containers in
   the Check. Slight efficiency win. Just give them few K of capacity.
 
 * double check if say storing {x,y,z}mm field over set of slots is

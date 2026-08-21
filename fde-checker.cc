@@ -573,6 +573,14 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
   // in_states is already fully joined by the time any of the duplicates
   // run). Cleared to false when the pc is actually popped in `drain`.
   absl::flat_hash_map<uint64_t, bool> pending_pushes;
+
+  size_t estimated_capacity = std::max<size_t>(1024, (cfi.pc_end - cfi.pc_begin) / 3);
+  in_states.reserve(estimated_capacity);
+  insn_sizes.reserve(estimated_capacity);
+  worklist.reserve(estimated_capacity);
+  pending_pushes.reserve(estimated_capacity);
+  join_conflicts.reserve(estimated_capacity / 4);
+
   size_t propagate_calls = 0;
   size_t propagate_changed = 0;
   size_t propagate_dedup_skipped = 0;
