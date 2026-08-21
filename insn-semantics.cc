@@ -193,8 +193,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
     if (insn.op_count >= 1 && insn.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER) {
       int r = DWARFRegOf(insn.operands[0].reg.value);
       const AbsVal v = r >= 0 ? state->reg(r) : AbsVal::Top();
-      VLOG(1) << absl::StrFormat("0x%llx: indirect jmp via reg %d, value=%s", (unsigned long long)insn.address, r,
-                                 v.ToString());
+      VLOG(1) << absl::StrFormat("0x%x: indirect jmp via reg %d, value=%s", insn.address, r, v.ToString());
       if (v.IsJumpTarget()) {
         // The bound was captured once at movslq-time and carried through
         // the `add` into this kJumpTarget -- not re-derived with a live
@@ -202,10 +201,9 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
         // intervening instruction reusing the same register number for an
         // unrelated guard.
         std::optional<uint64_t> bound = v.Bound();
-        VLOG(1) << absl::StrFormat(
-            "0x%llx:   jump target table=0x%llx index_reg=%d captured_bound=%s", (unsigned long long)insn.address,
-            (unsigned long long)v.TableAddr(), v.IndexReg(),
-            bound.has_value() ? absl::StrFormat("%llu", (unsigned long long)*bound) : std::string("<none>"));
+        VLOG(1) << absl::StrFormat("0x%x:   jump target table=0x%x index_reg=%d captured_bound=%s", insn.address,
+                                   v.TableAddr(), v.IndexReg(),
+                                   bound.has_value() ? absl::StrFormat("%u", *bound) : std::string("<none>"));
         if (bound.has_value()) {
           out.has_jump_table = true;
           out.jump_table_addr = v.TableAddr();
@@ -214,7 +212,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
         }
       }
     }
-    VLOG(1) << absl::StrFormat("0x%llx: indirect jmp not resolved to a switch table", (unsigned long long)insn.address);
+    VLOG(1) << absl::StrFormat("0x%x: indirect jmp not resolved to a switch table", insn.address);
     out.indirect_branch = true;
     return out;
   }
@@ -349,8 +347,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       if (mem.base == ZYDIS_REGISTER_RIP && mem.index == ZYDIS_REGISTER_NONE) {
         uint64_t target = 0;
         if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn.insn, &insn.operands[1], insn.address, &target))) {
-          VLOG(1) << absl::StrFormat("0x%llx: lea rip-relative -> reg %d = kConst(0x%llx)",
-                                     (unsigned long long)insn.address, d, (unsigned long long)target);
+          VLOG(1) << absl::StrFormat("0x%x: lea rip-relative -> reg %d = kConst(0x%x)", insn.address, d, target);
           state->SetReg(d, AbsVal::Const(static_cast<int64_t>(target)));
           return out;
         }
@@ -491,8 +488,8 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       const AbsVal& base_val = state->reg(base_reg);
       if (!base_val.IsConst()) {
         VLOG(1) << absl::StrFormat(
-            "0x%llx: movslq disp(%%B,%%I,4),%%T base reg %d is not a known constant (value=%s) -- not a table load",
-            (unsigned long long)insn.address, base_reg, base_val.ToString());
+            "0x%x: movslq disp(%%B,%%I,4),%%T base reg %d is not a known constant (value=%s) -- not a table load",
+            insn.address, base_reg, base_val.ToString());
         break;
       }
       uint64_t table = static_cast<uint64_t>(base_val.ConstValue()) + mem.disp.value;
@@ -502,10 +499,9 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       // register number for an unrelated guard would otherwise be able to
       // hand the resolver the wrong bound.
       std::optional<uint64_t> bound = state->Bound(idx_reg);
-      VLOG(1) << absl::StrFormat(
-          "0x%llx: movslq -> reg %d = kTableEntry(table=0x%llx, index_reg=%d, captured_bound=%s)",
-          (unsigned long long)insn.address, d, (unsigned long long)table, idx_reg,
-          bound.has_value() ? absl::StrFormat("%llu", (unsigned long long)*bound) : std::string("<none>"));
+      VLOG(1) << absl::StrFormat("0x%x: movslq -> reg %d = kTableEntry(table=0x%x, index_reg=%d, captured_bound=%s)",
+                                 insn.address, d, table, idx_reg,
+                                 bound.has_value() ? absl::StrFormat("%u", *bound) : std::string("<none>"));
       state->SetReg(d, AbsVal::TableEntry(table, static_cast<uint8_t>(idx_reg),
                                           static_cast<uint64_t>(base_val.ConstValue()), bound));
       return out;
@@ -538,7 +534,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
             resolved = resolve(op1, op0);
           }
           if (resolved.has_value()) {
-            VLOG(1) << absl::StrFormat("0x%llx: %s -> reg %d = kJumpTarget(%s)", (unsigned long long)insn.address,
+            VLOG(1) << absl::StrFormat("0x%x: %s -> reg %d = kJumpTarget(%s)", insn.address,
                                        insn.id == ZYDIS_MNEMONIC_ADD ? "add" : "sub", d0, resolved->ToString());
             state->SetReg(d0, *resolved);
             return out;

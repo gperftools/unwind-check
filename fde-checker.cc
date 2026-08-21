@@ -369,7 +369,7 @@ void CheckExitState(uint64_t pc, const AbsState& state, const std::string& insn_
                 insn_text);
     } else {
       sink->Add(Finding::Severity::kMismatch, pc,
-                absl::StrFormat("return with rsp at CFA%+d (should be CFA-8)", static_cast<int>(rsp.delta)), insn_text);
+                absl::StrFormat("return with rsp at CFA%+d (should be CFA-8)", rsp.delta), insn_text);
     }
   }
 
@@ -463,25 +463,22 @@ const CFI* FDEChecker::CFIContaining(uint64_t pc) const {
 }
 
 std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table_addr, uint64_t entries) const {
-  VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%llx, %llu entries)", (unsigned long long)table_addr,
-                             (unsigned long long)entries);
+  VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%x, %u entries)", table_addr, entries);
   if (entries == 0 || entries > kMaxJumpTableEntries) {
-    VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%llx): entries=%llu out of [1,%llu], rejecting",
-                               (unsigned long long)table_addr, (unsigned long long)entries,
-                               (unsigned long long)kMaxJumpTableEntries);
+    VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%x): entries=%u out of [1,%u], rejecting", table_addr, entries,
+                               kMaxJumpTableEntries);
     return std::nullopt;
   }
   uint64_t size = entries * 4;
   if (!image_.IsFileBackedNonExecutable(table_addr, size)) {
-    VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%llx): not file-backed & non-executable for %llu bytes, rejecting",
-                               (unsigned long long)table_addr, (unsigned long long)size);
+    VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%x): not file-backed & non-executable for %u bytes, rejecting",
+                               table_addr, size);
     return std::nullopt;
   }
   std::span<const uint8_t> bytes = image_.BytesAt(table_addr, size);
   if (bytes.size() != size) {
-    VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%llx): could only read %llu of %llu bytes, rejecting",
-                               (unsigned long long)table_addr, (unsigned long long)bytes.size(),
-                               (unsigned long long)size);
+    VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%x): could only read %u of %u bytes, rejecting", table_addr,
+                               bytes.size(), size);
     return std::nullopt;
   }
   std::vector<uint64_t> targets;
@@ -492,23 +489,21 @@ std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table
     uint64_t target = table_addr + static_cast<int64_t>(rel);
     if (!LandsInsideSomeFDE(target)) {
       VLOG(1) << absl::StrFormat(
-          "ResolveJumpTable(0x%llx): entry %llu -> 0x%llx lands outside any FDE, rejecting "
-          "whole table",
-          (unsigned long long)table_addr, (unsigned long long)i, (unsigned long long)target);
+          "ResolveJumpTable(0x%x): entry %u -> 0x%x lands outside any FDE, rejecting whole table", table_addr, i,
+          target);
       return std::nullopt;
     }
     std::span<const uint8_t> tbytes = image_.BytesAt(target, 16);
     Instruction tinsn;
     if (tbytes.empty() || !disasm_->Decode(tbytes.data(), tbytes.size(), target, &tinsn)) {
       VLOG(1) << absl::StrFormat(
-          "ResolveJumpTable(0x%llx): entry %llu -> 0x%llx does not decode as an instruction, rejecting whole table",
-          (unsigned long long)table_addr, (unsigned long long)i, (unsigned long long)target);
+          "ResolveJumpTable(0x%x): entry %u -> 0x%x does not decode as an instruction, rejecting whole table",
+          table_addr, i, target);
       return std::nullopt;
     }
     targets.push_back(target);
   }
-  VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%llx): resolved all %llu entries", (unsigned long long)table_addr,
-                             (unsigned long long)entries);
+  VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%x): resolved all %u entries", table_addr, entries);
   return targets;
 }
 
@@ -552,8 +547,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     // out what a genuine entry implies for free.
     bool target_is_canonical_entry = target == target_cfi->pc_begin && target_row->IsCanonicalEntry();
     row_checker.Check(edge_pc, *target_row, edge_state, edge_insn_text,
-                      absl::StrFormat("jump to 0x%llx (FDE at 0x%llx): ", (unsigned long long)target,
-                                      (unsigned long long)target_cfi->fde_addr),
+                      absl::StrFormat("jump to 0x%x (FDE at 0x%x): ", target, target_cfi->fde_addr),
                       target_is_canonical_entry);
     return true;
   };
@@ -592,7 +586,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       in_states.emplace(pc, state);
       worklist.push_back(pc);
       pending_pushes[pc] = true;
-      VLOG(2) << absl::StrFormat("propagate(0x%llx): first sighting, enqueued", (unsigned long long)pc);
+      VLOG(2) << absl::StrFormat("propagate(0x%x): first sighting, enqueued", pc);
       return;
     }
     std::vector<JoinConflict> conflicts;
@@ -605,16 +599,14 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       propagate_changed++;
       if (pending_pushes[pc]) {
         propagate_dedup_skipped++;
-        VLOG(2) << absl::StrFormat(
-            "propagate(0x%llx): state changed but entry already pending -- not re-enqueuing",
-            (unsigned long long)pc);
+        VLOG(2) << absl::StrFormat("propagate(0x%x): state changed but entry already pending -- not re-enqueuing", pc);
       } else {
         pending_pushes[pc] = true;
         worklist.push_back(pc);
-        VLOG(2) << absl::StrFormat("propagate(0x%llx): state changed, enqueued", (unsigned long long)pc);
+        VLOG(2) << absl::StrFormat("propagate(0x%x): state changed, enqueued", pc);
       }
     } else {
-      VLOG(2) << absl::StrFormat("propagate(0x%llx): no change", (unsigned long long)pc);
+      VLOG(2) << absl::StrFormat("propagate(0x%x): no change", pc);
     }
   };
 
@@ -677,15 +669,15 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       call_sites = ReadLSDACallSites(image_, cfi.lsda_addr, cfi.pc_begin);
     } catch (const EHFrameError& e) {
       sink.Add(Finding::Severity::kReview, cfi.pc_begin,
-               absl::StrFormat("failed to parse this FDE's LSDA (.gcc_except_table) at 0x%016llx: %s",
-                               static_cast<unsigned long long>(cfi.lsda_addr), e.what()),
+               absl::StrFormat("failed to parse this FDE's LSDA (.gcc_except_table) at 0x%016x: %s", cfi.lsda_addr,
+                               e.what()),
                "");
       call_sites.clear();
     }
     // A malformed LSDA shouldn't be able to walk us outside the FDE.
     call_sites.erase(std::remove_if(call_sites.begin(), call_sites.end(),
                                     [&](const LSDACallSite& cs) {
-                                      return cs.landing_pad < cfi.pc_begin || cs.landing_pad >= cfi.pc_end;
+                                       return cs.landing_pad < cfi.pc_begin || cs.landing_pad >= cfi.pc_end;
                                     }),
                      call_sites.end());
   }
@@ -730,8 +722,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       uint64_t pc = worklist.back();
       worklist.pop_back();
       pending_pushes[pc] = false;
-      VLOG(2) << absl::StrFormat("drain: pop 0x%llx (iteration %zu, %zu still queued)", (unsigned long long)pc,
-                                 iterations, worklist.size());
+      VLOG(2) << absl::StrFormat("drain: pop 0x%x (iteration %u, %u still queued)", pc, iterations, worklist.size());
       AbsState state = in_states[pc];
 
       std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
@@ -752,8 +743,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       if (outcome.is_call) {
         std::optional<uint64_t> lp = landing_pad_for_call(pc);
         if (lp.has_value()) {
-          VLOG(2) << absl::StrFormat("0x%llx: call site propagates to landing pad 0x%llx", (unsigned long long)pc,
-                                     (unsigned long long)*lp);
+          VLOG(2) << absl::StrFormat("0x%x: call site propagates to landing pad 0x%x", pc, *lp);
           propagate(*lp, state);
         }
       }
@@ -779,9 +769,8 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
               uint64_t ubound = is_jae ? imm - 1 : imm;
               fallthrough_state.last_cmp->imm = ubound;
               if (width >= 32) {
-                VLOG(1) << absl::StrFormat("0x%llx: %s taken-edge guard sets bound[%d]=%llu on fall-through to 0x%llx",
-                                           (unsigned long long)pc, is_jae ? "jae" : "ja", reg,
-                                           (unsigned long long)ubound, (unsigned long long)next);
+                VLOG(1) << absl::StrFormat("0x%x: %s taken-edge guard sets bound[%d]=%u on fall-through to 0x%x", pc,
+                                           is_jae ? "jae" : "ja", reg, ubound, next);
                 fallthrough_state.SetBound(reg, ubound);
               }
             }
@@ -856,14 +845,14 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
   }
 
   VLOG(2) << absl::StrFormat(
-      "FDE 0x%llx done: %zu worklist pops, %zu propagate() calls (%zu changed, %zu deduped against an already-"
-      "pending entry), %zu distinct addresses reached, %zu call sites in LSDA",
-      (unsigned long long)cfi.pc_begin, iterations, propagate_calls, propagate_changed, propagate_dedup_skipped,
+      "FDE 0x%x done: %u worklist pops, %u propagate() calls (%u changed, %u deduped against an already-"
+      "pending entry), %u distinct addresses reached, %u call sites in LSDA",
+      cfi.pc_begin, iterations, propagate_calls, propagate_changed, propagate_dedup_skipped,
       in_states.size(), call_sites.size());
 
   if (hit_cap) {
     sink.Add(Finding::Severity::kReview, cfi.pc_begin,
-             absl::StrFormat("analysis gave up after %d dataflow steps", static_cast<int>(options_.max_iterations)),
+             absl::StrFormat("analysis gave up after %d dataflow steps", options_.max_iterations),
              "");
   }
 
@@ -885,7 +874,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       continue;
     }
     std::string insn_text =
-        Disassembler::Text(insn).value_or(absl::StrFormat("<cannot format instruction at 0x%llx>", (unsigned long long)pc));
+        Disassembler::Text(insn).value_or(absl::StrFormat("<cannot format instruction at 0x%x>", pc));
     if (pc + insn.size > cfi.pc_end) {
       sink.Add(Finding::Severity::kReview, pc, "instruction runs past the end of the FDE's PC range",
                insn_text);
@@ -940,9 +929,9 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
           if (target < cfi.pc_begin || target >= cfi.pc_end) {
             if (!check_cross_fde_edge(pc, target, state, insn_text)) {
               sink.Add(Finding::Severity::kReview, pc,
-                       absl::StrFormat("resolved switch-table entry at 0x%llx lands outside this FDE's range and no "
+                       absl::StrFormat("resolved switch-table entry at 0x%x lands outside this FDE's range and no "
                                        "FDE covers it, so there is no declared row to check it against",
-                                       static_cast<unsigned long long>(target)),
+                                       target),
                        insn_text);
             }
           }
@@ -998,7 +987,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
           sink.Add(Finding::Severity::kReview, gap_start,
                    absl::StrFormat("%d bytes from here were not reached by the control-flow walk, so their CFI went "
                                    "unchecked (exception landing pads and jump-table targets look like this)",
-                                   static_cast<int>(pc - gap_start)),
+                                   pc - gap_start),
                    "");
         }
       }

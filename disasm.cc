@@ -40,7 +40,7 @@ absl::StatusOr<std::string> Disassembler::Text(const Instruction& insn) {
   if (!ZYAN_SUCCESS(ZydisFormatterFormatInstruction(&formatter, &insn.insn, insn.operands,
                                                      insn.insn.operand_count_visible, buffer, sizeof(buffer),
                                                      insn.address, nullptr))) {
-    return absl::InternalError(absl::StrFormat("cannot format instruction at 0x%llx", (unsigned long long)insn.address));
+    return absl::InternalError(absl::StrFormat("cannot format instruction at 0x%x", insn.address));
   }
   return std::string(buffer);
 }

@@ -94,17 +94,15 @@ std::string AbsVal::ToString() const {
     case Kind::kBottom:
       return "conflict";
     case Kind::kCFARel:
-      return absl::StrFormat("CFA%+d", static_cast<int>(delta));
+      return absl::StrFormat("CFA%+d", delta);
     case Kind::kOrigReg:
       return absl::StrFormat("entry %s", DWARFRegName(reg));
     case Kind::kConst:
-      return absl::StrFormat("const 0x%llx", static_cast<unsigned long long>(delta));
+      return absl::StrFormat("const 0x%x", delta);
     case Kind::kTableEntry:
-      return absl::StrFormat("table[%s] entry (table@0x%llx)", DWARFRegName(reg),
-                             static_cast<unsigned long long>(TableAddr()));
+      return absl::StrFormat("table[%s] entry (table@0x%x)", DWARFRegName(reg), TableAddr());
     case Kind::kJumpTarget:
-      return absl::StrFormat("jump target table@0x%llx[%s]", static_cast<unsigned long long>(TableAddr()),
-                             DWARFRegName(reg));
+      return absl::StrFormat("jump target table@0x%x[%s]", TableAddr(), DWARFRegName(reg));
   }
   return "?";
 }

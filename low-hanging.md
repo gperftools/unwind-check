@@ -32,7 +32,7 @@ If the selected item is too confusing/impossible/wrong. Mark it as
   clobbring them. Probably not. Make sure we clobber the slots from
   wide writes like these.
 
-* StrFormat explicitly doesn't need size prefixes since it does C++
+* (DONE) StrFormat explicitly doesn't need size prefixes since it does C++
   magic and knows exact argument type. Like Go. So drop those 'll'-s
   and explicit casts all over the code when StrFormat-ting.
 
