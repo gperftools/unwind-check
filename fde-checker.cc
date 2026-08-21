@@ -498,7 +498,7 @@ std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table
       return std::nullopt;
     }
     std::span<const uint8_t> tbytes = image_.BytesAt(target, 16);
-    const cs_insn* tinsn = tbytes.empty() ? nullptr : disasm_->DecodeOne(tbytes.data(), tbytes.size(), target);
+    const Instruction* tinsn = tbytes.empty() ? nullptr : disasm_->DecodeOne(tbytes.data(), tbytes.size(), target);
     if (tinsn == nullptr) {
       VLOG(1) << absl::StrFormat(
           "ResolveJumpTable(0x%llx): entry %llu -> 0x%llx does not decode as an instruction, rejecting whole table",
@@ -521,7 +521,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
 
   FindingSink sink{options_.max_findings_per_fde};
   RowChecker row_checker{options_, &sink};
-  InsnSemantics semantics{disasm_->handle()};
+  InsnSemantics semantics;
 
   // Checks `state` (the abstract state right before an unconditional jump,
   // or a resolved jump-table entry, at `pc`) against the declared CFI row
@@ -731,14 +731,14 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       AbsState state = in_states[pc];
 
       std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
-      const cs_insn* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
+      const Instruction* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
       if (insn == nullptr || pc + insn->size > cfi.pc_end) {
         continue;
       }
       size_t insn_size = insn->size;
       insn_sizes[pc] = insn_size;
-      bool is_ja_or_jae = insn->id == X86_INS_JA || insn->id == X86_INS_JAE;
-      bool is_jae = insn->id == X86_INS_JAE;
+      bool is_ja_or_jae = insn->id == ZYDIS_MNEMONIC_JNBE || insn->id == ZYDIS_MNEMONIC_JNB;
+      bool is_jae = insn->id == ZYDIS_MNEMONIC_JNB;
 
       const CFIRow* row = cfi.RowAt(pc);
       AbsVal before[kNumGPRs];
@@ -871,7 +871,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     const AbsState& state = in_states[pc];
 
     std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
-    const cs_insn* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
+    const Instruction* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
     if (insn == nullptr) {
       sink.Add(Finding::Severity::kReview, pc, "cannot decode the instruction at this address", "");
       continue;
@@ -974,13 +974,13 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
         bool all_padding = true;
         while (pc < cfi.pc_end && insn_sizes.find(pc) == insn_sizes.end()) {
           std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
-          const cs_insn* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
+          const Instruction* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
           if (insn == nullptr) {
             all_padding = false;
             pc++;
             continue;
           }
-          if (insn->id != X86_INS_NOP && insn->id != X86_INS_INT3) {
+          if (insn->id != ZYDIS_MNEMONIC_NOP && insn->id != ZYDIS_MNEMONIC_INT3) {
             all_padding = false;
           }
           pc += insn->size;

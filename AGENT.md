@@ -59,9 +59,18 @@ recompiling, and costs nothing to run defensively before any timing-sensitive
 check.
 
 * `.bazelversion` pins 9.2.0.
-* Capstone is the locally installed `libcapstone-dev` (5.0.9 here), linked with
-  a bare `-lcapstone` and the system include path. No bazel integration, per
-  `goal.md`.
+* Disassembly is Zydis, the locally installed `libzydis-dev` (4.1.1 here),
+  linked with a bare `-lZydis -lZycore` and the system include path. No bazel
+  integration, following the same policy `goal.md` set for its predecessor.
+  Started as Capstone; switched to Zydis because Capstone has real gaps on
+  x86 (the TODO's "11 cannot decode the instruction at this address in
+  libcrypto" was one symptom). The formatter is pinned to
+  `ZYDIS_FORMATTER_STYLE_ATT` for diagnostics -- safely, unlike Capstone,
+  where selecting AT&T syntax is known to also reorder the *structured*
+  operand array, not just the printed text, silently breaking anything that
+  assumes operands[0] is the destination. Zydis's formatter is a separate
+  pass over the already-decoded operands, so the style chosen there has no
+  effect on what `Transfer()` sees.
 * abseil comes from the bazel central registry. Unlike backtrace-test, this tool
   is offline rather than async-signal-safe, so it is free to use exceptions,
   RAII, allocation and abseil, and it does.
@@ -82,7 +91,7 @@ instead of checking; compare against `readelf --debug-dump=frames-interp`),
 | `eh-frame-reader.{h,cc}` | copied from backtrace-test, with two deliberate edits (§4.2) |
 | `dwarf-constants.h` | copied verbatim from backtrace-test |
 | `cfi-table.{h,cc}` | the *declared* side: a visitor turning one FDE into a row table |
-| `disasm.{h,cc}` | RAII Capstone handle, detail on |
+| `disasm.{h,cc}` | thin wrapper over a Zydis decoder and AT&T-style formatter |
 | `abs-state.{h,cc}` | the lattice and its join (§4.3) |
 | `insn-semantics.{h,cc}` | the *computed* side: what each instruction does to the stack (§4.4) |
 | `lsda-reader.{h,cc}` | parses `.gcc_except_table`'s call-site table for exception landing pads (§4.5) |
@@ -287,9 +296,9 @@ plain `mov %esi,%eax` between the guard and the table load) lost its
 resolved dispatch and picked up a spurious `REVIEW` until the same treatment
 was given to narrow `mov`.
 
-Everything else goes through Capstone's register-access information and drops
-the registers it writes to unknown. An unmodelled instruction therefore costs
-precision, never correctness — including `and $-16,%rsp`, which needs no
+Everything else goes through Zydis's per-operand read/write accounting and
+drops the registers it writes to unknown. An unmodelled instruction therefore
+costs precision, never correctness — including `and $-16,%rsp`, which needs no
 realignment special case: rsp simply becomes untracked, an rbp-based CFA rule
 stays checkable, and an rsp-based one turns into a review note.
 
@@ -500,6 +509,19 @@ exact digits, as durable):
 | `libstdc++.so.6` | 5332 | 5149 | 183 | 0 |
 | `/usr/bin/gcc` | 2448 | 2295 | 152 | 1 |
 | a `-static` hello world | 1090 | 1055 | 32 | 3 |
+
+The Capstone-to-Zydis migration was validated by A/B-diffing both decoders'
+output, on the same machine, over this table's binaries plus the 400-binary
+`robustness-sweep.sh` sample: identical verdict counts everywhere except one
+FDE in `libstdc++.so.6` (`std::from_chars`'s internals), which moved from
+blessed to review. Traced by hand: a local scratch buffer's stack slot
+genuinely overlaps a callee-saved spill slot the CFI still declares live at
+that PC, on one code path — Zydis's decode is not in question, the finding
+is real, and REVIEW (not MISMATCH) is the correct, conservative verdict for
+it. Whether Capstone missed this from a decode gap or some other imprecision
+was not tracked down. `libaom.so.3`, the one binary in the sweep sample over
+robustness-sweep.sh's 5-second slow-flag threshold, is very slightly faster
+under Zydis (~5.7s vs ~6.6s under Capstone) rather than slower.
 
 Review counts here are much lower than earlier versions of this tool. Two
 things did most of it: §4.6's cross-FDE check resolves the majority of what

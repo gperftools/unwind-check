@@ -2,10 +2,10 @@
 #ifndef INSN_SEMANTICS_H_
 #define INSN_SEMANTICS_H_
 
-#include <capstone/capstone.h>
 #include <stdint.h>
 
 #include "abs-state.h"
+#include "disasm.h"
 
 namespace unwind_analysis {
 
@@ -43,29 +43,28 @@ struct TransferOutcome {
 // Ninja's stack tracker each special-case; nobody lifts all of x86-64
 // for this question.
 //
-// Everything else goes through Capstone's register-access information
+// Everything else goes through Zydis's per-operand read/write accounting
 // and simply drops the registers it writes to unknown, so an unmodelled
 // instruction costs us precision and never correctness.
 class InsnSemantics {
  public:
-  explicit InsnSemantics(csh handle) : handle_(handle) {
-  }
+  InsnSemantics() = default;
 
-  TransferOutcome Transfer(const cs_insn& insn, AbsState* state) const;
+  TransferOutcome Transfer(const Instruction& insn, AbsState* state) const;
 
   // DWARF register number for an x86 register, or -1 if it is not one of
   // the 16 GPRs. Sub-registers map to their 64-bit parent, which is what
   // we want for clobbering: writing %eax makes %rax untracked too.
   static int DWARFRegOf(unsigned reg);
 
-  // True only for the full 64-bit spelling. Reading %eax does not yield
-  // the value we are tracking in %rax, so only these count as reads.
+  // True only for the full 64-bit spelling of one of the 16 GPRs. Reading
+  // %eax does not yield the value we are tracking in %rax, so only these
+  // count as reads -- and RIP/RFLAGS/the MMX registers are deliberately
+  // excluded even though they too are 64 bits wide (see the definition).
   static bool IsFull64(unsigned reg);
 
  private:
-  void ClobberWrites(const cs_insn& insn, AbsState* state) const;
-
-  csh handle_;
+  void ClobberWrites(const Instruction& insn, AbsState* state) const;
 };
 
 }  // namespace unwind_analysis

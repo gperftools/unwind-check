@@ -1,10 +1,8 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
 #include "insn-semantics.h"
 
-#include <memory>
 #include <optional>
 
-#include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
 
@@ -12,56 +10,17 @@ namespace unwind_analysis {
 
 namespace {
 
-struct RegAlias {
-  x86_reg reg;
-  int dwarf;
-  bool full64;
+// DWARF numbering for x86-64 is the psABI's, not the encoding order: rax
+// rdx rcx rbx rsi rdi rbp rsp, then r8..r15.
+constexpr ZydisRegister kDwarfGprs[kNumGPRs] = {
+    ZYDIS_REGISTER_RAX, ZYDIS_REGISTER_RDX, ZYDIS_REGISTER_RCX, ZYDIS_REGISTER_RBX,
+    ZYDIS_REGISTER_RSI, ZYDIS_REGISTER_RDI, ZYDIS_REGISTER_RBP, ZYDIS_REGISTER_RSP,
+    ZYDIS_REGISTER_R8,  ZYDIS_REGISTER_R9,  ZYDIS_REGISTER_R10, ZYDIS_REGISTER_R11,
+    ZYDIS_REGISTER_R12, ZYDIS_REGISTER_R13, ZYDIS_REGISTER_R14, ZYDIS_REGISTER_R15,
 };
 
 // Registers a call may destroy, per the x86-64 psABI.
 constexpr int kCallerSaved[] = {0, 1, 2, 4, 5, 8, 9, 10, 11};
-
-const RegAlias* FindAlias(unsigned reg) {
-  // DWARF numbering for x86-64 is the psABI's, not the encoding order:
-  // rax rdx rcx rbx rsi rdi rbp rsp, then r8..r15.
-  static constexpr RegAlias kAliases[] = {
-      {X86_REG_RAX, 0, true},  {X86_REG_EAX, 0, false},   {X86_REG_AX, 0, false},    {X86_REG_AL, 0, false},
-      {X86_REG_AH, 0, false},  {X86_REG_RDX, 1, true},    {X86_REG_EDX, 1, false},   {X86_REG_DX, 1, false},
-      {X86_REG_DL, 1, false},  {X86_REG_DH, 1, false},    {X86_REG_RCX, 2, true},    {X86_REG_ECX, 2, false},
-      {X86_REG_CX, 2, false},  {X86_REG_CL, 2, false},    {X86_REG_CH, 2, false},    {X86_REG_RBX, 3, true},
-      {X86_REG_EBX, 3, false}, {X86_REG_BX, 3, false},    {X86_REG_BL, 3, false},    {X86_REG_BH, 3, false},
-      {X86_REG_RSI, 4, true},  {X86_REG_ESI, 4, false},   {X86_REG_SI, 4, false},    {X86_REG_SIL, 4, false},
-      {X86_REG_RDI, 5, true},  {X86_REG_EDI, 5, false},   {X86_REG_DI, 5, false},    {X86_REG_DIL, 5, false},
-      {X86_REG_RBP, 6, true},  {X86_REG_EBP, 6, false},   {X86_REG_BP, 6, false},    {X86_REG_BPL, 6, false},
-      {X86_REG_RSP, 7, true},  {X86_REG_ESP, 7, false},   {X86_REG_SP, 7, false},    {X86_REG_SPL, 7, false},
-      {X86_REG_R8, 8, true},   {X86_REG_R8D, 8, false},   {X86_REG_R8W, 8, false},   {X86_REG_R8B, 8, false},
-      {X86_REG_R9, 9, true},   {X86_REG_R9D, 9, false},   {X86_REG_R9W, 9, false},   {X86_REG_R9B, 9, false},
-      {X86_REG_R10, 10, true}, {X86_REG_R10D, 10, false}, {X86_REG_R10W, 10, false}, {X86_REG_R10B, 10, false},
-      {X86_REG_R11, 11, true}, {X86_REG_R11D, 11, false}, {X86_REG_R11W, 11, false}, {X86_REG_R11B, 11, false},
-      {X86_REG_R12, 12, true}, {X86_REG_R12D, 12, false}, {X86_REG_R12W, 12, false}, {X86_REG_R12B, 12, false},
-      {X86_REG_R13, 13, true}, {X86_REG_R13D, 13, false}, {X86_REG_R13W, 13, false}, {X86_REG_R13B, 13, false},
-      {X86_REG_R14, 14, true}, {X86_REG_R14D, 14, false}, {X86_REG_R14W, 14, false}, {X86_REG_R14B, 14, false},
-      {X86_REG_R15, 15, true}, {X86_REG_R15D, 15, false}, {X86_REG_R15W, 15, false}, {X86_REG_R15B, 15, false},
-  };
-
-  static const absl::flat_hash_map<x86_reg, RegAlias>& kMap = ([]() {
-    auto map = std::make_unique<absl::flat_hash_map<x86_reg, RegAlias>>();
-    for (const RegAlias& a : kAliases) {
-      map->emplace(a.reg, a);
-    }
-    return *map.release();
-  })();
-
-  auto it = kMap.find(static_cast<x86_reg>(reg));
-  if (it == kMap.end()) {
-    return nullptr;
-  }
-  return &it->second;
-}
-
-const cs_x86& X86(const cs_insn& insn) {
-  return insn.detail->x86;
-}
 
 // The value a register operand reads, as far as we track it.
 AbsVal ReadReg(const AbsState& state, unsigned reg) {
@@ -72,26 +31,34 @@ AbsVal ReadReg(const AbsState& state, unsigned reg) {
 }
 
 // The CFA-relative offset a memory operand addresses, when we can name
-// it. Anything with an index register, a segment override or a base we
-// are not tracking is simply not a stack slot as far as we are
+// it. Anything with an index register, an explicit segment override or a
+// base we are not tracking is simply not a stack slot as far as we are
 // concerned.
-std::optional<int64_t> MemSlot(const AbsState& state, const x86_op_mem& mem) {
-  if (mem.segment != X86_REG_INVALID || mem.index != X86_REG_INVALID) {
+std::optional<int64_t> MemSlot(const AbsState& state, const Instruction& insn, const ZydisDecodedOperandMem& mem) {
+  // Zydis always fills in the *implicit* default segment (SS for an
+  // rbp/rsp-based operand, DS otherwise) even when no override prefix is
+  // present in the encoding -- unlike Capstone, which leaves `segment`
+  // invalid unless a prefix byte actually appears. Reading mem.segment
+  // directly here would make every ordinary `-0x8(%rbp)` stack access
+  // look segment-relative and never resolve to a slot, so "explicit
+  // override present" has to come from the instruction's attributes
+  // instead.
+  if ((insn.insn.attributes & ZYDIS_ATTRIB_HAS_SEGMENT) != 0 || mem.index != ZYDIS_REGISTER_NONE) {
     return std::nullopt;
   }
-  if (mem.base == X86_REG_INVALID || !InsnSemantics::IsFull64(mem.base)) {
+  if (!InsnSemantics::IsFull64(mem.base)) {
     return std::nullopt;
   }
   const AbsVal& base = state.reg(InsnSemantics::DWARFRegOf(mem.base));
   if (base.kind != AbsVal::Kind::kCFARel) {
     return std::nullopt;
   }
-  return base.delta + mem.disp;
+  return base.delta + mem.disp.value;
 }
 
 // The address a `lea` computes, as a value.
-AbsVal LeaValue(const AbsState& state, const x86_op_mem& mem) {
-  std::optional<int64_t> slot = MemSlot(state, mem);
+AbsVal LeaValue(const AbsState& state, const Instruction& insn, const ZydisDecodedOperandMem& mem) {
+  std::optional<int64_t> slot = MemSlot(state, insn, mem);
   if (!slot.has_value()) {
     return AbsVal::Top();
   }
@@ -117,71 +84,70 @@ void EraseSlots(AbsState* state, int64_t start, int64_t size) {
 void HandleUnplacedMemWrite(AbsState*) {
 }
 
-// True when this instruction's Capstone write-set includes EFLAGS.
-bool WritesEflags(csh handle, const cs_insn& insn) {
-  cs_regs read;
-  cs_regs written;
-  uint8_t read_count = 0;
-  uint8_t write_count = 0;
-  if (cs_regs_access(handle, &insn, read, &read_count, written, &write_count) != CS_ERR_OK) {
+// True when this instruction's accessed-flags info says it modifies
+// EFLAGS. `tested` (a read) does not count -- only modified/set_0/set_1/
+// undefined do, matching what "this instruction writes EFLAGS" means for
+// AbsState::last_cmp.
+bool WritesEflags(const Instruction& insn) {
+  const ZydisAccessedFlags* flags = insn.insn.cpu_flags;
+  if (flags == nullptr) {
     return true;  // unknown effect -- assume the worst, same as ClobberWrites does
   }
-  for (uint8_t i = 0; i < write_count; i++) {
-    if (written[i] == X86_REG_EFLAGS) {
-      return true;
-    }
-  }
-  return false;
+  return flags->modified != 0 || flags->set_0 != 0 || flags->set_1 != 0 || flags->undefined != 0;
 }
 
 }  // namespace
 
 int InsnSemantics::DWARFRegOf(unsigned reg) {
-  const RegAlias* a = FindAlias(reg);
-  return a == nullptr ? -1 : a->dwarf;
+  if (reg == ZYDIS_REGISTER_NONE) {
+    return -1;
+  }
+  ZydisRegister parent = ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, static_cast<ZydisRegister>(reg));
+  for (int i = 0; i < kNumGPRs; i++) {
+    if (kDwarfGprs[i] == parent) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 bool InsnSemantics::IsFull64(unsigned reg) {
-  const RegAlias* a = FindAlias(reg);
-  return a != nullptr && a->full64;
+  // Width alone is not a safe proxy for "is the 64-bit GPR spelling": RIP,
+  // RFLAGS and the MMX registers are all width-64 too, but none of them
+  // are one of the 16 DWARF GPRs DWARFRegOf maps -- and callers index
+  // AbsState's gpr[] array with DWARFRegOf's result right after this
+  // check passes, so getting this wrong is an out-of-bounds read, not
+  // just a precision loss.
+  int d = DWARFRegOf(reg);
+  if (d < 0) {
+    return false;
+  }
+  return ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, static_cast<ZydisRegister>(reg)) ==
+         static_cast<ZydisRegister>(reg);
 }
 
-void InsnSemantics::ClobberWrites(const cs_insn& insn, AbsState* state) const {
-  cs_regs read;
-  cs_regs written;
-  uint8_t read_count = 0;
-  uint8_t write_count = 0;
-  if (cs_regs_access(handle_, &insn, read, &read_count, written, &write_count) != CS_ERR_OK) {
-    // We could not find out what it writes, so assume the worst.
-    for (int r = 0; r < kNumGPRs; r++) {
-      state->ClobberReg(r);
-    }
-    state->slots.clear();
-    return;
-  }
-  for (uint8_t i = 0; i < write_count; i++) {
-    int d = DWARFRegOf(written[i]);
-    if (d >= 0) {
-      state->ClobberReg(d);
-    }
-  }
-  // Belt and braces: also take the written operands directly, in case
-  // the access tables miss something.
-  const cs_x86& x = X86(insn);
-  for (uint8_t i = 0; i < x.op_count; i++) {
-    const cs_x86_op& op = x.operands[i];
-    if ((op.access & CS_AC_WRITE) == 0) {
+void InsnSemantics::ClobberWrites(const Instruction& insn, AbsState* state) const {
+  // Unlike Capstone -- which needed a separate register-access-table call
+  // plus a "belt and braces" explicit-operand loop, because its operand
+  // list only ever carried the explicit operands -- Zydis's operand array
+  // already includes every implicit and hidden register/memory access
+  // (e.g. an implicit stack write) with its own read/write actions. One
+  // pass over the full operand list (not just the visible ones) is the
+  // whole story.
+  for (uint8_t i = 0; i < insn.insn.operand_count; i++) {
+    const ZydisDecodedOperand& op = insn.operands[i];
+    if ((op.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) == 0) {
       continue;
     }
-    if (op.type == X86_OP_REG) {
-      int d = DWARFRegOf(op.reg);
+    if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+      int d = DWARFRegOf(op.reg.value);
       if (d >= 0) {
         state->ClobberReg(d);
       }
-    } else if (op.type == X86_OP_MEM) {
-      std::optional<int64_t> slot = MemSlot(*state, op.mem);
+    } else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+      std::optional<int64_t> slot = MemSlot(*state, insn, op.mem);
       if (slot.has_value()) {
-        EraseSlots(state, *slot, op.size);
+        EraseSlots(state, *slot, op.size / 8);
       } else {
         HandleUnplacedMemWrite(state);
       }
@@ -189,9 +155,8 @@ void InsnSemantics::ClobberWrites(const cs_insn& insn, AbsState* state) const {
   }
 }
 
-TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) const {
+TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state) const {
   TransferOutcome out;
-  const cs_x86& x = X86(insn);
 
   // Any instruction that writes EFLAGS invalidates whatever `cmp` guard
   // was last seen (initial-switch-tables-plan.md §3.2), except a fresh
@@ -199,28 +164,32 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
   // overwriting this clear. Doing this unconditionally, once, up front
   // means no case below -- or the unmodelled-instruction fallback -- has
   // to remember to do it by hand.
-  if (WritesEflags(handle_, insn)) {
+  if (WritesEflags(insn)) {
     state->last_cmp = std::nullopt;
   }
 
   // Control flow first: the classification is independent of what the
   // instruction does to the stack.
-  if (cs_insn_group(handle_, &insn, X86_GRP_RET) || insn.id == X86_INS_IRET || insn.id == X86_INS_IRETD ||
-      insn.id == X86_INS_IRETQ) {
+  if (insn.id == ZYDIS_MNEMONIC_RET || insn.id == ZYDIS_MNEMONIC_IRET || insn.id == ZYDIS_MNEMONIC_IRETD ||
+      insn.id == ZYDIS_MNEMONIC_IRETQ) {
     out.is_return = true;
     out.falls_through = false;
     return out;
   }
-  if (cs_insn_group(handle_, &insn, X86_GRP_JUMP)) {
-    bool conditional = insn.id != X86_INS_JMP && insn.id != X86_INS_LJMP;
+  const ZydisInstructionCategory category = insn.insn.meta.category;
+  if (category == ZYDIS_CATEGORY_COND_BR || category == ZYDIS_CATEGORY_UNCOND_BR) {
+    bool conditional = insn.id != ZYDIS_MNEMONIC_JMP;
     out.falls_through = conditional;
-    if (x.op_count >= 1 && x.operands[0].type == X86_OP_IMM) {
-      out.has_direct_target = true;
-      out.direct_target = static_cast<uint64_t>(x.operands[0].imm);
-      return out;
+    if (insn.op_count >= 1 && insn.operands[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+      uint64_t target = 0;
+      if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn.insn, &insn.operands[0], insn.address, &target))) {
+        out.has_direct_target = true;
+        out.direct_target = target;
+        return out;
+      }
     }
-    if (x.op_count >= 1 && x.operands[0].type == X86_OP_REG) {
-      int r = DWARFRegOf(x.operands[0].reg);
+    if (insn.op_count >= 1 && insn.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER) {
+      int r = DWARFRegOf(insn.operands[0].reg.value);
       const AbsVal v = r >= 0 ? state->reg(r) : AbsVal::Top();
       VLOG(1) << absl::StrFormat("0x%llx: indirect jmp via reg %d, value=%s", (unsigned long long)insn.address, r,
                                  v.ToString());
@@ -247,15 +216,14 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
     out.indirect_branch = true;
     return out;
   }
-  if (insn.id == X86_INS_UD0 || insn.id == X86_INS_UD1 || insn.id == X86_INS_UD2 || insn.id == X86_INS_HLT ||
-      insn.id == X86_INS_INT3) {
+  if (insn.id == ZYDIS_MNEMONIC_UD0 || insn.id == ZYDIS_MNEMONIC_UD1 || insn.id == ZYDIS_MNEMONIC_UD2 ||
+      insn.id == ZYDIS_MNEMONIC_HLT || insn.id == ZYDIS_MNEMONIC_INT3) {
     out.falls_through = false;
     return out;
   }
 
   switch (insn.id) {
-    case X86_INS_CALL:
-    case X86_INS_LCALL: {
+    case ZYDIS_MNEMONIC_CALL: {
       out.is_call = true;
       // The call pushes and the matching ret pops, so rsp is unchanged
       // across it -- but everything below rsp is the callee's now, and
@@ -278,20 +246,28 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       return out;
     }
 
-    case X86_INS_PUSH:
-    case X86_INS_PUSHFQ: {
-      if (insn.id == X86_INS_PUSH && (x.op_count != 1 || x.operands[0].size != 8)) {
+    case ZYDIS_MNEMONIC_PUSH:
+    case ZYDIS_MNEMONIC_PUSHFQ: {
+      // insn.operands[0].size is not the right thing to gate on here: for
+      // an immediate operand it is the *encoded* immediate width (`push
+      // $0x1` reports 8, imm8's own size, even though the push itself is
+      // the normal 8-byte one) rather than the push's actual stack
+      // effect. insn.insn.operand_width is the effective operand width
+      // regardless of operand kind, and is 16 only for the genuine
+      // oddity this check exists to catch (a 66h-prefixed `pushw`, which
+      // moves rsp by 2, not 8).
+      if (insn.id == ZYDIS_MNEMONIC_PUSH && (insn.op_count != 1 || insn.insn.operand_width != 64)) {
         out.review_reason = "push with an operand size other than 8 bytes";
         state->ClobberReg(kDWARFRsp);
         return out;
       }
       AbsVal pushed = AbsVal::Top();
-      if (insn.id == X86_INS_PUSH) {
-        const cs_x86_op& op = x.operands[0];
-        if (op.type == X86_OP_REG) {
-          pushed = ReadReg(*state, op.reg);
-        } else if (op.type == X86_OP_MEM) {
-          std::optional<int64_t> slot = MemSlot(*state, op.mem);
+      if (insn.id == ZYDIS_MNEMONIC_PUSH) {
+        const ZydisDecodedOperand& op = insn.operands[0];
+        if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+          pushed = ReadReg(*state, op.reg.value);
+        } else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+          std::optional<int64_t> slot = MemSlot(*state, insn, op.mem);
           pushed = slot.has_value() ? state->Slot(*slot) : AbsVal::Top();
         }
       }
@@ -305,9 +281,9 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       return out;
     }
 
-    case X86_INS_POP:
-    case X86_INS_POPFQ: {
-      if (insn.id == X86_INS_POP && (x.op_count != 1 || x.operands[0].size != 8)) {
+    case ZYDIS_MNEMONIC_POP:
+    case ZYDIS_MNEMONIC_POPFQ: {
+      if (insn.id == ZYDIS_MNEMONIC_POP && (insn.op_count != 1 || insn.insn.operand_width != 64)) {
         out.review_reason = "pop with an operand size other than 8 bytes";
         state->ClobberReg(kDWARFRsp);
         return out;
@@ -319,15 +295,15 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
         state->SetReg(kDWARFRsp, AbsVal::CFARel(rsp.delta + 8));
         state->DropDeadSlots(rsp.delta + 8);
       }
-      if (insn.id == X86_INS_POP) {
-        const cs_x86_op& op = x.operands[0];
-        if (op.type == X86_OP_REG) {
-          int d = DWARFRegOf(op.reg);
+      if (insn.id == ZYDIS_MNEMONIC_POP) {
+        const ZydisDecodedOperand& op = insn.operands[0];
+        if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+          int d = DWARFRegOf(op.reg.value);
           if (d >= 0) {
-            state->SetReg(d, IsFull64(op.reg) ? popped : AbsVal::Top());
+            state->SetReg(d, IsFull64(op.reg.value) ? popped : AbsVal::Top());
           }
-        } else if (op.type == X86_OP_MEM) {
-          std::optional<int64_t> slot = MemSlot(*state, op.mem);
+        } else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+          std::optional<int64_t> slot = MemSlot(*state, insn, op.mem);
           if (slot.has_value()) {
             state->SetSlot(*slot, popped);
           }
@@ -336,7 +312,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       return out;
     }
 
-    case X86_INS_LEAVE: {
+    case ZYDIS_MNEMONIC_LEAVE: {
       // leave == mov %rbp,%rsp ; pop %rbp
       state->SetReg(kDWARFRsp, state->reg(kDWARFRbp));
       const AbsVal rsp = state->reg(kDWARFRsp);
@@ -350,47 +326,50 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       return out;
     }
 
-    case X86_INS_LEA: {
-      if (x.op_count != 2 || x.operands[0].type != X86_OP_REG || x.operands[1].type != X86_OP_MEM) {
+    case ZYDIS_MNEMONIC_LEA: {
+      if (insn.op_count != 2 || insn.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+          insn.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY) {
         break;
       }
-      int d = DWARFRegOf(x.operands[0].reg);
+      int d = DWARFRegOf(insn.operands[0].reg.value);
       if (d < 0) {
         break;
       }
-      if (!IsFull64(x.operands[0].reg)) {
+      if (!IsFull64(insn.operands[0].reg.value)) {
         state->ClobberReg(d);
         return out;
       }
-      const x86_op_mem& mem = x.operands[1].mem;
-      // `lea disp(%rip),%B` -- the switch-table base load. Capstone's
-      // `disp` is the raw encoded displacement; the effective address is
-      // relative to the end of this instruction, not its start.
-      if (mem.base == X86_REG_RIP && mem.index == X86_REG_INVALID) {
-        uint64_t target = insn.address + insn.size + static_cast<int64_t>(mem.disp);
-        VLOG(1) << absl::StrFormat("0x%llx: lea rip-relative -> reg %d = kConst(0x%llx)",
-                                   (unsigned long long)insn.address, d, (unsigned long long)target);
-        state->SetReg(d, AbsVal::Const(static_cast<int64_t>(target)));
-        return out;
+      const ZydisDecodedOperandMem& mem = insn.operands[1].mem;
+      // `lea disp(%rip),%B` -- the switch-table base load.
+      // ZydisCalcAbsoluteAddress resolves the RIP-relative displacement
+      // against this instruction's own length, so there is no manual
+      // "address + size + disp" arithmetic to get right here.
+      if (mem.base == ZYDIS_REGISTER_RIP && mem.index == ZYDIS_REGISTER_NONE) {
+        uint64_t target = 0;
+        if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn.insn, &insn.operands[1], insn.address, &target))) {
+          VLOG(1) << absl::StrFormat("0x%llx: lea rip-relative -> reg %d = kConst(0x%llx)",
+                                     (unsigned long long)insn.address, d, (unsigned long long)target);
+          state->SetReg(d, AbsVal::Const(static_cast<int64_t>(target)));
+          return out;
+        }
       }
-      state->SetReg(d, LeaValue(*state, mem));
+      state->SetReg(d, LeaValue(*state, insn, mem));
       return out;
     }
 
-    case X86_INS_MOV:
-    case X86_INS_MOVQ:
-    case X86_INS_MOVABS: {
-      if (x.op_count != 2) {
+    case ZYDIS_MNEMONIC_MOV:
+    case ZYDIS_MNEMONIC_MOVQ: {
+      if (insn.op_count != 2) {
         break;
       }
-      const cs_x86_op& dst = x.operands[0];
-      const cs_x86_op& src = x.operands[1];
-      if (dst.type == X86_OP_REG) {
-        int d = DWARFRegOf(dst.reg);
+      const ZydisDecodedOperand& dst = insn.operands[0];
+      const ZydisDecodedOperand& src = insn.operands[1];
+      if (dst.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        int d = DWARFRegOf(dst.reg.value);
         if (d < 0) {
           break;
         }
-        if (!IsFull64(dst.reg)) {
+        if (!IsFull64(dst.reg.value)) {
           // A narrower mov's identity does not survive -- see the 8/16-bit
           // case below for why this stays a clobber rather than a value
           // copy -- but same-width-or-widening register-to-register moves
@@ -401,8 +380,8 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
           // guard register into whatever register the table load actually
           // reads (switch-table-amend-plan.md §1).
           std::optional<uint64_t> carried;
-          if (src.type == X86_OP_REG) {
-            int s = DWARFRegOf(src.reg);
+          if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+            int s = DWARFRegOf(src.reg.value);
             // Deliberately not gated on IsFull64(src.reg): the bound
             // lives on the DWARF-level register regardless of which
             // sub-register spelling read it (`mov %esi,%eax` reads the
@@ -417,51 +396,55 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
           }
           return out;
         }
-        if (src.type == X86_OP_REG) {
-          state->SetReg(d, ReadReg(*state, src.reg));
-        } else if (src.type == X86_OP_MEM) {
-          std::optional<int64_t> slot = MemSlot(*state, src.mem);
-          state->SetReg(d, (slot.has_value() && src.size == 8) ? state->Slot(*slot) : AbsVal::Top());
+        if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+          state->SetReg(d, ReadReg(*state, src.reg.value));
+        } else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+          std::optional<int64_t> slot = MemSlot(*state, insn, src.mem);
+          state->SetReg(d, (slot.has_value() && src.size == 64) ? state->Slot(*slot) : AbsVal::Top());
         } else {
           // `mov $imm,%r` is deliberately left untracked rather than
           // turned into a kConst: nothing in the switch-table pattern
           // needs it (the table base always comes from a rip-relative
           // lea), and check_unmentioned_callee_saved fixtures rely on an
-          // immediate load clobbering a register to unknown.
+          // immediate load clobbering a register to unknown. (This also
+          // covers what Capstone spelled the separate MOVABS mnemonic:
+          // Zydis has no such mnemonic, a 64-bit-immediate mov decodes as
+          // plain MOV, and it lands here the same way.)
           state->ClobberReg(d);
         }
         return out;
       }
-      if (dst.type == X86_OP_MEM) {
-        std::optional<int64_t> slot = MemSlot(*state, dst.mem);
+      if (dst.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+        std::optional<int64_t> slot = MemSlot(*state, insn, dst.mem);
         if (!slot.has_value()) {
           HandleUnplacedMemWrite(state);
           return out;
         }
-        if (dst.size != 8) {
-          EraseSlots(state, *slot, dst.size);
+        if (dst.size != 64) {
+          EraseSlots(state, *slot, dst.size / 8);
           return out;
         }
-        state->SetSlot(*slot, src.type == X86_OP_REG ? ReadReg(*state, src.reg) : AbsVal::Top());
+        state->SetSlot(*slot, src.type == ZYDIS_OPERAND_TYPE_REGISTER ? ReadReg(*state, src.reg.value) : AbsVal::Top());
         return out;
       }
       break;
     }
 
-    case X86_INS_MOVSXD: {
+    case ZYDIS_MNEMONIC_MOVSXD: {
       // `movslq disp(%B,%I,4),%T` -- the switch-table load: T becomes the
       // table entry once %B is a known constant and the scale is 4 (an
       // int32 table). Anything else falls through to the generic clobber
       // below, same as any other unmodelled case.
-      if (x.op_count != 2 || x.operands[0].type != X86_OP_REG || x.operands[1].type != X86_OP_MEM) {
+      if (insn.op_count != 2 || insn.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+          insn.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY) {
         break;
       }
-      int d = DWARFRegOf(x.operands[0].reg);
-      if (d < 0 || !IsFull64(x.operands[0].reg)) {
+      int d = DWARFRegOf(insn.operands[0].reg.value);
+      if (d < 0 || !IsFull64(insn.operands[0].reg.value)) {
         break;
       }
-      const x86_op_mem& mem = x.operands[1].mem;
-      if (mem.index == X86_REG_INVALID || mem.scale != 4 || mem.base == X86_REG_INVALID) {
+      const ZydisDecodedOperandMem& mem = insn.operands[1].mem;
+      if (mem.index == ZYDIS_REGISTER_NONE || mem.scale != 4 || mem.base == ZYDIS_REGISTER_NONE) {
         break;
       }
       int idx_reg = DWARFRegOf(mem.index);
@@ -476,7 +459,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
             (unsigned long long)insn.address, base_reg, base_val.ToString());
         break;
       }
-      uint64_t table = static_cast<uint64_t>(base_val.ConstValue()) + mem.disp;
+      uint64_t table = static_cast<uint64_t>(base_val.ConstValue()) + mem.disp.value;
       // Snapshot the index register's bound now, while its job is still
       // fresh, rather than re-deriving it with a live lookup at the
       // eventual `jmp` (switch-table-amend-plan.md §2) -- an intervening
@@ -493,18 +476,18 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       return out;
     }
 
-    case X86_INS_ADD:
-    case X86_INS_SUB: {
+    case ZYDIS_MNEMONIC_ADD:
+    case ZYDIS_MNEMONIC_SUB: {
       // `add %B,%T` (either operand order) where %B is the same known
       // constant %T's table was derived from -- the switch-table
-      // dispatch address. Capstone's operands[0] is always the
-      // destination for a 2-operand ADD/SUB, regardless of which
-      // register held the constant and which held the table entry.
-      if (insn.id == X86_INS_ADD && x.op_count == 2 && x.operands[0].type == X86_OP_REG &&
-          x.operands[1].type == X86_OP_REG) {
-        int d0 = DWARFRegOf(x.operands[0].reg);
-        int d1 = DWARFRegOf(x.operands[1].reg);
-        if (d0 >= 0 && d1 >= 0 && IsFull64(x.operands[0].reg) && IsFull64(x.operands[1].reg)) {
+      // dispatch address. Zydis's operands[0] is always the destination
+      // for a 2-operand ADD/SUB, regardless of which register held the
+      // constant and which held the table entry.
+      if (insn.id == ZYDIS_MNEMONIC_ADD && insn.op_count == 2 && insn.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+          insn.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        int d0 = DWARFRegOf(insn.operands[0].reg.value);
+        int d1 = DWARFRegOf(insn.operands[1].reg.value);
+        if (d0 >= 0 && d1 >= 0 && IsFull64(insn.operands[0].reg.value) && IsFull64(insn.operands[1].reg.value)) {
           const AbsVal op0 = state->reg(d0);
           const AbsVal op1 = state->reg(d1);
           auto resolve = [](const AbsVal& base_candidate, const AbsVal& entry_candidate) -> std::optional<AbsVal> {
@@ -521,26 +504,27 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
           }
           if (resolved.has_value()) {
             VLOG(1) << absl::StrFormat("0x%llx: %s -> reg %d = kJumpTarget(%s)", (unsigned long long)insn.address,
-                                       insn.id == X86_INS_ADD ? "add" : "sub", d0, resolved->ToString());
+                                       insn.id == ZYDIS_MNEMONIC_ADD ? "add" : "sub", d0, resolved->ToString());
             state->SetReg(d0, *resolved);
             return out;
           }
         }
       }
-      if (x.op_count != 2 || x.operands[0].type != X86_OP_REG || x.operands[1].type != X86_OP_IMM) {
+      if (insn.op_count != 2 || insn.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+          insn.operands[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE) {
         break;
       }
-      int d = DWARFRegOf(x.operands[0].reg);
+      int d = DWARFRegOf(insn.operands[0].reg.value);
       if (d < 0) {
         break;
       }
       const AbsVal cur = state->reg(d);
-      if (!IsFull64(x.operands[0].reg) || cur.kind != AbsVal::Kind::kCFARel) {
+      if (!IsFull64(insn.operands[0].reg.value) || cur.kind != AbsVal::Kind::kCFARel) {
         state->ClobberReg(d);
         return out;
       }
-      int64_t imm = x.operands[1].imm;
-      int64_t delta = insn.id == X86_INS_ADD ? cur.delta + imm : cur.delta - imm;
+      int64_t imm = insn.operands[1].imm.value.s;
+      int64_t delta = insn.id == ZYDIS_MNEMONIC_ADD ? cur.delta + imm : cur.delta - imm;
       state->SetReg(d, AbsVal::CFARel(delta));
       if (d == kDWARFRsp && delta > cur.delta) {
         state->DropDeadSlots(delta);
@@ -548,7 +532,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       return out;
     }
 
-    case X86_INS_CMP: {
+    case ZYDIS_MNEMONIC_CMP: {
       // `cmp $non_negative_imm,%reg` -- the switch-table guard
       // (initial-switch-tables-plan.md §3.2). cmp writes no register or
       // memory, only EFLAGS, which the unconditional check at the top of
@@ -556,17 +540,17 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       // Anything else (cmp of two registers, a negative immediate, a
       // memory operand) simply leaves it cleared -- not a guard this
       // analysis resolves.
-      if (x.op_count == 2 && x.operands[0].type == X86_OP_REG && x.operands[1].type == X86_OP_IMM &&
-          x.operands[1].imm >= 0) {
-        int r = DWARFRegOf(x.operands[0].reg);
+      if (insn.op_count == 2 && insn.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+          insn.operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && insn.operands[1].imm.value.s >= 0) {
+        int r = DWARFRegOf(insn.operands[0].reg.value);
         if (r >= 0) {
-          state->last_cmp = AbsState::FlagsGuard{r, static_cast<uint64_t>(x.operands[1].imm)};
+          state->last_cmp = AbsState::FlagsGuard{r, static_cast<uint64_t>(insn.operands[1].imm.value.s)};
         }
       }
       return out;
     }
 
-    case X86_INS_MOVZX: {
+    case ZYDIS_MNEMONIC_MOVZX: {
       // `movzbl %r8b,%ecx` and friends: the destination's own identity
       // does not survive the truncation in general, but a numeric bound
       // established on the source does -- GCC routinely widens the guard
@@ -574,9 +558,10 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       // (switch-table-amend-plan.md §1), so carrying just the bound
       // across, rather than the whole value, is what lets the guard and
       // the table load disagree on register without losing the guard.
-      if (x.op_count == 2 && x.operands[0].type == X86_OP_REG && x.operands[1].type == X86_OP_REG) {
-        int d = DWARFRegOf(x.operands[0].reg);
-        int s = DWARFRegOf(x.operands[1].reg);
+      if (insn.op_count == 2 && insn.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+          insn.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        int d = DWARFRegOf(insn.operands[0].reg.value);
+        int s = DWARFRegOf(insn.operands[1].reg.value);
         if (d >= 0) {
           std::optional<uint64_t> carried = s >= 0 ? state->reg(s).Bound() : std::nullopt;
           state->ClobberReg(d);
@@ -589,9 +574,9 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       break;  // no reg destination we can name -- fall through to the generic clobber
     }
 
-    case X86_INS_NOP:
-    case X86_INS_ENDBR32:
-    case X86_INS_ENDBR64:
+    case ZYDIS_MNEMONIC_NOP:
+    case ZYDIS_MNEMONIC_ENDBR32:
+    case ZYDIS_MNEMONIC_ENDBR64:
       return out;
 
     default:
