@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 
+#include "absl/strings/str_format.h"
+
 namespace unwind_analysis {
 
 // DWARF register numbers 0..15 are the GPRs; 16 is RIP, which is how the
@@ -40,7 +42,22 @@ struct CFARule {
   int64_t offset = 0;
 
   bool operator==(const CFARule&) const = default;
-  std::string ToString() const;
+
+  template <typename Sink>
+  friend void AbslStringify(Sink& sink, const CFARule& rule) {
+    switch (rule.kind) {
+      case Kind::kUndefined:
+        sink.Append("<no CFA rule>");
+        return;
+      case Kind::kRegOffset:
+        absl::Format(&sink, "%s%+d", DWARFRegName(rule.reg), static_cast<int>(rule.offset));
+        return;
+      case Kind::kExpression:
+        sink.Append("<DWARF expression>");
+        return;
+    }
+    sink.Append("<?>");
+  }
 };
 
 // How the CFI says one register's caller value is recovered at some PC.
@@ -61,7 +78,37 @@ struct RegRule {
   int64_t offset = 0;
 
   bool operator==(const RegRule&) const = default;
-  std::string ToString() const;
+
+  template <typename Sink>
+  friend void AbslStringify(Sink& sink, const RegRule& rule) {
+    switch (rule.kind) {
+      case Kind::kUnset:
+        sink.Append("<no rule>");
+        return;
+      case Kind::kUndefined:
+        sink.Append("undefined");
+        return;
+      case Kind::kSameValue:
+        sink.Append("same_value");
+        return;
+      case Kind::kAtCFAOffset:
+        absl::Format(&sink, "[CFA%+d]", static_cast<int>(rule.offset));
+        return;
+      case Kind::kValOffset:
+        absl::Format(&sink, "CFA%+d", static_cast<int>(rule.offset));
+        return;
+      case Kind::kInRegister:
+        absl::Format(&sink, "in %s", DWARFRegName(rule.reg));
+        return;
+      case Kind::kExpression:
+        sink.Append("<DWARF expression>");
+        return;
+      case Kind::kValExpression:
+        sink.Append("<DWARF val expression>");
+        return;
+    }
+    sink.Append("<?>");
+  }
 };
 
 // One row of the FDE's virtual unwind table: the rules in force from

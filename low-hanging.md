@@ -62,4 +62,4 @@ If the selected item is too confusing/impossible/wrong. Mark it as
   better than under-clobber, but e.g. important regs like RSP probably
   worth doing right.
 
-* replace <Various>::ToString() with AbslStringify
+* (DONE) replace <Various>::ToString() with AbslStringify

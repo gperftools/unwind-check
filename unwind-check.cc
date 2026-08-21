@@ -189,12 +189,12 @@ void DumpCFI(const CFI& cfi, const Symbolizer& symbolizer) {
   std::string name = symbolizer.Name(cfi.pc_begin);
   absl::PrintF("FDE 0x%x pc=0x%x..0x%x%s%s\n", cfi.fde_addr, cfi.pc_begin, cfi.pc_end, name.empty() ? "" : "  ", name);
   for (const CFIRow& row : cfi.rows) {
-    absl::PrintF("  0x%-14x cfa=%s", row.pc_start, row.cfa.ToString());
+    absl::PrintF("  0x%-14x cfa=%v", row.pc_start, row.cfa);
     for (int r = 0; r < kNumDWARFRegs; r++) {
       if (row.regs[r].kind == RegRule::Kind::kUnset) {
         continue;
       }
-      absl::PrintF("  %s=%s", DWARFRegName(r), row.regs[r].ToString());
+      absl::PrintF("  %s=%v", DWARFRegName(r), row.regs[r]);
     }
     absl::PrintF("\n");
   }

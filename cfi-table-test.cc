@@ -12,6 +12,7 @@
 #include <map>
 #include <string>
 
+#include "absl/strings/str_cat.h"
 #include "eh-frame-reader.h"
 #include "elf-image.h"
 #include "gmock/gmock.h"
@@ -138,6 +139,43 @@ TEST_F(CFITableTest, MalformedFDEAddressThrowsRatherThanCrashing) {
   EXPECT_THROW(
       ReadFDE(image_->eh_frame_end() + 0x1000, image_->eh_frame_start(), image_->eh_frame_end(), image_->bias()),
       EHFrameError);
+}
+
+TEST(CFIRuleTest, StringifyFormatsRulesCorrectly) {
+  CFARule undefined{CFARule::Kind::kUndefined, 0, 0};
+  EXPECT_EQ(absl::StrCat(undefined), "<no CFA rule>");
+
+  CFARule reg_offset{CFARule::Kind::kRegOffset, kDWARFRsp, 8};
+  EXPECT_EQ(absl::StrCat(reg_offset), "rsp+8");
+
+  CFARule expr{CFARule::Kind::kExpression, 0, 0};
+  EXPECT_EQ(absl::StrCat(expr), "<DWARF expression>");
+}
+
+TEST(RegRuleTest, StringifyFormatsRulesCorrectly) {
+  RegRule unset{RegRule::Kind::kUnset, 0, 0};
+  EXPECT_EQ(absl::StrCat(unset), "<no rule>");
+
+  RegRule undefined{RegRule::Kind::kUndefined, 0, 0};
+  EXPECT_EQ(absl::StrCat(undefined), "undefined");
+
+  RegRule same_val{RegRule::Kind::kSameValue, 0, 0};
+  EXPECT_EQ(absl::StrCat(same_val), "same_value");
+
+  RegRule at_cfa{RegRule::Kind::kAtCFAOffset, 0, -8};
+  EXPECT_EQ(absl::StrCat(at_cfa), "[CFA-8]");
+
+  RegRule val_offset{RegRule::Kind::kValOffset, 0, 16};
+  EXPECT_EQ(absl::StrCat(val_offset), "CFA+16");
+
+  RegRule in_reg{RegRule::Kind::kInRegister, kDWARFRbp, 0};
+  EXPECT_EQ(absl::StrCat(in_reg), "in rbp");
+
+  RegRule expr{RegRule::Kind::kExpression, 0, 0};
+  EXPECT_EQ(absl::StrCat(expr), "<DWARF expression>");
+
+  RegRule val_expr{RegRule::Kind::kValExpression, 0, 0};
+  EXPECT_EQ(absl::StrCat(val_expr), "<DWARF val expression>");
 }
 
 }  // namespace

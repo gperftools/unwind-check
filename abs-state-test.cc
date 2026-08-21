@@ -49,12 +49,13 @@ TEST(AbsValTest, EqualityDistinguishesEveryKind) {
   EXPECT_EQ(AbsVal::Bottom(), AbsVal::Bottom());
 }
 
-TEST(AbsValTest, ToStringNamesTopAndBottomDistinctly) {
-  EXPECT_EQ(AbsVal::Top().ToString(), "unknown");
-  EXPECT_EQ(AbsVal::Bottom().ToString(), "conflict");
-  EXPECT_EQ(AbsVal::CFARel(8).ToString(), "CFA+8");
-  EXPECT_EQ(AbsVal::CFARel(-16).ToString(), "CFA-16");
-  EXPECT_EQ(AbsVal::OrigReg(kDWARFRbx).ToString(), "entry rbx");
+TEST(AbsValTest, StringifyNamesTopAndBottomDistinctly) {
+  EXPECT_EQ(absl::StrCat(AbsVal::Top()), "unknown");
+  EXPECT_EQ(absl::StrCat(AbsVal::Bottom()), "conflict");
+  EXPECT_EQ(absl::StrCat(AbsVal::CFARel(8)), "CFA+8");
+  EXPECT_EQ(absl::StrCat(AbsVal::CFARel(-16)), "CFA-16");
+  EXPECT_EQ(absl::StrCat(AbsVal::OrigReg(kDWARFRbx)), "entry rbx");
+  EXPECT_EQ(absl::StrCat(AbsVal::Const(0x40)), "const 0x40");
 }
 
 // --- AbsState::Entry --------------------------------------------------

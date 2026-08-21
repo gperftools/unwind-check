@@ -87,26 +87,6 @@ JoinValueResult JoinValue(const AbsVal& current, const AbsVal& incoming) {
 
 }  // namespace
 
-std::string AbsVal::ToString() const {
-  switch (kind) {
-    case Kind::kTop:
-      return "unknown";
-    case Kind::kBottom:
-      return "conflict";
-    case Kind::kCFARel:
-      return absl::StrFormat("CFA%+d", delta);
-    case Kind::kOrigReg:
-      return absl::StrFormat("entry %s", DWARFRegName(reg));
-    case Kind::kConst:
-      return absl::StrFormat("const 0x%x", delta);
-    case Kind::kTableEntry:
-      return absl::StrFormat("table[%s] entry (table@0x%x)", DWARFRegName(reg), TableAddr());
-    case Kind::kJumpTarget:
-      return absl::StrFormat("jump target table@0x%x[%s]", TableAddr(), DWARFRegName(reg));
-  }
-  return "?";
-}
-
 AbsState AbsState::Entry() {
   AbsState s;
   for (int r = 0; r < kNumGPRs; r++) {
@@ -198,10 +178,10 @@ void AbsState::DropDeadSlots(int64_t rsp_delta) {
 
 std::string JoinConflict::Describe() const {
   if (reg == kSlotConflict) {
-    return absl::StrFormat("stack slot CFA%+d is %s on one path and %s on another", static_cast<int>(offset),
-                           lhs.ToString(), rhs.ToString());
+    return absl::StrFormat("stack slot CFA%+d is %v on one path and %v on another", static_cast<int>(offset), lhs,
+                           rhs);
   }
-  return absl::StrFormat("%s is %s on one path and %s on another", DWARFRegName(reg), lhs.ToString(), rhs.ToString());
+  return absl::StrFormat("%s is %v on one path and %v on another", DWARFRegName(reg), lhs, rhs);
 }
 
 bool Join(const AbsState& incoming, AbsState* state, std::vector<JoinConflict>* conflicts) {

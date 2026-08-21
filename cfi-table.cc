@@ -190,39 +190,6 @@ const char* DWARFRegName(int reg) {
   return kRegNames[reg];
 }
 
-std::string CFARule::ToString() const {
-  switch (kind) {
-    case Kind::kUndefined:
-      return "<no CFA rule>";
-    case Kind::kRegOffset:
-      return absl::StrFormat("%s%+d", DWARFRegName(reg), static_cast<int>(offset));
-    case Kind::kExpression:
-      return "<DWARF expression>";
-  }
-  return "<?>";
-}
-
-std::string RegRule::ToString() const {
-  switch (kind) {
-    case Kind::kUnset:
-      return "<no rule>";
-    case Kind::kUndefined:
-      return "undefined";
-    case Kind::kSameValue:
-      return "same_value";
-    case Kind::kAtCFAOffset:
-      return absl::StrFormat("[CFA%+d]", static_cast<int>(offset));
-    case Kind::kValOffset:
-      return absl::StrFormat("CFA%+d", static_cast<int>(offset));
-    case Kind::kInRegister:
-      return absl::StrFormat("in %s", DWARFRegName(reg));
-    case Kind::kExpression:
-      return "<DWARF expression>";
-    case Kind::kValExpression:
-      return "<DWARF val expression>";
-  }
-  return "<?>";
-}
 
 bool CFIRow::IsCanonicalEntry() const {
   return cfa.kind == CFARule::Kind::kRegOffset && cfa.reg == kDWARFRsp && cfa.offset == 8 &&

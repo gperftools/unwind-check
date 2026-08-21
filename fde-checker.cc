@@ -129,13 +129,13 @@ class RowChecker {
     }
     const AbsVal& v = state.reg(cfa.reg);
     if (v.kind != AbsVal::Kind::kCFARel) {
-      Review(absl::StrFormat("CFA is declared as %s, but %s holds %s here, so the rule cannot be verified",
-                             cfa.ToString(), DWARFRegName(cfa.reg), v.ToString()));
+      Review(absl::StrFormat("CFA is declared as %v, but %s holds %v here, so the rule cannot be verified", cfa,
+                             DWARFRegName(cfa.reg), v));
       return;
     }
     if (v.delta + cfa.offset != 0) {
-      Mismatch(absl::StrFormat("declared CFA is %s, but %s is CFA%+d here, so the rule yields CFA%+d (should be %s%+d)",
-                               cfa.ToString(), DWARFRegName(cfa.reg), static_cast<int>(v.delta),
+      Mismatch(absl::StrFormat("declared CFA is %v, but %s is CFA%+d here, so the rule yields CFA%+d (should be %s%+d)",
+                               cfa, DWARFRegName(cfa.reg), static_cast<int>(v.delta),
                                static_cast<int>(v.delta + cfa.offset), DWARFRegName(cfa.reg),
                                static_cast<int>(-v.delta)));
     }
@@ -175,8 +175,8 @@ class RowChecker {
           return;
         }
         if (!at.IsOrigReg(r)) {
-          Mismatch(absl::StrFormat("CFI says %s is saved at [CFA%+d], but that slot holds %s", DWARFRegName(r),
-                                   static_cast<int>(rule.offset), at.ToString()));
+          Mismatch(absl::StrFormat("CFI says %s is saved at [CFA%+d], but that slot holds %v", DWARFRegName(r),
+                                   static_cast<int>(rule.offset), at));
         }
         return;
       }
@@ -192,8 +192,8 @@ class RowChecker {
           return;
         }
         if (!v->IsCFARel(rule.offset)) {
-          Mismatch(absl::StrFormat("CFI says %s is CFA%+d, but it holds %s", DWARFRegName(r),
-                                   static_cast<int>(rule.offset), v->ToString()));
+          Mismatch(absl::StrFormat("CFI says %s is CFA%+d, but it holds %v", DWARFRegName(r),
+                                   static_cast<int>(rule.offset), *v));
         }
         return;
       }
@@ -211,8 +211,8 @@ class RowChecker {
           return;
         }
         if (!v->IsOrigReg(r)) {
-          Mismatch(absl::StrFormat("CFI says %s was moved into %s, but %s holds %s", DWARFRegName(r),
-                                   DWARFRegName(rule.reg), DWARFRegName(rule.reg), v->ToString()));
+          Mismatch(absl::StrFormat("CFI says %s was moved into %s, but %s holds %v", DWARFRegName(r),
+                                   DWARFRegName(rule.reg), DWARFRegName(rule.reg), *v));
         }
         return;
       }
@@ -235,8 +235,7 @@ class RowChecker {
       return;
     }
     if (!v->IsOrigReg(r)) {
-      Mismatch(
-          absl::StrFormat("CFI says %s still holds its entry value, but it holds %s", DWARFRegName(r), v->ToString()));
+      Mismatch(absl::StrFormat("CFI says %s still holds its entry value, but it holds %v", DWARFRegName(r), *v));
     }
   }
 
@@ -357,8 +356,7 @@ void CheckExitState(uint64_t pc, const AbsState& state, const std::string& insn_
   // 1. Check stack pointer
   const AbsVal& rsp = state.reg(kDWARFRsp);
   if (rsp.is_unknown()) {
-    sink->Add(Finding::Severity::kReview, pc, absl::StrFormat("%s with untracked rsp (%s)", context, rsp.ToString()),
-              insn_text);
+    sink->Add(Finding::Severity::kReview, pc, absl::StrFormat("%s with untracked rsp (%v)", context, rsp), insn_text);
   } else if (!rsp.IsCFARel(-8)) {
     if (is_tail_call) {
       sink->Add(Finding::Severity::kReview, pc,
@@ -389,14 +387,13 @@ void CheckExitState(uint64_t pc, const AbsState& state, const std::string& insn_
     for (int r : kCalleeSaved) {
       const AbsVal& v = state.reg(r);
       if (v.is_unknown()) {
-        sink->Add(
-            Finding::Severity::kReview, pc,
-            absl::StrFormat("%s with untracked callee-saved register %s (%s)", context, DWARFRegName(r), v.ToString()),
-            insn_text);
+        sink->Add(Finding::Severity::kReview, pc,
+                  absl::StrFormat("%s with untracked callee-saved register %s (%v)", context, DWARFRegName(r), v),
+                  insn_text);
       } else if (!v.IsOrigReg(r)) {
         sink->Add(Finding::Severity::kMismatch, pc,
-                  absl::StrFormat("%s with callee-saved register %s holding %s (entry value was not restored)", context,
-                                  DWARFRegName(r), v.ToString()),
+                  absl::StrFormat("%s with callee-saved register %s holding %v (entry value was not restored)", context,
+                                  DWARFRegName(r), v),
                   insn_text);
       }
     }
@@ -407,13 +404,11 @@ void CheckExitState(uint64_t pc, const AbsState& state, const std::string& insn_
     AbsVal ra = state.Slot(-8);
     if (ra.is_unknown()) {
       sink->Add(Finding::Severity::kReview, pc,
-                absl::StrFormat("%s with untracked return address slot at [CFA-8] (%s)", context, ra.ToString()),
-                insn_text);
+                absl::StrFormat("%s with untracked return address slot at [CFA-8] (%v)", context, ra), insn_text);
     } else if (!ra.IsOrigReg(kDWARFRip)) {
-      sink->Add(
-          Finding::Severity::kMismatch, pc,
-          absl::StrFormat("%s with return address slot at [CFA-8] holding %s (overwritten)", context, ra.ToString()),
-          insn_text);
+      sink->Add(Finding::Severity::kMismatch, pc,
+                absl::StrFormat("%s with return address slot at [CFA-8] holding %v (overwritten)", context, ra),
+                insn_text);
     }
   }
 }
@@ -632,8 +627,8 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     if (first_row->cfa.kind != CFARule::Kind::kRegOffset || first_row->cfa.reg != kDWARFRsp ||
         first_row->cfa.offset != 8) {
       sink.Add(Finding::Severity::kReview, cfi.pc_begin,
-               absl::StrFormat("a function symbol starts here, so the CFA should be rsp+8, but the CFI says %s%s",
-                               first_row->cfa.ToString(), kEnteredByJump),
+               absl::StrFormat("a function symbol starts here, so the CFA should be rsp+8, but the CFI says %v%s",
+                               first_row->cfa, kEnteredByJump),
                "");
     }
     const RegRule& ra = first_row->regs[kDWARFRip];
@@ -641,8 +636,8 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       if (ra.kind != RegRule::Kind::kUndefined) {
         sink.Add(Finding::Severity::kReview, cfi.pc_begin,
                  absl::StrFormat("a function symbol starts here, so the return address should be at [CFA-8], but "
-                                 "the CFI says %s%s",
-                                 ra.ToString(), kEnteredByJump),
+                                 "the CFI says %v%s",
+                                 ra, kEnteredByJump),
                  "");
       }
     }

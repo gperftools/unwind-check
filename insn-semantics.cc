@@ -207,7 +207,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
     if (insn.op_count >= 1 && insn.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER) {
       int r = DWARFRegOf(insn.operands[0].reg.value);
       const AbsVal v = r >= 0 ? state->reg(r) : AbsVal::Top();
-      VLOG(1) << absl::StrFormat("0x%x: indirect jmp via reg %d, value=%s", insn.address, r, v.ToString());
+      VLOG(1) << absl::StrFormat("0x%x: indirect jmp via reg %d, value=%v", insn.address, r, v);
       if (v.IsJumpTarget()) {
         // The bound was captured once at movslq-time and carried through
         // the `add` into this kJumpTarget -- not re-derived with a live
@@ -513,8 +513,8 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       const AbsVal& base_val = state->reg(base_reg);
       if (!base_val.IsConst()) {
         VLOG(1) << absl::StrFormat(
-            "0x%x: movslq disp(%%B,%%I,4),%%T base reg %d is not a known constant (value=%s) -- not a table load",
-            insn.address, base_reg, base_val.ToString());
+            "0x%x: movslq disp(%%B,%%I,4),%%T base reg %d is not a known constant (value=%v) -- not a table load",
+            insn.address, base_reg, base_val);
         break;
       }
       uint64_t table = static_cast<uint64_t>(base_val.ConstValue()) + mem.disp.value;
@@ -559,8 +559,8 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
             resolved = resolve(op1, op0);
           }
           if (resolved.has_value()) {
-            VLOG(1) << absl::StrFormat("0x%x: %s -> reg %d = kJumpTarget(%s)", insn.address,
-                                       insn.id == ZYDIS_MNEMONIC_ADD ? "add" : "sub", d0, resolved->ToString());
+            VLOG(1) << absl::StrFormat("0x%x: %s -> reg %d = kJumpTarget(%v)", insn.address,
+                                       insn.id == ZYDIS_MNEMONIC_ADD ? "add" : "sub", d0, *resolved);
             state->SetReg(d0, *resolved);
             return out;
           }

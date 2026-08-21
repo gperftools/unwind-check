@@ -234,6 +234,7 @@ cc_test(
     copts = DEFAULT_COPTS,
     deps = [
         ":abs-state",
+        "@abseil-cpp//absl/strings",
         "@googletest//:gtest_main",
     ],
 )
@@ -284,6 +285,7 @@ cc_test(
         ":cfi-table",
         ":eh-frame-reader",
         ":elf-image",
+        "@abseil-cpp//absl/strings",
         "@googletest//:gtest_main",
     ],
 )

@@ -163,7 +163,34 @@ struct AbsVal {
   }
 
   bool operator==(const AbsVal&) const = default;
-  std::string ToString() const;
+
+  template <typename Sink>
+  friend void AbslStringify(Sink& sink, const AbsVal& val) {
+    switch (val.kind) {
+      case Kind::kTop:
+        sink.Append("unknown");
+        return;
+      case Kind::kBottom:
+        sink.Append("conflict");
+        return;
+      case Kind::kCFARel:
+        absl::Format(&sink, "CFA%+d", val.delta);
+        return;
+      case Kind::kOrigReg:
+        absl::Format(&sink, "entry %s", DWARFRegName(val.reg));
+        return;
+      case Kind::kConst:
+        absl::Format(&sink, "const 0x%x", val.delta);
+        return;
+      case Kind::kTableEntry:
+        absl::Format(&sink, "table[%s] entry (table@0x%x)", DWARFRegName(val.reg), val.TableAddr());
+        return;
+      case Kind::kJumpTarget:
+        absl::Format(&sink, "jump target table@0x%x[%s]", val.TableAddr(), DWARFRegName(val.reg));
+        return;
+    }
+    sink.Append("?");
+  }
 };
 
 // The abstract state at one program point.
