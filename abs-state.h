@@ -53,18 +53,25 @@ struct AbsVal {
   int64_t delta = 0;
   uint8_t reg = 0;
   uint64_t aux = 0;
-  // Valid for kTableEntry and kJumpTarget only: the index register's
-  // switch-table upper bound (initial-switch-tables-plan.md §3.2),
-  // captured once at `movslq`-time from AbsState::UBound and carried
-  // forward through kJumpTarget, rather than re-derived with a live
-  // AbsState::UBound lookup at the eventual `jmp` (switch-table-amend-plan.md
-  // §2). A live lookup at the `jmp` is a narrow hazard: an intervening
+  // An unsigned upper bound on this value's true numeric content, if one
+  // has been established by a `cmp $imm,%r; ja default` switch-table guard
+  // (initial-switch-tables-plan.md §3.2) -- valid regardless of `kind`,
+  // since the guard is a fact about the register's number, not about
+  // whatever else this AbsVal happens to track. This is auxiliary,
+  // precision-only metadata: no CFI row ever asserts anything about it
+  // (see the identity/auxiliary split in Join()), so it is joined
+  // independently of `kind`/`delta`/`reg`/`aux` -- see AbsVal::SameIdentity
+  // and JoinValue in abs-state.cc.
+  //
+  // For kTableEntry and kJumpTarget specifically, this is captured once at
+  // `movslq`-time rather than re-derived with a live bound lookup at the
+  // eventual `jmp` (switch-table-amend-plan.md §2): an intervening
   // instruction between the table load and the `jmp` could reuse the same
   // register number for an unrelated guard, and a live lookup would
   // silently pick that bound up instead of the one that actually sized
   // this table. A snapshot taken when the index's job is already done is
   // immune to anything that happens afterward.
-  std::optional<uint64_t> table_bound;
+  std::optional<uint64_t> bound;
 
   static AbsVal Top() {
     return {};
@@ -131,11 +138,26 @@ struct AbsVal {
   uint64_t TableBaseConst() const {
     return aux;
   }
-  // Valid for kTableEntry and kJumpTarget: the index register's bound
-  // captured at movslq-time, if a guard had established one -- see
-  // `table_bound` above.
-  std::optional<uint64_t> CapturedBound() const {
-    return table_bound;
+  // The upper bound established for this value, if any -- see `bound`
+  // above. General-purpose: valid for any kind, not just the two
+  // switch-table-resolution ones that originally motivated it.
+  std::optional<uint64_t> Bound() const {
+    return bound;
+  }
+  void SetBound(uint64_t v) {
+    bound = v;
+  }
+  void ClearBound() {
+    bound = std::nullopt;
+  }
+
+  // True when two values name the same thing -- same kind, and same
+  // kind-specific payload (delta/reg/aux) -- regardless of whether their
+  // auxiliary `bound` agrees. Join() uses this to decide whether a
+  // disagreement is "the same fact, imprecise about the bound" (merge just
+  // the bound) versus a real conflict about what the value even is.
+  bool SameIdentity(const AbsVal& other) const {
+    return kind == other.kind && delta == other.delta && reg == other.reg && aux == other.aux;
   }
 
   bool operator==(const AbsVal&) const = default;
@@ -152,26 +174,34 @@ struct AbsState {
   AbsVal gpr[kNumGPRs];
   std::map<int64_t, AbsVal> slots;
 
-  // Per-register unsigned upper bound learned from a `cmp $imm,%r; ja
-  // default` switch-table guard, valid only on the in-bounds
-  // (fall-through) edge -- see initial-switch-tables-plan.md §3.2. This
-  // is not part of AbsVal: no CFI row ever asserts anything about it, it
-  // exists purely so FDEChecker can size-bound a resolved jump table.
-  std::optional<uint64_t> ubound[kNumGPRs];
+  // Thin wrappers over gpr[r]'s own bound field (see AbsVal::bound):
+  // read/write the register's upper bound in place without disturbing
+  // its kind/delta/reg/aux. Kept as named methods, rather than requiring
+  // every call site to reach into gpr[r] directly, mainly so the intent
+  // ("record/consult a switch-table guard's bound") stays as legible as
+  // it was when this lived in a separate array.
+  std::optional<uint64_t> Bound(int r) const {
+    return (r >= 0 && r < kNumGPRs) ? gpr[r].Bound() : std::nullopt;
+  }
+  void SetBound(int r, uint64_t v) {
+    if (r >= 0 && r < kNumGPRs) {
+      gpr[r].SetBound(v);
+    }
+  }
 
-  std::optional<uint64_t> UBound(int r) const {
-    return (r >= 0 && r < kNumGPRs) ? ubound[r] : std::nullopt;
-  }
-  void SetUBound(int r, uint64_t v) {
-    if (r >= 0 && r < kNumGPRs) {
-      ubound[r] = v;
-    }
-  }
-  void ClearUBound(int r) {
-    if (r >= 0 && r < kNumGPRs) {
-      ubound[r] = std::nullopt;
-    }
-  }
+  // The most recent `cmp $imm,%reg` seen (initial-switch-tables-plan.md
+  // §3.2), still valid because nothing has written EFLAGS since -- see the
+  // "clear on any EFLAGS write that isn't a fresh matching cmp" rule in
+  // InsnSemantics::Transfer. This is a fact about the instruction stream,
+  // not about any one register's value, so unlike `bound` it is not part
+  // of AbsVal; there is exactly one EFLAGS, so exactly one of these,
+  // rather than one per register.
+  struct FlagsGuard {
+    int reg = 0;
+    uint64_t imm = 0;
+    bool operator==(const FlagsGuard&) const = default;
+  };
+  std::optional<FlagsGuard> last_cmp;
 
   // The state on entry to a function: rsp is CFA-8 (the call pushed the
   // return address), every register still holds its own entry value, and

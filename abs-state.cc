@@ -11,10 +11,78 @@ namespace {
 // can never assert anything about a scratch register holding a
 // `.rodata` pointer or table-derived offset, so a join disagreement
 // between two of these is not the compiler-bug signal Join() exists to
-// report -- it just means precision was lost, and the result should be
-// kTop like any other lost-precision case, not a reported kBottom.
+// report -- it just means precision was lost. It still has to resolve to
+// kBottom, not kTop, even though nothing gets reported: kTop is the
+// identity element a later, third predecessor's value would be silently
+// adopted into (see JoinValue below), which would resurrect a concrete
+// answer after two paths already disagreed here -- order-dependent and
+// exactly the non-monotonic "undo" Join exists to rule out. kBottom is
+// absorbing, so once this has given up it stays given up regardless of
+// how many more predecessors arrive.
 bool IsTableResolutionKind(AbsVal::Kind k) {
   return k == AbsVal::Kind::kConst || k == AbsVal::Kind::kTableEntry || k == AbsVal::Kind::kJumpTarget;
+}
+
+// What Join() does to one pair of values, whether they are a register's
+// contents or a stack slot's -- the two used to have separately-written,
+// subtly different logic; this is now the single place that logic lives.
+struct JoinValueResult {
+  AbsVal value;
+  bool changed;
+  // Set only for a genuine CFI-relevant disagreement the caller should
+  // report; the table-resolution carve-out and ordinary top/bottom
+  // handling never set this.
+  bool real_conflict;
+};
+
+JoinValueResult JoinValue(const AbsVal& current, const AbsVal& incoming) {
+  if (current == incoming) {
+    return {current, false, false};
+  }
+  // kBottom absorbs: a value already flagged as conflicting stays that
+  // way, and a value that only just learned of a conflict on the incoming
+  // side adopts it. Neither case is a fresh disagreement to report --
+  // that happened (or will happen) at the join that first produced the
+  // kBottom.
+  if (current.is_bottom()) {
+    return {current, false, false};
+  }
+  if (incoming.is_bottom()) {
+    return {AbsVal::Bottom(), true, false};
+  }
+  // Both sides share a core identity (kind/delta/reg/aux) -- true of any
+  // two kTop values in particular, since kTop's core is always the same
+  // {kTop,0,0,0} regardless of what each side's `bound` says -- and, per
+  // the equality check above, disagree about something. If that something
+  // is only the auxiliary bound, keep the shared identity and merge just
+  // that (equal-preserving-else-clear, the same rule the old per-register
+  // ubound array used). This has to be checked before the kTop-as-
+  // identity-element handling below, or two differently-bounded kTops
+  // would take the "adopt whichever side is concrete" branch and one
+  // side's bound would be silently and arbitrarily preferred instead of
+  // merged.
+  if (current.SameIdentity(incoming)) {
+    AbsVal merged = current;
+    merged.ClearBound();
+    return {merged, true, false};
+  }
+  // kTop is the identity element: take whatever the other side knows,
+  // bound included. Only reached once SameIdentity above has ruled out
+  // "both sides are kTop" -- this is the case where the two sides
+  // genuinely differ in kind.
+  if (current.is_top()) {
+    return {incoming, true, false};
+  }
+  if (incoming.is_top()) {
+    return {current, false, false};
+  }
+  // A genuine identity disagreement -- ordinarily a real conflict, but not
+  // when both sides are one of the switch-table resolution kinds, which
+  // no CFI row can ever consult; see IsTableResolutionKind.
+  if (IsTableResolutionKind(current.kind) && IsTableResolutionKind(incoming.kind)) {
+    return {AbsVal::Bottom(), true, false};
+  }
+  return {AbsVal::Bottom(), true, true};
 }
 
 }  // namespace
@@ -142,103 +210,65 @@ bool Join(const AbsState& incoming, AbsState* state, std::vector<JoinConflict>* 
   bool changed = false;
 
   for (int r = 0; r < kNumGPRs; r++) {
-    if (state->gpr[r] == incoming.gpr[r]) {
-      continue;
-    }
-    // kBottom absorbs: a register already flagged as conflicting stays
-    // that way, and a register that only just learned of a conflict on
-    // the incoming side adopts it. Neither case is a fresh disagreement
-    // to report -- that happened (or will happen) at the join that
-    // first produced the kBottom.
-    if (state->gpr[r].is_bottom()) {
-      continue;
-    }
-    if (incoming.gpr[r].is_bottom()) {
-      state->gpr[r] = AbsVal::Bottom();
-      changed = true;
-      continue;
-    }
-    // kTop is the identity element: take whatever the other side knows.
-    if (state->gpr[r].is_top()) {
-      state->gpr[r] = incoming.gpr[r];
-      changed = true;
-      continue;
-    }
-    if (incoming.gpr[r].is_top()) {
-      continue;
-    }
-    // Both sides name a concrete value and, per the equality check
-    // above, disagree about what it is. Ordinarily that is a genuine
-    // conflict -- but not when both sides are one of the switch-table
-    // resolution kinds, which no CFI row can ever consult; see
-    // IsTableResolutionKind.
-    if (IsTableResolutionKind(state->gpr[r].kind) && IsTableResolutionKind(incoming.gpr[r].kind)) {
-      state->gpr[r] = AbsVal::Top();
-      changed = true;
-      continue;
-    }
-    if (conflicts != nullptr) {
+    JoinValueResult result = JoinValue(state->gpr[r], incoming.gpr[r]);
+    if (result.real_conflict && conflicts != nullptr) {
       conflicts->push_back(JoinConflict{r, 0, state->gpr[r], incoming.gpr[r]});
     }
-    state->gpr[r] = AbsVal::Bottom();
-    changed = true;
-  }
-
-  // Per-register switch-table bounds (§3.2): keep a bound only where
-  // both paths recorded exactly the same one. Unioning (taking the max)
-  // would let an unrelated, differently-bounded dispatch on the same
-  // register validate a table it never guarded; dropping to top here,
-  // rather than reporting a conflict, mirrors the carve-out above for
-  // the same reason -- no CFI row ever reads this either.
-  for (int r = 0; r < kNumGPRs; r++) {
-    std::optional<uint64_t> merged = (state->ubound[r] == incoming.ubound[r]) ? state->ubound[r] : std::nullopt;
-    if (merged != state->ubound[r]) {
-      state->ubound[r] = merged;
+    if (result.changed) {
+      state->gpr[r] = result.value;
       changed = true;
     }
   }
 
-  // Slots mirror the register logic above exactly, except a slot's
-  // "top" is represented by absence from the map instead of a stored
-  // AbsVal -- Slot() already reads a missing key that way. So a slot
-  // named by only one side is top on the other, and top is the meet's
-  // identity element: it survives when only `state` names it, and is
-  // adopted verbatim when only `incoming` names it (the second loop
-  // below). A slot named by both survives when they agree, drops to a
-  // reported kBottom when they disagree, and a kBottom on either side
-  // -- already a recorded conflict -- absorbs without a fresh report.
+  // Stack slots go through the exact same per-value decision as registers
+  // above (JoinValue) -- what differs is only how the pair to compare is
+  // found: a slot's "top" is represented by absence from the map instead
+  // of a stored AbsVal (Slot() already reads a missing key that way), so a
+  // slot named by only one side is top on the other and needs no lookup
+  // through JoinValue to know the identity-element answer (survives
+  // verbatim either way). A slot named by both goes through JoinValue like
+  // any register.
   for (auto it = state->slots.begin(); it != state->slots.end();) {
     if (it->second.is_bottom()) {
-      ++it;
+      ++it;  // already absorbed; JoinValue would agree, no need to ask
       continue;
     }
     auto other = incoming.slots.find(it->first);
     if (other == incoming.slots.end()) {
-      ++it;
+      ++it;  // incoming is top here; JoinValue(cur, top) == cur, unchanged
       continue;
     }
-    if (other->second == it->second) {
-      ++it;
-      continue;
-    }
-    if (other->second.is_bottom()) {
-      it->second = AbsVal::Bottom();
-      changed = true;
-      ++it;
-      continue;
-    }
-    if (conflicts != nullptr) {
+    JoinValueResult result = JoinValue(it->second, other->second);
+    if (result.real_conflict && conflicts != nullptr) {
       conflicts->push_back(JoinConflict{JoinConflict::kSlotConflict, it->first, it->second, other->second});
     }
-    it->second = AbsVal::Bottom();
-    changed = true;
+    if (result.changed) {
+      it->second = result.value;
+      changed = true;
+    }
     ++it;
   }
   for (const auto& [offset, val] : incoming.slots) {
     if (state->slots.find(offset) == state->slots.end()) {
+      // state is top here; JoinValue(top, val) == val, changed.
       state->slots.emplace(offset, val);
       changed = true;
     }
+  }
+
+  // `last_cmp` is a single fact (there is exactly one EFLAGS), joined the
+  // same equal-preserving-else-clear way `bound` is: it survives only
+  // where both sides agree, since disagreement means the guard does not
+  // actually dominate this point -- some path reaching here never ran it.
+  // Never the reverse (nullopt adopting a value): `propagate`'s
+  // first-sighting case is the only place a pc's *first* contribution is
+  // ever recorded, so by the time Join runs here, an already-nullopt
+  // `state->last_cmp` means either "no guard on the first path either" or
+  // "an earlier disagreement already cleared it" -- both cases are
+  // correctly final, absorbing, and never re-set.
+  if (state->last_cmp.has_value() && state->last_cmp != incoming.last_cmp) {
+    state->last_cmp = std::nullopt;
+    changed = true;
   }
 
   return changed;

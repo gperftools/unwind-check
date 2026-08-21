@@ -44,6 +44,20 @@ an interactive session. `bazel test` is fine either way since the fixtures are
 tiny, but `bazel run` / `bazel-bin/unwind-check` against anything real should
 always be `-c opt`.
 
+**Gotcha: `bazel-bin/unwind-check` is one symlink, not one binary.** It points
+at whichever config directory the *most recent* `bazel build`/`bazel test`
+invocation touched. Running `bazel build :all` or `bazel test :all` (no
+`-c opt`) after a `bazel build -c opt :unwind-check` silently repoints
+`bazel-bin/unwind-check` back at the dbg build — the file still runs, just
+30-60x slower, which reads exactly like a hang or a real performance
+regression on something like `libc.so.6` (measured: a run that takes 3.8s
+under opt sat past a 2-minute timeout under the config `bazel test :all` left
+behind). If a real binary suddenly looks like it hung after touching the
+build, re-run `bazel build -c opt :unwind-check` before concluding anything
+about the code — it re-points the symlink even when nothing needed
+recompiling, and costs nothing to run defensively before any timing-sensitive
+check.
+
 * `.bazelversion` pins 9.2.0.
 * Capstone is the locally installed `libcapstone-dev` (5.0.9 here), linked with
   a bare `-lcapstone` and the system include path. No bazel integration, per
@@ -71,6 +85,7 @@ instead of checking; compare against `readelf --debug-dump=frames-interp`),
 | `disasm.{h,cc}` | RAII Capstone handle, detail on |
 | `abs-state.{h,cc}` | the lattice and its join (§4.3) |
 | `insn-semantics.{h,cc}` | the *computed* side: what each instruction does to the stack (§4.4) |
+| `lsda-reader.{h,cc}` | parses `.gcc_except_table`'s call-site table for exception landing pads (§4.5) |
 | `fde-checker.{h,cc}` | CFG walk, worklist dataflow, and the comparison (§4.5) |
 | `symbolizer.{h,cc}` | symbol names and source lines (§4.7) |
 | `report.{h,cc}`, `unwind-check.cc` | flags, structural checks, output |
@@ -157,7 +172,10 @@ exception landing pad reached by the unwinder mid-function — the CFI's
 silence only means nothing needed unwinding that register, not that it is
 unchanged, so it seeds to `kTop` instead. An *explicit* `kSameValue` rule is a
 real CFI assertion either way and is always trusted. `FDEChecker` passes
-`false` for every landing pad, since a pad is reached only by the unwinder.
+`false` when it falls back to seeding a landing pad from its own declared
+row (§4.5's fallback path) — the primary path derives a landing pad's state
+from the call site that actually reaches it instead of seeding from the row
+at all, so this only matters for the rarer fallback.
 
 For the FDE's own first row, `FDEChecker` deliberately does **not** pass its
 own `at_function_entry` parameter through here — it passes `is_canonical_entry`
@@ -192,13 +210,82 @@ jump from `foo`. Nothing structural separates them — the linker merges
 use, a convention rather than a guarantee. It matters: a statically linked
 binary has dozens, and each was being accused of an impossible entry row.
 
+**Auxiliary, CFI-irrelevant facts are joined separately from identity, and
+poison to an absorbing state, never to `kTop`.** Two kinds of value ride
+alongside the core CFA-relevant lattice above, existing only to resolve PIC
+switch-table dispatches (§6): `AbsVal::bound`, an unsigned upper bound a
+`cmp $imm,%r; ja default` guard established on a value (any `AbsVal`, not
+just the switch-table kinds — folded directly into `AbsVal` rather than
+kept in a side array, so `ClobberReg`/`SetReg` clear or carry it for free
+just by being whole-value operations); and `AbsState::last_cmp`, the most
+recent `cmp $imm,%reg` seen, tracked forward as one optional fact (there is
+exactly one EFLAGS) and cleared by any later instruction that writes flags
+without matching that pattern — see `InsnSemantics::Transfer`'s
+unconditional EFLAGS check and its `X86_INS_CMP` case. No CFI row ever
+asserts anything about either, so a disagreement between two paths about
+them is lost precision, not the compiler-bug signal `Join` otherwise
+exists to report.
+
+Both are joined by the same rule, "equal-preserving-else-poison," expressed
+once as `JoinValue` in `abs-state.cc` and used identically for `gpr` and
+`slots` (previously two independently-written, subtly different loops —
+the `IsTableResolutionKind` carve-out below only existed for registers,
+so a switch-table scratch value that happened to get spilled to the stack
+before two paths disagreed about it produced a spurious, CFI-irrelevant
+`JoinConflict` the register path already avoided). `JoinValue` checks
+`AbsVal::SameIdentity` (same `kind`/`delta`/`reg`/`aux`, deliberately
+ignoring `bound`) *before* treating either side as `kTop`'s identity
+element: two `kTop`s differing only in `bound` are the same identity with
+disagreeing auxiliary data, not "nothing known, adopt whichever side
+concrete" — checking the other way around, table-resolution-kind
+disagreement (e.g. two different `.rodata` constants meeting at a merge
+point) resolves to `kBottom`, not `kTop`, even though nothing gets
+reported. This one matters for real, not just for tidiness: `kTop` is
+`Join`'s identity element, so if a genuine conflict here degraded to it, a
+*third* predecessor arriving later at the same merge point would be
+silently adopted, resurrecting a concrete value after two paths already
+disagreed — a real, order-dependent "undo" of a conflict already found,
+traced and confirmed in this codebase, not hypothetical. `kBottom` is
+absorbing, so once poisoned it stays poisoned regardless of how many more
+predecessors show up.
+
+The switch-table guard itself used to be found by a 64-hop backward
+byte-walk on demand (`FindGuardBound`, since deleted), independent of the
+joined lattice and therefore with no protection against exactly the
+resurrection bug above, plus real cost: worklist dedup (below) made it
+merely wasteful rather than pathological, but it still re-derived the same
+answer on every reprocessing of a `ja`/`jae`. Tracking it forward as
+`last_cmp` removes the byte-walk, the hop cap, and the `fallthrough_pred`
+bookkeeping entirely, and gets the dominance property for free: a `ja`/`jae`
+reachable from a bypassing predecessor that never ran the `cmp` sees
+`last_cmp` cleared by the same `Join` that clears everything else on
+disagreement, rather than a structural search that had no way to know the
+point it was searching backward from had more than one real predecessor.
+
 ### 4.4 Instruction semantics
 
 Modelled precisely: `push`/`pop`, `add`/`sub`/`and`/`lea` on rsp/rbp, `mov` to
-and from `[rsp+off]` / `[rbp+off]`, `mov reg,reg`, `leave`, `call`, `ret`,
-`jmp`, `jcc`. That is the same small set objtool, LLVM's `CFIInstrInserter` and
-Binary Ninja's stack tracker each special-case; nobody lifts all of x86-64 for
-this question.
+and from `[rsp+off]` / `[rbp+off]`, `mov reg,reg`, `movzx reg,reg`, `leave`,
+`call`, `ret`, `jmp`, `jcc`, `cmp $imm,%reg` (only for the `AbsState::last_cmp`
+switch-table guard fact, §4.3 — cmp writes no register or memory). That is
+close to the same small set objtool, LLVM's `CFIInstrInserter` and Binary
+Ninja's stack tracker each special-case; nobody lifts all of x86-64 for this
+question.
+
+`mov reg,reg` and `movzx reg,reg` both carry a value's `bound` (§4.3) across,
+not just its identity when the destination is a full 64-bit register: a
+narrower destination (`mov %esi,%eax`, `movzbl %al,%ecx`) can't keep the
+source's *identity* in general, but the source's numeric *bound* survives a
+zero-extending widen and both x86-64 write forms zero-extend to the full
+64-bit register, so both carry `Bound()` across explicitly even while
+clobbering everything else. GCC routinely widens a switch-table guard into
+whatever register the table load actually reads, so missing either form
+loses the guard's bound at the merge and turns a resolved table back into an
+unresolved indirect jump — measured directly: an early version of this fix
+only handled `movzx`, and `libstdc++.so.6`'s `regex_error` constructor (a
+plain `mov %esi,%eax` between the guard and the table load) lost its
+resolved dispatch and picked up a spurious `REVIEW` until the same treatment
+was given to narrow `mov`.
 
 Everything else goes through Capstone's register-access information and drops
 the registers it writes to unknown. An unmodelled instruction therefore costs
@@ -256,6 +343,47 @@ at that address actually consults the register or slot that disagreed. A
 disagreement the CFI never reads cannot make the row wrong, and this version has
 known reachability gaps, so it reports rather than accuses.
 
+**Exception landing pads.** Nothing in a function body branches to a landing
+pad directly — it's reached only through the unwinder, via the LSDA — so the
+walk above would never find one on its own. `lsda-reader.{h,cc}` parses
+`.gcc_except_table`'s call-site table (`ReadLSDACallSites`) into `[start, end)
+→ landing_pad` ranges; whenever the forward dataflow processes a `call`
+instruction whose PC falls in one of those ranges, `FDEChecker::Check` treats
+the landing pad as a real edge and propagates the *actual computed state
+right after that call* — callee-saved and CFA preserved, caller-saved
+clobbered, the same transfer function already used for the call's own
+fall-through edge, since that's exactly what the unwinder would restore
+before jumping to the pad. This is strictly more precise than an earlier
+version that seeded each pad by trusting its own declared CFI row outright:
+the state now comes from code actually walked, so it doubles as a real
+cross-check that the row agrees with it — a stale CFI specific to the
+exceptional edge is now a genuine `MISMATCH` opportunity, not
+definitionally unobservable. That row-trusting seed survives only as a
+fallback, for a landing pad no call site's range happened to resolve to (an
+unusual encoding, or a call left unreached for an unrelated reason) — used
+rarely, and flagged with its own `REVIEW` when it fires, so it's visibly the
+weaker path rather than silently indistinguishable from a verified one.
+
+Wiring a landing pad in as a real edge means one call site can, in
+principle, feed many different landing pads and one landing pad can be fed
+by many call sites (a shared cleanup block in exception-heavy C++ is
+exactly this shape) — ordinary multi-predecessor `Join`, nothing special.
+What *did* need a real fix: without deduplicating the worklist, several
+predecessors each detecting a change before their shared target is dequeued
+produced duplicate pops that redid decode/`Transfer` work for no new
+information, since the state read out of `in_states` is already fully
+joined by the time any of the duplicate pops run. `propagate`'s
+`pending_pushes` map exists for exactly this — at most one entry per pc
+sits in the worklist at a time — and mattered in practice: a landing pad
+with high call-site fan-in in real C++ (`lib2geom.so.1.4.0`,
+`zutty`) turned sub-second FDEs into 15-50 second ones before the fix.
+(A tempting-looking alternative — batch every call site's contribution to a
+landing pad locally and flush it to the worklist only once, rather than
+deduplicating pushes — was tried first and made no measurable difference;
+the actual cost was the duplicate *pops*, not redundant re-walks of the
+pad's own body, so batching the flush didn't address it. Worklist dedup
+did, and is the simpler fix besides.)
+
 ### 4.6 Exit-state validation
 
 Everything above checks the declared CFI against the code within one FDE.
@@ -311,8 +439,9 @@ This only runs when the FDE's first row was canonical (see `is_canonical_entry`
 in §4.3) — otherwise there is no "should be `CFA-8`" to check against, and the
 FDE gets one review saying so instead.
 
-**Indirect tail calls.** An unresolved indirect jump (`jmp *%rax`) is
-ordinarily a named `REVIEW` — jump tables are not resolved (§6). But if the
+**Indirect tail calls.** An unresolved indirect jump (`jmp *%rax`) — one that
+doesn't resolve to a switch table (§4.3, §4.4, §6) — is ordinarily a named
+`REVIEW`. But if the
 state at that jump already looks like a clean exit (rsp at `CFA-8`, every
 callee-saved register at its entry value — see `IsExitState`), it is blessed
 instead, on the theory that this is a virtual call or function-pointer tail
@@ -368,14 +497,18 @@ exact digits, as durable):
 | --- | --- | --- | --- | --- |
 | `/bin/ls` | 341 | 338 | 2 | 1 |
 | `libc.so.6` | 3919 | 3862 | 54 | 3 |
-| `libstdc++.so.6` | 5332 | 4831 | 501 | 0 |
-| `/usr/bin/gcc` | 2448 | 2290 | 157 | 1 |
+| `libstdc++.so.6` | 5332 | 5149 | 183 | 0 |
+| `/usr/bin/gcc` | 2448 | 2295 | 152 | 1 |
 | a `-static` hello world | 1090 | 1055 | 32 | 3 |
 
-Review counts here are much lower than earlier versions of this tool: §4.6's
-cross-FDE check resolves the majority of what used to be an unavoidable
-REVIEW at every `.cold`-fragment tail call and every switch-table case shared
-across FDEs, verifying them against the target's own declared row instead.
+Review counts here are much lower than earlier versions of this tool. Two
+things did most of it: §4.6's cross-FDE check resolves the majority of what
+used to be an unavoidable REVIEW at every `.cold`-fragment tail call and
+every switch-table case shared across FDEs, verifying them against the
+target's own declared row instead; and, on top of that, exception landing
+pads (§4.5) and switch-table resolution (§4.3, §4.4) closed most of what was
+`libstdc++.so.6`'s outlier-sized review count — it went from 501 reviews to
+183 once landing pads stopped being an unchecked coverage gap by name.
 
 The remaining mismatches are known and were checked by hand; some kinds are
 already listed in `spec/README` as known-bad:
@@ -397,32 +530,50 @@ crashes, hangs or runs over five seconds, and exactly **one** mismatch, which
 was `_start` again. Reproduce with `./robustness-sweep.sh`;
 anything it prints as ABNORMAL is a bug in this tool.
 
-Remaining reviews are dominated by the two documented gaps — unreached bytes
-(C++ exception landing pads, which is why libstdc++ is the outlier) and
-unresolved indirect jumps whose target can't be resolved to a jump table at
-all — plus jump-out edges whose target has no covering FDE, which still fall
-back to the ABI-based tail-call heuristic (§4.6).
+Remaining reviews are dominated by indirect jumps that don't resolve to a
+switch table at all (data-driven dispatch, a table shape §4.4's rules don't
+recognise, or a genuinely unbounded dispatch with no guard), a landing pad
+whose call site couldn't be matched and so fell back to trusting its own row
+(§4.5), and jump-out edges whose target has no covering FDE, which still
+fall back to the ABI-based tail-call heuristic (§4.6).
 
 ## 6. Known gaps and what is next
 
-Deliberately out of scope for this version, in rough order of value:
+In rough order of value. Most of these remain deliberately out of scope;
+jump tables are the exception — implemented, with one traced-but-unresolved
+correctness question called out below rather than left silent.
 
-* **Jump tables.** An indirect jump is a `REVIEW` naming the PC, unless the
-  state at that point already looks like a clean function exit, in which case
-  it is blessed as a probable indirect tail call instead (§4.6) — a real jump
-  table dispatching from that same shape is the failure mode, caught only by
-  `--report_coverage_gaps` rather than by name. The heuristics to properly
-  resolve tables are already written down in
-  `../backtrace-test/doc/binary-unwind-analysis.adoc`: the function-bounds
-  golden rule, the PIC `movsxd`/`add` pattern, and a 512-entry circuit breaker.
-  This plus landing pads is most of the review volume. A table this version
-  *does* resolve is on firmer footing than before: an entry landing outside
-  the FDE (typically a shared `.cold` case) is now checked against whatever
-  FDE covers it (§4.6) rather than just noted as unfollowed, so a stale-CFI
-  bug reachable only through such a table no longer goes unverified.
-* **Exception landing pads.** Reachable only through the LSDA, so the walk never
-  gets there and the bytes are reported as an unchecked gap. Parsing
-  `.gcc_except_table` would seed them.
+* **Jump tables are resolved** (§4.3, §4.4: `AbsVal::bound`/`last_cmp` track the
+  `cmp $imm,%r; ja default` guard, `insn-semantics.cc`'s `movslq`/`add` rules
+  turn that plus a PIC table-base `lea` into a `kJumpTarget`, and
+  `ResolveJumpTable`/`kMaxJumpTableEntries` reads and bounds the table itself)
+  — this used to be out of scope; it no longer is. An indirect jump is still a
+  named `REVIEW` when it can't be resolved this way, unless the state at that
+  point already looks like a clean function exit, in which case it's blessed
+  as a probable indirect tail call instead (§4.6). A table entry landing
+  outside the FDE (typically a shared `.cold` case) is checked against
+  whatever FDE covers it (§4.6) rather than just noted as unfollowed.
+  **What's still a real gap:** whether a jump table gets resolved *at all* is
+  decided from `AbsState.last_cmp`/`.bound` as they stand *during* pass-1
+  dataflow, not from their fully-settled fixed-point value — unlike every
+  other edge in the walk, which is purely structural (never state-dependent)
+  and so trivially reprocessed with the latest state on every visit. A merge
+  point with genuinely disagreeing guards (two different dispatches sharing
+  one table, from different bounds) can, depending on visitation order, have
+  some of its targets resolved-and-walked using a not-yet-final snapshot of
+  the *rest* of the state (not the bound itself, which is provably sound —
+  the register-eventually-clobbered fields around it). Traced at length and
+  believed low-risk in practice — pass 2 always re-derives `has_jump_table`
+  from the truly-final state, so the top-level "is this dispatch flagged"
+  verdict is already order-independent, and a stale snapshot degrades to an
+  over-cautious `REVIEW`, not proven to reach a false `BLESSED` — but not
+  proven safe either, and deliberately not fixed this round: the fix is to
+  make edge-assertion itself a monotone, order-independent function of the
+  accumulating state (e.g. a running max/union of every valid piece of
+  evidence, rather than a snapshot re-evaluation), not a scheduling change —
+  a two-phase "settle everything else, then resolve tables" ordering does
+  not work, because a table's own targets (and exception landing pads) can
+  reveal code relevant to *other*, not-yet-resolved dispatches' bounds.
 * **DWARF expressions.** Recorded, never evaluated. A tiny expression
   interpreter plus the four-state DRAP recogniser from
   `../backtrace-test/doc/amd64-drap-problem.adoc` — including the known gcc<16

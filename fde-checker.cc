@@ -28,173 +28,11 @@ bool IsCalleeSaved(int reg) {
   return std::find(std::begin(kCalleeSaved), std::end(kCalleeSaved), reg) != std::end(kCalleeSaved);
 }
 
-// Switch-table bound tracking (initial-switch-tables-plan.md §3.2). One
-// register's fact: a `cmp $imm,%r; ja/jae default` guard was found
-// dominating this point, so %r's value is known to be at most `ubound`
-// on the in-bounds edge.
-struct BoundGuard {
-  int reg;
-  uint64_t ubound;
-};
-
-// Walks backward from a ja/jae at `branch_pc` over the straight-line
-// fall-through predecessor chain, stopping at the first instruction that
-// writes EFLAGS. `fallthrough_pred` records, for every address reached
-// via ordinary fall-through during pass 1, the single instruction that
-// falls through to it -- which is exactly "the previous instruction in
-// this straight-line block", so this walk naturally stops at a block
-// boundary (a predecessor reached only by a jump has no entry there)
-// without needing real dominance.
-//
-// Relaxing this to "the nearest preceding cmp on some register" was
-// measured and is wrong: it picks up an unrelated cmp in glibc's
-// nss_database_check_reload_and_get, which is a genuinely unbounded
-// data-driven dispatch with no guard at all.
-std::optional<BoundGuard> FindGuardBound(uint64_t branch_pc, bool is_jae, const ELFImage& image, Disassembler* disasm,
-                                         uint64_t pc_end,
-                                         const absl::flat_hash_map<uint64_t, uint64_t>& fallthrough_pred) {
-  VLOG(2) << absl::StrFormat("FindGuardBound(0x%llx): called", (unsigned long long)branch_pc);
-  uint64_t pc = branch_pc;
-  for (int hops = 0; hops < 64; hops++) {
-    auto it = fallthrough_pred.find(pc);
-    if (it == fallthrough_pred.end()) {
-      VLOG(1) << absl::StrFormat(
-          "FindGuardBound(0x%llx): no fall-through predecessor of 0x%llx -- block boundary, giving up",
-          (unsigned long long)branch_pc, (unsigned long long)pc);
-      return std::nullopt;
-    }
-    pc = it->second;
-    std::span<const uint8_t> bytes = image.BytesAt(pc, std::min<uint64_t>(16, pc_end - pc));
-    const cs_insn* insn = bytes.empty() ? nullptr : disasm->DecodeOne(bytes.data(), bytes.size(), pc);
-    if (insn == nullptr) {
-      VLOG(1) << absl::StrFormat("FindGuardBound(0x%llx): could not decode instruction at 0x%llx, giving up",
-                                 (unsigned long long)branch_pc, (unsigned long long)pc);
-      return std::nullopt;
-    }
-    cs_regs read;
-    cs_regs written;
-    uint8_t read_count = 0;
-    uint8_t write_count = 0;
-    bool writes_eflags = false;
-    if (cs_regs_access(disasm->handle(), insn, read, &read_count, written, &write_count) == CS_ERR_OK) {
-      for (uint8_t i = 0; i < write_count; i++) {
-        if (written[i] == X86_REG_EFLAGS) {
-          writes_eflags = true;
-          break;
-        }
-      }
-    }
-    if (!writes_eflags) {
-      continue;
-    }
-    if (insn->id != X86_INS_CMP || insn->detail->x86.op_count != 2) {
-      VLOG(1) << absl::StrFormat(
-          "FindGuardBound(0x%llx): flag-setter at 0x%llx (%s) is not a `cmp $imm,%%r`, giving up",
-          (unsigned long long)branch_pc, (unsigned long long)pc, Disassembler::Text(*insn));
-      return std::nullopt;
-    }
-    const cs_x86_op& a = insn->detail->x86.operands[0];
-    const cs_x86_op& b = insn->detail->x86.operands[1];
-    if (a.type != X86_OP_REG || b.type != X86_OP_IMM || b.imm < 0) {
-      VLOG(1) << absl::StrFormat(
-          "FindGuardBound(0x%llx): cmp at 0x%llx (%s) is not `cmp $non_negative_imm,%%reg`, giving up",
-          (unsigned long long)branch_pc, (unsigned long long)pc, Disassembler::Text(*insn));
-      return std::nullopt;
-    }
-    int r = InsnSemantics::DWARFRegOf(a.reg);
-    if (r < 0) {
-      VLOG(1) << absl::StrFormat("FindGuardBound(0x%llx): cmp register at 0x%llx has no DWARF number, giving up",
-                                 (unsigned long long)branch_pc, (unsigned long long)pc);
-      return std::nullopt;
-    }
-    uint64_t imm = static_cast<uint64_t>(b.imm);
-    if (is_jae) {
-      if (imm == 0) {
-        VLOG(1) << absl::StrFormat("FindGuardBound(0x%llx): jae guard imm==0, imm-1 would underflow, giving up",
-                                   (unsigned long long)branch_pc);
-        return std::nullopt;  // imm-1 would underflow: not a usable bound
-      }
-      imm -= 1;
-    }
-    VLOG(1) << absl::StrFormat("FindGuardBound(0x%llx): found guard from cmp at 0x%llx -- reg %d ubound=%llu",
-                               (unsigned long long)branch_pc, (unsigned long long)pc, r, (unsigned long long)imm);
-    return BoundGuard{r, imm};
-  }
-  VLOG(1) << absl::StrFormat("FindGuardBound(0x%llx): hop limit reached, giving up", (unsigned long long)branch_pc);
-  return std::nullopt;
-}
-
-// Drops a register's tracked bound on any write to it, with two
-// exceptions:
-//
-//  * a zero-extending mov/movzx of the register into itself (`movzbl
-//    %al,%eax` and friends) -- GCC's tables insert exactly that between
-//    the guard and the table load, and the numeric bound still applies
-//    to the widened value;
-//  * `movslq disp(%B,%I,4),%I` and `add %B,%I` writing back into their
-//    own index register `%I` -- a compiler is free to reuse the index
-//    register as the destination once it no longer needs the plain
-//    index value (measured: sqlite's own case, `movslq
-//    (%r8,%rcx,4),%rcx`), and by construction (checked below via
-//    `state`, already updated by Transfer) `%I` is still exactly the
-//    register the eventual `jmp` will look the bound up under.
-void UpdateUBoundsAfterTransfer(csh handle, const cs_insn& insn, AbsState* state) {
-  if ((insn.id == X86_INS_MOV || insn.id == X86_INS_MOVZX) && insn.detail->x86.op_count == 2) {
-    const cs_x86_op& dst = insn.detail->x86.operands[0];
-    const cs_x86_op& src = insn.detail->x86.operands[1];
-    if (dst.type == X86_OP_REG && src.type == X86_OP_REG) {
-      int d = InsnSemantics::DWARFRegOf(dst.reg);
-      int s = InsnSemantics::DWARFRegOf(src.reg);
-      if (d >= 0 && s >= 0) {
-        // Propagate the bound from source to destination for any
-        // register-to-register mov/movzx, not just a same-register
-        // widening move -- GCC's guard and the table load are frequently
-        // in different registers (`movzbl %r8b,%ecx` after a guard on
-        // `%r8`), see switch-table-amend-plan.md §1. The source's own
-        // bound (ubound[s]) is left untouched: a mov reads s, it doesn't
-        // consume or invalidate it.
-        std::optional<uint64_t> carried = state->UBound(s);
-        if (carried.has_value()) {
-          VLOG(1) << absl::StrFormat("0x%llx: %s carries ubound[%d]=%llu to ubound[%d]",
-                                     (unsigned long long)insn.address, Disassembler::Text(insn), s,
-                                     (unsigned long long)*carried, d);
-          state->SetUBound(d, *carried);
-          return;
-        }
-      }
-    }
-  }
-  cs_regs read;
-  cs_regs written;
-  uint8_t read_count = 0;
-  uint8_t write_count = 0;
-  if (cs_regs_access(handle, &insn, read, &read_count, written, &write_count) != CS_ERR_OK) {
-    VLOG(1) << absl::StrFormat("0x%llx: %s -- cs_regs_access failed, clearing all ubounds",
-                               (unsigned long long)insn.address, Disassembler::Text(insn));
-    for (int r = 0; r < kNumGPRs; r++) {
-      state->ClearUBound(r);
-    }
-    return;
-  }
-  for (uint8_t i = 0; i < write_count; i++) {
-    int d = InsnSemantics::DWARFRegOf(written[i]);
-    if (d < 0) {
-      continue;
-    }
-    const AbsVal& v = state->reg(d);
-    if ((v.IsTableEntry() || v.IsJumpTarget()) && v.IndexReg() == d) {
-      VLOG(1) << absl::StrFormat("0x%llx: %s writes reg %d, but it's the index reg of its own %s -- preserving ubound",
-                                 (unsigned long long)insn.address, Disassembler::Text(insn), d,
-                                 v.IsTableEntry() ? "kTableEntry" : "kJumpTarget");
-      continue;
-    }
-    if (state->UBound(d).has_value()) {
-      VLOG(1) << absl::StrFormat("0x%llx: %s clears ubound[%d] (was %llu)", (unsigned long long)insn.address,
-                                 Disassembler::Text(insn), d, (unsigned long long)*state->UBound(d));
-    }
-    state->ClearUBound(d);
-  }
-}
+// Switch-table bound tracking (initial-switch-tables-plan.md §3.2): the
+// guard (`cmp $imm,%r; ja/jae default`) is now tracked forward as part of
+// AbsState (AbsState::last_cmp, joined like any other lattice field), so
+// there is no backward byte-walk or parallel bound-clearing pass to
+// maintain here any more -- see AbsVal::bound and InsnSemantics::Transfer.
 
 // Collects findings, folding repeats of the same message into one entry.
 class FindingSink {
@@ -726,18 +564,14 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
   absl::flat_hash_map<uint64_t, AbsState> in_states;
   absl::flat_hash_map<uint64_t, size_t> insn_sizes;
   absl::flat_hash_map<uint64_t, std::vector<JoinConflict>> join_conflicts;
-  // Records, for every address reached via ordinary fall-through, the
-  // single instruction that falls through to it. Used only to walk
-  // backward for a switch-table bound guard (§3.2) -- see FindGuardBound.
-  absl::flat_hash_map<uint64_t, uint64_t> fallthrough_pred;
   std::vector<uint64_t> worklist;
   // Tracks which addresses currently have an entry sitting in `worklist`,
   // so `propagate` never pushes a second entry for a pc that is already
   // pending -- without this, several predecessors each detecting a change
   // before the target is dequeued produces duplicate pops that redo
-  // decode/Transfer/FindGuardBound work for no new information (the state
-  // read out of in_states is already fully joined by the time any of the
-  // duplicates run). Cleared when the pc is actually popped in `drain`.
+  // decode/Transfer work for no new information (the state read out of
+  // in_states is already fully joined by the time any of the duplicates
+  // run). Cleared when the pc is actually popped in `drain`.
   absl::flat_hash_map<uint64_t, size_t> pending_pushes;
   size_t propagate_calls = 0;
   size_t propagate_changed = 0;
@@ -910,7 +744,6 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       AbsVal before[kNumGPRs];
       std::copy(std::begin(state.gpr), std::end(state.gpr), std::begin(before));
       TransferOutcome outcome = semantics.Transfer(*insn, &state);
-      UpdateUBoundsAfterTransfer(disasm_->handle(), *insn, &state);
 
       if (outcome.is_call) {
         std::optional<uint64_t> lp = landing_pad_for_call(pc);
@@ -925,17 +758,27 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
         uint64_t next = pc + insn_size;
         if (next < cfi.pc_end && FallThroughIsReal(cfi, row, next, before, state)) {
           AbsState fallthrough_state = state;
-          if (is_ja_or_jae) {
-            std::optional<BoundGuard> guard = FindGuardBound(pc, is_jae, image_, disasm_, cfi.pc_end, fallthrough_pred);
-            if (guard.has_value()) {
-              VLOG(1) << absl::StrFormat("0x%llx: %s taken-edge guard sets ubound[%d]=%llu on fall-through to 0x%llx",
-                                         (unsigned long long)pc, is_jae ? "jae" : "ja", guard->reg,
-                                         (unsigned long long)guard->ubound, (unsigned long long)next);
-              fallthrough_state.SetUBound(guard->reg, guard->ubound);
+          // `state` here is the already-transferred state for this
+          // ja/jae itself, which doesn't write EFLAGS -- so if a `cmp
+          // $imm,%reg` guard dominates this point, it's sitting right in
+          // `state.last_cmp`, tracked forward as part of the ordinary
+          // lattice (AbsState::last_cmp, joined like any other field).
+          // No backward search needed: a bypassing predecessor that never
+          // ran the cmp would already have cleared this via Join.
+          if (is_ja_or_jae && state.last_cmp.has_value()) {
+            int reg = state.last_cmp->reg;
+            uint64_t imm = state.last_cmp->imm;
+            // On the in-bounds (fall-through) edge, `ja` means reg <= imm
+            // and `jae` means reg < imm.
+            if (!is_jae || imm != 0) {
+              uint64_t ubound = is_jae ? imm - 1 : imm;
+              VLOG(1) << absl::StrFormat("0x%llx: %s taken-edge guard sets bound[%d]=%llu on fall-through to 0x%llx",
+                                         (unsigned long long)pc, is_jae ? "jae" : "ja", reg, (unsigned long long)ubound,
+                                         (unsigned long long)next);
+              fallthrough_state.SetBound(reg, ubound);
             }
           }
           propagate(next, fallthrough_state);
-          fallthrough_pred[next] = pc;
         }
       }
       if (outcome.has_direct_target) {

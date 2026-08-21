@@ -117,6 +117,23 @@ void EraseSlots(AbsState* state, int64_t start, int64_t size) {
 void HandleUnplacedMemWrite(AbsState*) {
 }
 
+// True when this instruction's Capstone write-set includes EFLAGS.
+bool WritesEflags(csh handle, const cs_insn& insn) {
+  cs_regs read;
+  cs_regs written;
+  uint8_t read_count = 0;
+  uint8_t write_count = 0;
+  if (cs_regs_access(handle, &insn, read, &read_count, written, &write_count) != CS_ERR_OK) {
+    return true;  // unknown effect -- assume the worst, same as ClobberWrites does
+  }
+  for (uint8_t i = 0; i < write_count; i++) {
+    if (written[i] == X86_REG_EFLAGS) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 int InsnSemantics::DWARFRegOf(unsigned reg) {
@@ -176,6 +193,16 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
   TransferOutcome out;
   const cs_x86& x = X86(insn);
 
+  // Any instruction that writes EFLAGS invalidates whatever `cmp` guard
+  // was last seen (initial-switch-tables-plan.md §3.2), except a fresh
+  // matching `cmp` itself, which sets state->last_cmp again below,
+  // overwriting this clear. Doing this unconditionally, once, up front
+  // means no case below -- or the unmodelled-instruction fallback -- has
+  // to remember to do it by hand.
+  if (WritesEflags(handle_, insn)) {
+    state->last_cmp = std::nullopt;
+  }
+
   // Control flow first: the classification is independent of what the
   // instruction does to the stack.
   if (cs_insn_group(handle_, &insn, X86_GRP_RET) || insn.id == X86_INS_IRET || insn.id == X86_INS_IRETD ||
@@ -200,10 +227,10 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       if (v.IsJumpTarget()) {
         // The bound was captured once at movslq-time and carried through
         // the `add` into this kJumpTarget -- not re-derived with a live
-        // AbsState::UBound lookup here, which would be vulnerable to an
+        // AbsState::Bound lookup here, which would be vulnerable to an
         // intervening instruction reusing the same register number for an
         // unrelated guard (switch-table-amend-plan.md §2).
-        std::optional<uint64_t> bound = v.CapturedBound();
+        std::optional<uint64_t> bound = v.Bound();
         VLOG(1) << absl::StrFormat(
             "0x%llx:   jump target table=0x%llx index_reg=%d captured_bound=%s", (unsigned long long)insn.address,
             (unsigned long long)v.TableAddr(), v.IndexReg(),
@@ -364,7 +391,30 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
           break;
         }
         if (!IsFull64(dst.reg)) {
+          // A narrower mov's identity does not survive -- see the 8/16-bit
+          // case below for why this stays a clobber rather than a value
+          // copy -- but same-width-or-widening register-to-register moves
+          // (`mov %esi,%eax` and friends: a 32-bit destination write still
+          // zero-extends to the full 64-bit register on x86-64, the same
+          // as movzx) carry a numeric bound across exactly the way movzx
+          // does, and for the same reason: GCC frequently widens the
+          // guard register into whatever register the table load actually
+          // reads (switch-table-amend-plan.md §1).
+          std::optional<uint64_t> carried;
+          if (src.type == X86_OP_REG) {
+            int s = DWARFRegOf(src.reg);
+            // Deliberately not gated on IsFull64(src.reg): the bound
+            // lives on the DWARF-level register regardless of which
+            // sub-register spelling read it (`mov %esi,%eax` reads the
+            // same rsi-level bound `mov %rsi,%rax` would), unlike a
+            // value read, which ReadReg rightly refuses to give for a
+            // sub-register.
+            carried = s >= 0 ? state->reg(s).Bound() : std::nullopt;
+          }
           state->ClobberReg(d);
+          if (carried.has_value()) {
+            state->SetBound(d, *carried);
+          }
           return out;
         }
         if (src.type == X86_OP_REG) {
@@ -433,7 +483,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
       // instruction reusing the same register number for an unrelated
       // guard would otherwise be able to hand the resolver the wrong
       // bound.
-      std::optional<uint64_t> bound = state->UBound(idx_reg);
+      std::optional<uint64_t> bound = state->Bound(idx_reg);
       VLOG(1) << absl::StrFormat(
           "0x%llx: movslq -> reg %d = kTableEntry(table=0x%llx, index_reg=%d, captured_bound=%s)",
           (unsigned long long)insn.address, d, (unsigned long long)table, idx_reg,
@@ -461,7 +511,7 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
             if (base_candidate.IsConst() && entry_candidate.IsTableEntry() &&
                 entry_candidate.TableBaseConst() == static_cast<uint64_t>(base_candidate.ConstValue())) {
               return AbsVal::JumpTarget(entry_candidate.TableAddr(), static_cast<uint8_t>(entry_candidate.IndexReg()),
-                                        entry_candidate.CapturedBound());
+                                        entry_candidate.Bound());
             }
             return std::nullopt;
           };
@@ -496,6 +546,47 @@ TransferOutcome InsnSemantics::Transfer(const cs_insn& insn, AbsState* state) co
         state->DropDeadSlots(delta);
       }
       return out;
+    }
+
+    case X86_INS_CMP: {
+      // `cmp $non_negative_imm,%reg` -- the switch-table guard
+      // (initial-switch-tables-plan.md §3.2). cmp writes no register or
+      // memory, only EFLAGS, which the unconditional check at the top of
+      // this function already cleared; a matching cmp sets it again here.
+      // Anything else (cmp of two registers, a negative immediate, a
+      // memory operand) simply leaves it cleared -- not a guard this
+      // analysis resolves.
+      if (x.op_count == 2 && x.operands[0].type == X86_OP_REG && x.operands[1].type == X86_OP_IMM &&
+          x.operands[1].imm >= 0) {
+        int r = DWARFRegOf(x.operands[0].reg);
+        if (r >= 0) {
+          state->last_cmp = AbsState::FlagsGuard{r, static_cast<uint64_t>(x.operands[1].imm)};
+        }
+      }
+      return out;
+    }
+
+    case X86_INS_MOVZX: {
+      // `movzbl %r8b,%ecx` and friends: the destination's own identity
+      // does not survive the truncation in general, but a numeric bound
+      // established on the source does -- GCC routinely widens the guard
+      // register into whatever register the table load actually reads
+      // (switch-table-amend-plan.md §1), so carrying just the bound
+      // across, rather than the whole value, is what lets the guard and
+      // the table load disagree on register without losing the guard.
+      if (x.op_count == 2 && x.operands[0].type == X86_OP_REG && x.operands[1].type == X86_OP_REG) {
+        int d = DWARFRegOf(x.operands[0].reg);
+        int s = DWARFRegOf(x.operands[1].reg);
+        if (d >= 0) {
+          std::optional<uint64_t> carried = s >= 0 ? state->reg(s).Bound() : std::nullopt;
+          state->ClobberReg(d);
+          if (carried.has_value()) {
+            state->SetBound(d, *carried);
+          }
+          return out;
+        }
+      }
+      break;  // no reg destination we can name -- fall through to the generic clobber
     }
 
     case X86_INS_NOP:

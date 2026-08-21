@@ -202,11 +202,11 @@ TEST_F(SemanticsTest, IndirectJumpResolvesOnceTheIndexRegisterHasAKnownBound) {
   // §2), so it must be set on the index register before that instruction
   // runs -- a bound set afterwards, as this test used to do, is no longer
   // picked up, on purpose: the whole point is to stop the resolver from
-  // re-reading AbsState::UBound live at the `jmp`.
+  // re-reading AbsState::Bound live at the `jmp`.
   Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});  // rcx = const(table)
   int64_t table = state_.reg(kDWARFRcx).ConstValue();
-  state_.SetUBound(kDWARFRax, 4);
-  Run({0x48, 0x63, 0x14, 0x81});            // rdx = table_entry(table, index=rax), captures ubound[rax]=4
+  state_.SetBound(kDWARFRax, 4);
+  Run({0x48, 0x63, 0x14, 0x81});            // rdx = table_entry(table, index=rax), captures bound(rax)=4
   Run({0x48, 0x01, 0xca});                  // rdx = jump_target(table, index=rax), carries the captured bound
   TransferOutcome out = Run({0xff, 0xe2});  // jmp *%rdx
   EXPECT_TRUE(out.has_jump_table);
@@ -215,17 +215,48 @@ TEST_F(SemanticsTest, IndirectJumpResolvesOnceTheIndexRegisterHasAKnownBound) {
 }
 
 TEST_F(SemanticsTest, IndirectJumpDoesNotResolveFromABoundSetAfterTheTableLoad) {
-  // The mirror image of the test above: a live AbsState::UBound at the
+  // The mirror image of the test above: a live AbsState::Bound at the
   // `jmp` is deliberately no longer consulted, so a bound that only shows
   // up after the movslq/add sequence (e.g. from an unrelated guard that
   // happens to reuse the index register) must not resolve the table.
   Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});  // rcx = const(table)
   Run({0x48, 0x63, 0x14, 0x81});                    // rdx = table_entry(table, index=rax), no bound yet
   Run({0x48, 0x01, 0xca});                          // rdx = jump_target(table, index=rax), still no bound
-  state_.SetUBound(kDWARFRax, 4);
+  state_.SetBound(kDWARFRax, 4);
   TransferOutcome out = Run({0xff, 0xe2});  // jmp *%rdx
   EXPECT_FALSE(out.has_jump_table);
   EXPECT_TRUE(out.indirect_branch);
+}
+
+TEST_F(SemanticsTest, CmpWithANonNegativeImmediateSetsLastCmp) {
+  Run({0x83, 0xf8, 0x09});  // cmp $9,%eax
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  EXPECT_EQ(state_.last_cmp->reg, kDWARFRax);
+  EXPECT_EQ(state_.last_cmp->imm, 9u);
+}
+
+TEST_F(SemanticsTest, LastCmpIsClearedByALaterFlagsWritingInstruction) {
+  Run({0x83, 0xf8, 0x09});  // cmp $9,%eax
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  Run({0x83, 0xc0, 0x01});  // add $1,%eax -- also sets flags, but is not a guard
+  EXPECT_FALSE(state_.last_cmp.has_value());
+}
+
+TEST_F(SemanticsTest, LastCmpSurvivesAnInstructionThatDoesNotTouchFlags) {
+  Run({0x83, 0xf8, 0x09});  // cmp $9,%eax
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  Run({0x89, 0xc1});  // mov %eax,%ecx -- does not write EFLAGS
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  EXPECT_EQ(state_.last_cmp->imm, 9u);
+}
+
+TEST_F(SemanticsTest, MovzxCarriesTheSourcesBoundAcrossATruncatingWiden) {
+  state_.SetBound(kDWARFRax, 9);
+  Run({0x0f, 0xb6, 0xc8});  // movzbl %al,%ecx
+  EXPECT_TRUE(state_.reg(kDWARFRcx).is_top()) << "the widened value's own identity does not survive the truncation";
+  ASSERT_TRUE(state_.reg(kDWARFRcx).Bound().has_value());
+  EXPECT_EQ(*state_.reg(kDWARFRcx).Bound(), 9u);
+  EXPECT_EQ(state_.reg(kDWARFRax).Bound(), 9u) << "the source's own bound is untouched by a read";
 }
 
 TEST_F(SemanticsTest, StoresThroughAnUntrackedPointerDoNotWipeTheFrame) {
