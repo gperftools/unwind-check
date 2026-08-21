@@ -15,8 +15,13 @@
         .text
 
 /* ---------------------------------------------------------------- */
-/* A leaf that touches nothing. The CIE's initial row is already right. */
+/* A leaf that touches nothing. The CIE's initial row is already right.
+   Hidden so intra-file jumps/calls to it resolve directly instead of
+   through a PLT stub -- otherwise a shared-library build routes every
+   `jmp good_leaf` through the PLT, which is untracked by .eh_frame and
+   defeats the cross-FDE row check the tests below exist to exercise. */
         .globl  good_leaf
+        .hidden good_leaf
         .type   good_leaf, @function
 good_leaf:
         .cfi_startproc
