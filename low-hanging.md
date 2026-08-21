@@ -54,7 +54,7 @@ If the selected item is too confusing/impossible/wrong. Mark it as
   zone etc. (Then avoid checks of rsp and calls to DropDeadSlots when updating
   rsp in Transfer)
 
-* Transfer() Handling of ADD/SUB addition/subtraction should be
+* (DONE) Transfer() Handling of ADD/SUB addition/subtraction should be
   unsigned (compilers like to screw up the signed overflows)
 
 * around syscall and related instructions. Same for e.g. int $80 or

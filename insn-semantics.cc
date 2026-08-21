@@ -561,8 +561,9 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
         state->ClobberReg(d);
         return out;
       }
-      int64_t imm = insn.operands[1].imm.value.s;
-      int64_t delta = insn.id == ZYDIS_MNEMONIC_ADD ? cur.delta + imm : cur.delta - imm;
+      uint64_t imm = static_cast<uint64_t>(insn.operands[1].imm.value.s);
+      uint64_t udelta = static_cast<uint64_t>(cur.delta);
+      int64_t delta = static_cast<int64_t>(insn.id == ZYDIS_MNEMONIC_ADD ? udelta + imm : udelta - imm);
       state->SetReg(d, AbsVal::CFARel(delta));
       return out;
     }
