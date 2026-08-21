@@ -45,7 +45,7 @@ class Disassembler {
   // that assumes operands[0] is the destination), Zydis's formatter is a
   // pure text-rendering pass over the already-decoded operands: the style
   // picked here has no effect on what Transfer() sees.
-  static std::string Text(const Instruction& insn);
+  static absl::StatusOr<std::string> Text(const Instruction& insn);
 
  private:
   Disassembler() = default;

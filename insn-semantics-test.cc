@@ -30,7 +30,7 @@ class SemanticsTest : public testing::Test {
       return TransferOutcome{};
     }
     EXPECT_EQ(insn->size, code.size())
-        << "test encoding is not exactly one instruction: " << Disassembler::Text(*insn);
+        << "test encoding is not exactly one instruction: " << Disassembler::Text(*insn).value_or("<cannot format>");
     InsnSemantics semantics;
     return semantics.Transfer(*insn, &state_);
   }

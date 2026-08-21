@@ -11,7 +11,7 @@ If the selected item is too confusing/impossible/wrong. Mark it as
   are obsolete and files are gone (double check and remove if
   necessary).
 
-* Disassembler::Text should return absl::StatusOr (zydis formatter may fail
+* (DONE) Disassembler::Text should return absl::StatusOr (zydis formatter may fail
   for whatever reason).
 
 * Disassembler::DecodeOne should probably not use ptr to itself and

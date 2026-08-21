@@ -28,10 +28,10 @@ const Instruction* Disassembler::DecodeOne(const uint8_t* code, size_t size, uin
   return &insn_;
 }
 
-std::string Disassembler::Text(const Instruction& insn) {
+absl::StatusOr<std::string> Disassembler::Text(const Instruction& insn) {
   ZydisFormatter formatter;
   if (!ZYAN_SUCCESS(ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_ATT))) {
-    return "<formatter init failed>";
+    return absl::InternalError("ZydisFormatterInit failed");
   }
   ZydisFormatterSetProperty(&formatter,
                             ZYDIS_FORMATTER_PROP_FORCE_RELATIVE_RIPREL,
@@ -40,7 +40,7 @@ std::string Disassembler::Text(const Instruction& insn) {
   if (!ZYAN_SUCCESS(ZydisFormatterFormatInstruction(&formatter, &insn.insn, insn.operands,
                                                      insn.insn.operand_count_visible, buffer, sizeof(buffer),
                                                      insn.address, nullptr))) {
-    return absl::StrFormat("<cannot format instruction at 0x%llx>", (unsigned long long)insn.address);
+    return absl::InternalError(absl::StrFormat("cannot format instruction at 0x%llx", (unsigned long long)insn.address));
   }
   return std::string(buffer);
 }

@@ -878,12 +878,13 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       sink.Add(Finding::Severity::kReview, pc, "cannot decode the instruction at this address", "");
       continue;
     }
+    std::string insn_text =
+        Disassembler::Text(*insn).value_or(absl::StrFormat("<cannot format instruction at 0x%llx>", (unsigned long long)pc));
     if (pc + insn->size > cfi.pc_end) {
       sink.Add(Finding::Severity::kReview, pc, "instruction runs past the end of the FDE's PC range",
-               Disassembler::Text(*insn));
+               insn_text);
       continue;
     }
-    std::string insn_text = Disassembler::Text(*insn);
     result.instructions_checked++;
 
     // The row at pc describes the state when RIP == pc, so compare
