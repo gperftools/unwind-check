@@ -45,7 +45,7 @@ class FindingSink {
   explicit FindingSink(size_t cap) : cap_(cap) {
   }
 
-  void Add(Finding::Severity severity, uint64_t pc, std::string message, std::string insn_text) {
+  void Add(Finding::Severity severity, uint64_t pc, std::string_view message, std::string_view insn_text) {
     VLOG(2) << absl::StrFormat("Sink->Add(%d, 0x%x, \"%s\", \"%s\")", severity, pc, message, insn_text);
     auto it = index_.find(message);
     if (it != index_.end()) {
@@ -57,22 +57,22 @@ class FindingSink {
       return;
     }
     index_.emplace(message, findings_.size());
-    findings_.push_back(Finding{severity, pc, std::move(message), std::move(insn_text), 0});
+    findings_.emplace_back(severity, pc, std::string{message}, std::string(insn_text), 0);
   }
 
   std::vector<Finding> Take() {
     if (truncated_ > 0) {
-      findings_.push_back(Finding{Finding::Severity::kReview, 0,
-                                  absl::StrFormat("%d further distinct findings not shown", truncated_), "", 0});
+      findings_.emplace_back(Finding::Severity::kReview, 0,
+                             absl::StrFormat("%d further distinct findings not shown", truncated_), "", 0);
     }
     return std::move(findings_);
   }
 
  private:
-  size_t cap_;
+  const size_t cap_;
   int truncated_ = 0;
-  std::vector<Finding> findings_;
-  absl::flat_hash_map<std::string, size_t> index_;
+  std::vector<Finding> findings_;  // append only. Deduplicated via index_. And then mass moved via Take
+  absl::flat_hash_map<std::string, size_t> index_;  // Finding::message -> index in findings_
 };
 
 // Compares one CFI row against the state the code actually produces.
@@ -98,7 +98,7 @@ class RowChecker {
   // this, a tail call that clobbers a callee-saved register without
   // restoring it would go unnoticed whenever the target FDE's own body
   // never bothered to say so explicitly (which is the common case).
-  void Check(uint64_t pc, const CFIRow& row, const AbsState& state, const std::string& insn_text,
+  void Check(uint64_t pc, const CFIRow& row, const AbsState& state, std::string_view insn_text,
              std::string_view edge_context = "", bool force_callee_saved_same_value = false) {
     insn_text_ = insn_text;
     pc_ = pc;
@@ -111,11 +111,19 @@ class RowChecker {
   }
 
  private:
-  void Review(std::string msg) {
-    sink_->Add(Finding::Severity::kReview, pc_, absl::StrCat(edge_context_, msg), insn_text_);
+  void Review(std::string_view msg) {
+    if (edge_context_.empty()) {
+      sink_->Add(Finding::Severity::kReview, pc_, msg, insn_text_);
+    } else {
+      sink_->Add(Finding::Severity::kReview, pc_, absl::StrCat(edge_context_, msg), insn_text_);
+    }
   }
-  void Mismatch(std::string msg) {
-    sink_->Add(Finding::Severity::kMismatch, pc_, absl::StrCat(edge_context_, msg), insn_text_);
+  void Mismatch(std::string_view msg) {
+    if (edge_context_.empty()) {
+      sink_->Add(Finding::Severity::kMismatch, pc_, msg, insn_text_);
+    } else {
+      sink_->Add(Finding::Severity::kMismatch, pc_, absl::StrCat(edge_context_, msg), insn_text_);
+    }
   }
 
   void CheckCFA(const CFARule& cfa, const AbsState& state) {
@@ -247,7 +255,7 @@ class RowChecker {
 
   const FDECheckerOptions& options_;
   FindingSink* sink_;
-  std::string insn_text_;
+  std::string_view insn_text_;
   uint64_t pc_ = 0;
   std::string_view edge_context_;
   bool force_callee_saved_same_value_ = false;
@@ -602,7 +610,7 @@ void FDEChecker::CheckEntryRow(const CFIRow& first_row) {
   if (!at_function_entry_) {
     return;
   }
-  const char* kEnteredByJump =
+  static constexpr std::string_view kEnteredByJump =
       " (either the CFI is wrong, or this is entered by a jump rather than a call, the way a PLT trampoline is)";
   if (first_row.cfa.kind != CFARule::Kind::kRegOffset || first_row.cfa.reg != kDWARFRsp || first_row.cfa.offset != 8) {
     sink_.Add(Finding::Severity::kReview, cfi_.pc_begin,
@@ -1030,7 +1038,7 @@ void FDEChecker::VerifyPass() {
 // genuinely uncovered code, and there is nothing declared to compare
 // against, so this is what "looks like a tail call" has to mean instead.
 void FDEChecker::CheckExitState(uint64_t pc, const AbsState& state, const std::string& insn_text, bool is_tail_call) {
-  const char* context = is_tail_call ? "tail call" : "return";
+  const std::string_view context = is_tail_call ? "tail call" : "return";
   if (!is_canonical_entry_) {
     sink_.Add(Finding::Severity::kReview, pc,
               absl::StrFormat("%s in an FDE that did not start at a canonical function entry", context), insn_text);
