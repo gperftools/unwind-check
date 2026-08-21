@@ -69,7 +69,10 @@ class FixturesTest : public testing::Test {
     }
     std::sort(cfi_index.begin(), cfi_index.end());
 
-    FDEChecker checker{*image_, disasm_, FDEChecker::Options{}, cfi_index};
+    FDECheckerOptions options;
+    options.image = image_;
+    options.disasm = disasm_;
+    options.all_cfis = cfi_index;
     by_name_ = new std::map<std::string, Checked>();
     for (const CFI& cfi : all_cfis) {
       std::string name = symbolizer_->Name(cfi.pc_begin);
@@ -77,7 +80,7 @@ class FixturesTest : public testing::Test {
         continue;
       }
       Checked c;
-      c.result = checker.Check(cfi, starts.contains(cfi.pc_begin));
+      c.result = Check(options, cfi, starts.contains(cfi.pc_begin));
       for (const Finding& f : c.result.findings) {
         c.messages.push_back(f.message);
       }

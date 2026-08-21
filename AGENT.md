@@ -384,7 +384,7 @@ pad directly — it's reached only through the unwinder, via the LSDA — so the
 walk above would never find one on its own. `lsda-reader.{h,cc}` parses
 `.gcc_except_table`'s call-site table (`ReadLSDACallSites`) into `[start, end)
 → landing_pad` ranges; whenever the forward dataflow processes a `call`
-instruction whose PC falls in one of those ranges, `FDEChecker::Check` treats
+instruction whose PC falls in one of those ranges, `Check()` treats
 the landing pad as a real edge and propagates the *actual computed state
 right after that call* — callee-saved and CFA preserved, caller-saved
 clobbered, the same transfer function already used for the call's own
@@ -429,7 +429,7 @@ direct jump, or a resolved switch-table entry, leaves `[pc_begin, pc_end)`.
 branch out is normal control flow this tool was never trying to follow.)
 
 **The primary path: check against the target's own declared row.**
-`check_cross_fde_edge` (in `fde-checker.cc`, inside `FDEChecker::Check`) looks
+`check_cross_fde_edge` (in `fde-checker.cc`, inside `Check()`) looks
 up whichever checkable FDE covers the jump target and, if one does, compares
 the abstract state at the jump against *that* FDE's declared CFI row at that
 exact PC — the same `RowChecker::Check` used for every ordinary in-FDE
@@ -630,7 +630,7 @@ correctness question called out below rather than left silent.
   not work, because a table's own targets (and exception landing pads) can
   reveal code relevant to *other*, not-yet-resolved dispatches' bounds.
 * **Guessing recovery for unbounded jump tables** (`fde-checker.{h,cc}`:
-  `FDEChecker::CheckWithGuessing`, `ProbeJumpTable`,
+  `CheckWithGuessing`, `ProbeJumpTable`,
   `JumpTargetCompatiblePredicate`, `RowMatchesCleanly`). The bullet above
   covers a table whose `cmp $imm,%r; ja default` guard was found; this one
   is for an indirect jump whose `kJumpTarget` shape is otherwise fully

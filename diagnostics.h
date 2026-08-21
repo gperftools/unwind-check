@@ -78,7 +78,7 @@ bool AppendFindingContext(const std::vector<ListedInsn>& listing, const Finding&
 // problem, not this function's); the Status reports only pipeline-level
 // failure -- spawning ruby, or ruby/objdump exiting non-zero -- which the
 // caller should treat as fatal to the whole --inspect invocation.
-absl::StatusOr<FDEResult> RunInspectPipeline(const FDEChecker& checker, const CFI& cfi, bool at_function_entry,
+absl::StatusOr<FDEResult> RunInspectPipeline(const FDECheckerOptions& options, const CFI& cfi, bool at_function_entry,
                                              bool deep, bool color, const std::string& binary_path,
                                              const std::string& ruby_script_path);
 

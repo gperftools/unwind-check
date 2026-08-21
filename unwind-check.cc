@@ -283,11 +283,13 @@ int Run(const std::string& path, const std::string& ruby_script_path) {
   }
   std::sort(cfi_index.begin(), cfi_index.end());
 
-  FDEChecker::Options options;
+  FDECheckerOptions options;
+  options.image = &image;
+  options.disasm = disasm;
   options.check_unmentioned_callee_saved = absl::GetFlag(FLAGS_check_unmentioned_callee_saved);
   options.report_coverage_gaps = absl::GetFlag(FLAGS_report_coverage_gaps);
   options.max_findings_per_fde = static_cast<size_t>(std::max(1, absl::GetFlag(FLAGS_max_findings)));
-  FDEChecker checker{image, disasm, options, cfi_index};
+  options.all_cfis = cfi_index;
 
   // Where a function symbol starts, the FDE's first row is checkable
   // against the canonical entry state. Elsewhere -- PLT stubs, the cold
@@ -343,7 +345,7 @@ int Run(const std::string& path, const std::string& ruby_script_path) {
 
     const bool color = isatty(STDOUT_FILENO) != 0;
     absl::StatusOr<FDEResult> inspected = RunInspectPipeline(
-        checker, *target, function_starts.contains(target->pc_begin), inspect_deep, color, path, ruby_script_path);
+        options, *target, function_starts.contains(target->pc_begin), inspect_deep, color, path, ruby_script_path);
     if (!inspected.ok()) {
       absl::FPrintF(stderr, "unwind-check: %s\n", inspected.status().message());
       return kExitFailure;
@@ -381,7 +383,7 @@ int Run(const std::string& path, const std::string& ruby_script_path) {
       continue;
     }
     try {
-      results.push_back(checker.CheckWithGuessing(*cfi, function_starts.contains(cfi->pc_begin)));
+      results.push_back(CheckWithGuessing(options, *cfi, function_starts.contains(cfi->pc_begin)));
     } catch (const EHFrameError& e) {
       results.push_back(MakeStructuralResult(cfi->fde_addr, cfi->pc_begin, cfi->pc_end, Finding::Severity::kReview,
                                              absl::StrFormat("analysis aborted: %s", e.what())));

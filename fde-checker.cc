@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -73,7 +74,7 @@ class FindingSink {
 // Compares one CFI row against the state the code actually produces.
 class RowChecker {
  public:
-  RowChecker(const FDEChecker::Options& options, FindingSink* sink) : options_(options), sink_(sink) {
+  RowChecker(const FDECheckerOptions& options, FindingSink* sink) : options_(options), sink_(sink) {
   }
 
   // `edge_context`, when non-empty, is prefixed onto every finding's
@@ -240,7 +241,7 @@ class RowChecker {
     }
   }
 
-  const FDEChecker::Options& options_;
+  const FDECheckerOptions& options_;
   FindingSink* sink_;
   std::string insn_text_;
   uint64_t pc_ = 0;
@@ -257,7 +258,7 @@ class RowChecker {
 // produced nothing at all -- a Review-level "can't tell" is not
 // "compatible" here, since a guess is supposed to be tighter than what
 // this tool would merely fail to complain about.
-bool RowMatchesCleanly(const FDEChecker::Options& options, uint64_t pc, const CFIRow& row, const AbsState& state,
+bool RowMatchesCleanly(const FDECheckerOptions& options, uint64_t pc, const CFIRow& row, const AbsState& state,
                        bool force_callee_saved_same_value) {
   FindingSink scratch{1};
   RowChecker checker{options, &scratch};
@@ -443,7 +444,36 @@ bool IsExitState(const AbsState& state) {
   return true;
 }
 
-}  // namespace
+// Implementation detail behind the free Check()/CheckWithGuessing()
+// functions declared in fde-checker.h: bundles the per-call scratch state
+// (mainly the sorted FDE index used for jump-table target lookups) that
+// would otherwise have to thread through every helper as extra arguments.
+class FDEChecker {
+ public:
+  explicit FDEChecker(const FDECheckerOptions& options)
+      : image_(*options.image), disasm_(options.disasm), options_(options), cfi_index_(options.all_cfis) {
+  }
+
+  FDEResult Check(const CFI& cfi, bool at_function_entry, std::vector<InsnTrace>* trace_out = nullptr,
+                  bool guessing_enabled = false) const;
+  FDEResult CheckWithGuessing(const CFI& cfi, bool at_function_entry,
+                              std::vector<InsnTrace>* trace_out = nullptr) const;
+
+ private:
+  std::optional<std::vector<uint64_t>> ResolveJumpTable(uint64_t table_addr, uint64_t entries) const;
+  std::optional<uint64_t> ResolveTableEntry(uint64_t table_addr, uint64_t index) const;
+  std::optional<std::vector<uint64_t>> ProbeJumpTable(
+      uint64_t table_addr, const std::function<bool(uint64_t target)>& target_is_compatible) const;
+  std::function<bool(uint64_t target)> JumpTargetCompatiblePredicate(const CFI& cfi, uint64_t jmp_pc,
+                                                                     const AbsState& state) const;
+  bool LandsInsideSomeFDE(uint64_t addr) const;
+  const CFI* CFIContaining(uint64_t pc) const;
+
+  const ELFImage& image_;
+  Disassembler* const disasm_;
+  const FDECheckerOptions& options_;
+  const std::vector<std::pair<std::pair<uint64_t, uint64_t>, const CFI*>>& cfi_index_;
+};
 
 bool FDEChecker::LandsInsideSomeFDE(uint64_t addr) const {
   return CFIContaining(addr) != nullptr;
@@ -1141,6 +1171,18 @@ FDEResult FDEChecker::CheckWithGuessing(const CFI& cfi, bool at_function_entry,
   result.verdict = Verdict::kReviewLight;
   result.guessed_jump_tables = std::move(retry.guessed_jump_tables);
   return result;
+}
+
+}  // namespace
+
+FDEResult Check(const FDECheckerOptions& options, const CFI& cfi, bool at_function_entry,
+                std::vector<InsnTrace>* trace_out, bool guessing_enabled) {
+  return FDEChecker(options).Check(cfi, at_function_entry, trace_out, guessing_enabled);
+}
+
+FDEResult CheckWithGuessing(const FDECheckerOptions& options, const CFI& cfi, bool at_function_entry,
+                            std::vector<InsnTrace>* trace_out) {
+  return FDEChecker(options).CheckWithGuessing(cfi, at_function_entry, trace_out);
 }
 
 }  // namespace unwind_analysis

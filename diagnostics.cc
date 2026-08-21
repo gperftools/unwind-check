@@ -119,11 +119,11 @@ bool AppendFindingContext(const std::vector<ListedInsn>& listing, const Finding&
   return true;
 }
 
-absl::StatusOr<FDEResult> RunInspectPipeline(const FDEChecker& checker, const CFI& cfi, bool at_function_entry,
+absl::StatusOr<FDEResult> RunInspectPipeline(const FDECheckerOptions& options, const CFI& cfi, bool at_function_entry,
                                              bool deep, bool color, const std::string& binary_path,
                                              const std::string& ruby_script_path) {
   std::vector<InsnTrace> trace;
-  FDEResult result = checker.CheckWithGuessing(cfi, at_function_entry, deep ? &trace : nullptr);
+  FDEResult result = CheckWithGuessing(options, cfi, at_function_entry, deep ? &trace : nullptr);
 
   // Everything inspect.rb needs to know, keyed by address: the declared
   // CFI row at every row boundary, the converged state before every

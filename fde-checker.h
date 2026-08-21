@@ -4,7 +4,6 @@
 
 #include <stdint.h>
 
-#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
@@ -102,117 +101,69 @@ struct InsnTrace {
   AbsState state;
 };
 
-class FDEChecker {
- public:
-  struct Options {
-    // Also require that callee-saved registers with no explicit rule
-    // still hold their entry value. Off by default: hand-written
-    // assembly breaks this constantly and it drowns the report.
-    bool check_unmentioned_callee_saved = false;
-    // Report bytes inside the FDE that the control-flow walk never
-    // reached. Usually exception landing pads or jump-table targets.
-    bool report_coverage_gaps = true;
-    size_t max_findings_per_fde = 8;
-    size_t max_iterations = 200000;
-  };
+struct FDECheckerOptions {
+  const ELFImage* image = nullptr;
+  Disassembler* disasm = nullptr;
 
-  // `all_cfis` is every known checkable FDE, sorted by pc_begin. It backs
-  // two things: validating that a resolved switch-table entry lands inside
-  // *some* FDE -- not necessarily this one, since a shared, ICF'd throw block
-  // can be reached from a table 1.2 MB away in a different FDE (§5) -- and
-  // looking up the declared CFI row at a jump target outside this FDE's own
-  // range, so a tail call or a switch-table dispatch into another FDE
+  // Also require that callee-saved registers with no explicit rule
+  // still hold their entry value. Off by default: hand-written
+  // assembly breaks this constantly and it drowns the report.
+  bool check_unmentioned_callee_saved = false;
+  // Report bytes inside the FDE that the control-flow walk never
+  // reached. Usually exception landing pads or jump-table targets.
+  bool report_coverage_gaps = true;
+  size_t max_findings_per_fde = 8;
+  size_t max_iterations = 200000;
+
+  // Every known checkable FDE, sorted by pc_begin. It backs two things:
+  // validating that a resolved switch-table entry lands inside *some* FDE
+  // -- not necessarily this one, since a shared, ICF'd throw block can be
+  // reached from a table 1.2 MB away in a different FDE (§5) -- and
+  // looking up the declared CFI row at a jump target outside this FDE's
+  // own range, so a tail call or a switch-table dispatch into another FDE
   // (typically a `.cold` fragment) can be checked against what that FDE
   // actually declares instead of guessed at via the tail-call ABI
-  // convention. Leaving it empty simply means neither lookup ever succeeds,
-  // which is safe -- it just costs the precision these features exist to
-  // recover, and any jump whose target has no entry here (PLT stubs included,
-  // since the caller excludes them) falls back to the ABI-based check.
-  FDEChecker(const ELFImage& image, Disassembler* disasm, const Options& options,
-             std::vector<std::pair<std::pair<uint64_t, uint64_t>, const CFI*>> all_cfis = {})
-      : image_(image), disasm_(disasm), options_(options), cfi_index_(std::move(all_cfis)) {
-  }
-
-  // `at_function_entry` says a function symbol starts exactly at
-  // cfi.pc_begin. When it does, the FDE's first row must describe the
-  // canonical x86-64 entry state, and we say so if it does not. When it
-  // does not -- a cold fragment, a PLT stub -- there is nothing to
-  // compare the first row against and we take it as given.
-  // `trace_out`, when non-null, is filled with one entry per instruction
-  // the walk actually reached (same order Pass 2 visits them, i.e.
-  // sorted by pc) -- see InsnTrace. Diagnostics-only; leave it null on
-  // the normal checking path.
-  //
-  // `guessing_enabled` switches on the one heuristic recovery this
-  // checker does: when an indirect jump's table shape is fully resolved
-  // (base, index register, entry width) but no compiler-declared bound
-  // was ever captured for it, probe the table directly instead of
-  // reporting it unresolved -- see CheckWithGuessing, which is what
-  // should actually be called from a top level driver; this parameter
-  // exists so CheckWithGuessing can ask for a second, independent run of
-  // the same algorithm rather than duplicating it.
-  FDEResult Check(const CFI& cfi, bool at_function_entry, std::vector<InsnTrace>* trace_out = nullptr,
-                  bool guessing_enabled = false) const;
-
-  // Runs Check() normally. If the result is a REVIEW whose sole point of
-  // uncertainty was one table-shaped-but-unbounded indirect jump
-  // (FDEResult::guessable_jump_pc), retries once with guessing enabled.
-  // The retry is trusted -- and the returned result downgraded from
-  // REVIEW to REVIEW-LIGHT, with the retry's guessed_jump_tables attached
-  // for diagnostics -- only when it comes back fully BLESSED. Any other
-  // outcome (no guessable jump, or a retry that still finds something)
-  // returns the original, untouched result: guessing is only ever worth
-  // reporting when it recovers a clean answer, never as a weaker partial
-  // one.
-  FDEResult CheckWithGuessing(const CFI& cfi, bool at_function_entry,
-                              std::vector<InsnTrace>* trace_out = nullptr) const;
-
- private:
-  // Reads and validates the switch table at `table_addr` with `entries`
-  // int32 entries, all-or-nothing: any entry failing any check discards
-  // the whole table. Returns the resolved absolute targets, or nullopt.
-  std::optional<std::vector<uint64_t>> ResolveJumpTable(uint64_t table_addr, uint64_t entries) const;
-  // One switch-table entry's decode-and-validate: same acceptance rule
-  // ResolveJumpTable applies per entry (lands inside some FDE, decodes as
-  // an instruction), factored out so guessing mode's open-ended probe
-  // doesn't duplicate it. No logging of its own -- callers own that,
-  // since ResolveJumpTable and ProbeJumpTable want different messages.
-  std::optional<uint64_t> ResolveTableEntry(uint64_t table_addr, uint64_t index) const;
-  // Guessing mode's recovery for a table-shaped indirect jump with no
-  // captured bound: index 0 is always safe to try (a known-good table
-  // base's first entry), and each subsequent index is trusted only as
-  // long as it keeps passing two tests -- ResolveTableEntry's structural
-  // one (decodes as an instruction, lands inside some FDE) and the
-  // caller-supplied `target_is_compatible`, which checks the actual
-  // declared CFI row at that target against the state the jump carries,
-  // exactly the same row-check an ordinary resolved dispatch gets (see
-  // RowMatchesCleanly and the call sites in Check()) -- so the guess's
-  // boundary is decided by real compatibility, not merely "this address
-  // decodes to something". Stops at the first index that fails either
-  // test, or at kMaxJumpTableEntries, whichever comes first. This is
-  // still a guess, not a proof -- a coincidentally CFI-compatible
-  // neighbor cannot be ruled out this way either, which is exactly why a
-  // successful guess downgrades a verdict to REVIEW-LIGHT rather than
-  // BLESSED. Returns nullopt only when even index 0 fails.
-  std::optional<std::vector<uint64_t>> ProbeJumpTable(
-      uint64_t table_addr, const std::function<bool(uint64_t target)>& target_is_compatible) const;
-  // Builds the predicate ProbeJumpTable uses above: local targets (inside
-  // `cfi`'s own range) are checked against `cfi`'s declared row at that
-  // address, everything else against whatever FDE (if any) covers it --
-  // the same in-FDE vs. cross-FDE split every other jump-table edge in
-  // this file goes through, minus the finding emission, since the probe
-  // may still end up discarding this candidate.
-  std::function<bool(uint64_t target)> JumpTargetCompatiblePredicate(const CFI& cfi, uint64_t jmp_pc,
-                                                                     const AbsState& state) const;
-  bool LandsInsideSomeFDE(uint64_t addr) const;
-  // The checkable FDE covering `pc`, or nullptr if none does.
-  const CFI* CFIContaining(uint64_t pc) const;
-
-  const ELFImage& image_;
-  Disassembler* const disasm_;
-  Options options_;
-  std::vector<std::pair<std::pair<uint64_t, uint64_t>, const CFI*>> cfi_index_;
+  // convention. Leaving it empty simply means neither lookup ever
+  // succeeds, which is safe -- it just costs the precision these features
+  // exist to recover, and any jump whose target has no entry here (PLT
+  // stubs included, since the caller excludes them) falls back to the
+  // ABI-based check.
+  std::vector<std::pair<std::pair<uint64_t, uint64_t>, const CFI*>> all_cfis;
 };
+
+// `at_function_entry` says a function symbol starts exactly at
+// cfi.pc_begin. When it does, the FDE's first row must describe the
+// canonical x86-64 entry state, and we say so if it does not. When it
+// does not -- a cold fragment, a PLT stub -- there is nothing to
+// compare the first row against and we take it as given.
+// `trace_out`, when non-null, is filled with one entry per instruction
+// the walk actually reached (same order Pass 2 visits them, i.e.
+// sorted by pc) -- see InsnTrace. Diagnostics-only; leave it null on
+// the normal checking path.
+//
+// `guessing_enabled` switches on the one heuristic recovery this
+// checker does: when an indirect jump's table shape is fully resolved
+// (base, index register, entry width) but no compiler-declared bound
+// was ever captured for it, probe the table directly instead of
+// reporting it unresolved -- see CheckWithGuessing, which is what
+// should actually be called from a top level driver; this parameter
+// exists so CheckWithGuessing can ask for a second, independent run of
+// the same algorithm rather than duplicating it.
+FDEResult Check(const FDECheckerOptions& options, const CFI& cfi, bool at_function_entry,
+                std::vector<InsnTrace>* trace_out = nullptr, bool guessing_enabled = false);
+
+// Runs Check() normally. If the result is a REVIEW whose sole point of
+// uncertainty was one table-shaped-but-unbounded indirect jump
+// (FDEResult::guessable_jump_pc), retries once with guessing enabled.
+// The retry is trusted -- and the returned result downgraded from
+// REVIEW to REVIEW-LIGHT, with the retry's guessed_jump_tables attached
+// for diagnostics -- only when it comes back fully BLESSED. Any other
+// outcome (no guessable jump, or a retry that still finds something)
+// returns the original, untouched result: guessing is only ever worth
+// reporting when it recovers a clean answer, never as a weaker partial
+// one.
+FDEResult CheckWithGuessing(const FDECheckerOptions& options, const CFI& cfi, bool at_function_entry,
+                            std::vector<InsnTrace>* trace_out = nullptr);
 
 }  // namespace unwind_analysis
 
