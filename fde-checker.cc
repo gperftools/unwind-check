@@ -672,7 +672,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     // A malformed LSDA shouldn't be able to walk us outside the FDE.
     call_sites.erase(std::remove_if(call_sites.begin(), call_sites.end(),
                                     [&](const LSDACallSite& cs) {
-                                       return cs.landing_pad < cfi.pc_begin || cs.landing_pad >= cfi.pc_end;
+                                      return cs.landing_pad < cfi.pc_begin || cs.landing_pad >= cfi.pc_end;
                                     }),
                      call_sites.end());
   }
@@ -842,13 +842,12 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
   VLOG(2) << absl::StrFormat(
       "FDE 0x%x done: %u worklist pops, %u propagate() calls (%u changed, %u deduped against an already-"
       "pending entry), %u distinct addresses reached, %u call sites in LSDA",
-      cfi.pc_begin, iterations, propagate_calls, propagate_changed, propagate_dedup_skipped,
-      in_states.size(), call_sites.size());
+      cfi.pc_begin, iterations, propagate_calls, propagate_changed, propagate_dedup_skipped, in_states.size(),
+      call_sites.size());
 
   if (hit_cap) {
     sink.Add(Finding::Severity::kReview, cfi.pc_begin,
-             absl::StrFormat("analysis gave up after %d dataflow steps", options_.max_iterations),
-             "");
+             absl::StrFormat("analysis gave up after %d dataflow steps", options_.max_iterations), "");
   }
 
   // Pass 2: Verify settled states against declared CFI rows in deterministic (sorted PC) order.
@@ -871,8 +870,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     std::string insn_text =
         Disassembler::Text(insn).value_or(absl::StrFormat("<cannot format instruction at 0x%x>", pc));
     if (pc + insn.size > cfi.pc_end) {
-      sink.Add(Finding::Severity::kReview, pc, "instruction runs past the end of the FDE's PC range",
-               insn_text);
+      sink.Add(Finding::Severity::kReview, pc, "instruction runs past the end of the FDE's PC range", insn_text);
       continue;
     }
     result.instructions_checked++;

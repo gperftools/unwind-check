@@ -190,7 +190,6 @@ const char* DWARFRegName(int reg) {
   return kRegNames[reg];
 }
 
-
 bool CFIRow::IsCanonicalEntry() const {
   return cfa.kind == CFARule::Kind::kRegOffset && cfa.reg == kDWARFRsp && cfa.offset == 8 &&
          regs[kDWARFRip].kind == RegRule::Kind::kAtCFAOffset && regs[kDWARFRip].offset == -8;

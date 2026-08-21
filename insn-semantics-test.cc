@@ -30,8 +30,8 @@ class SemanticsTest : public testing::Test {
     if (!ok) {
       return TransferOutcome{};
     }
-    EXPECT_EQ(insn.size, code.size())
-        << "test encoding is not exactly one instruction: " << Disassembler::Text(insn).value_or("<cannot format>");
+    EXPECT_EQ(insn.size, code.size()) << "test encoding is not exactly one instruction: "
+                                      << Disassembler::Text(insn).value_or("<cannot format>");
     InsnSemantics semantics;
     return semantics.Transfer(insn, &state_);
   }
@@ -298,7 +298,7 @@ TEST_F(SemanticsTest, MovzxCarriesTheSourcesBoundAcrossATruncatingWiden) {
 }
 
 TEST_F(SemanticsTest, NarrowCmpAndMovzxPropagatesBound) {
-  Run({0x3c, 0x09});        // cmp $9, %al
+  Run({0x3c, 0x09});  // cmp $9, %al
   ASSERT_TRUE(state_.last_cmp.has_value());
   EXPECT_EQ(state_.last_cmp->reg, kDWARFRax);
   EXPECT_EQ(state_.last_cmp->width_bits, 8u);
@@ -317,7 +317,7 @@ TEST_F(SemanticsTest, NarrowCmpAndMovsxPropagatesBoundWhenSignBitIsZero) {
 }
 
 TEST_F(SemanticsTest, NarrowCmpAndMovsxRejectsBoundWhenSignBitCanBeOne) {
-  Run({0x3c, 0xc8});        // cmp $200, %al
+  Run({0x3c, 0xc8});  // cmp $200, %al
   ASSERT_TRUE(state_.last_cmp.has_value());
   EXPECT_EQ(state_.last_cmp->imm, 200u);
 
@@ -327,8 +327,8 @@ TEST_F(SemanticsTest, NarrowCmpAndMovsxRejectsBoundWhenSignBitCanBeOne) {
 }
 
 TEST_F(SemanticsTest, MovsxdCarriesBoundFrom32BitRegWhenNonNegative) {
-  Run({0x83, 0xf8, 0x09});        // cmp $9, %eax
-  Run({0x48, 0x63, 0xc8});        // movsxd %eax, %rcx
+  Run({0x83, 0xf8, 0x09});  // cmp $9, %eax
+  Run({0x48, 0x63, 0xc8});  // movsxd %eax, %rcx
   ASSERT_TRUE(state_.reg(kDWARFRcx).Bound().has_value());
   EXPECT_EQ(*state_.reg(kDWARFRcx).Bound(), 9u);
 }

@@ -178,8 +178,7 @@ void AbsState::DropDeadSlots(int64_t rsp_delta) {
 
 std::string JoinConflict::Describe() const {
   if (reg == kSlotConflict) {
-    return absl::StrFormat("stack slot CFA%+d is %v on one path and %v on another", static_cast<int>(offset), lhs,
-                           rhs);
+    return absl::StrFormat("stack slot CFA%+d is %v on one path and %v on another", static_cast<int>(offset), lhs, rhs);
   }
   return absl::StrFormat("%s is %v on one path and %v on another", DWARFRegName(reg), lhs, rhs);
 }

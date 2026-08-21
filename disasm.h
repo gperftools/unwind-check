@@ -19,11 +19,11 @@ namespace unwind_analysis {
 // site here expects.
 struct Instruction {
   uint64_t address = 0;
-  uint32_t size = 0;                 // insn.length, in bytes
+  uint32_t size = 0;  // insn.length, in bytes
   ZydisMnemonic id = ZYDIS_MNEMONIC_INVALID;
-  uint8_t op_count = 0;               // explicit operands only (operand_count_visible)
+  uint8_t op_count = 0;  // explicit operands only (operand_count_visible)
   ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT]{};
-  ZydisDecodedInstruction insn{};      // the full decode: meta.category, cpu_flags, etc.
+  ZydisDecodedInstruction insn{};  // the full decode: meta.category, cpu_flags, etc.
 };
 
 // Thin wrapper over one Zydis x86-64 decoder and formatter.
