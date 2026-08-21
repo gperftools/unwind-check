@@ -24,7 +24,24 @@ enum class Verdict {
   kMismatch,     // the CFI contradicts the code
 };
 
-const char* VerdictName(Verdict v);
+template <typename Sink>
+void AbslStringify(Sink& sink, Verdict v) {
+  switch (v) {
+    case Verdict::kBlessed:
+      sink.Append("BLESSED");
+      return;
+    case Verdict::kReviewLight:
+      sink.Append("REVIEW-LIGHT");
+      return;
+    case Verdict::kReview:
+      sink.Append("REVIEW");
+      return;
+    case Verdict::kMismatch:
+      sink.Append("MISMATCH");
+      return;
+  }
+  sink.Append("?");
+}
 
 struct Finding {
   enum class Severity { kReview, kMismatch };

@@ -13,6 +13,7 @@
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
 #include "cfi-table.h"
 #include "disasm.h"
 #include "eh-frame-reader.h"
@@ -167,7 +168,7 @@ TEST_F(FixturesTest, NamesMatchVerdicts) {
       findings += "\n    " + m;
     }
     EXPECT_EQ(checked.result.verdict, expected)
-        << name << " came out " << VerdictName(checked.result.verdict) << findings;
+        << name << " came out " << absl::StrCat(checked.result.verdict) << findings;
   }
 }
 

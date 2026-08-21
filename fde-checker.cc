@@ -445,20 +445,6 @@ bool IsExitState(const AbsState& state) {
 
 }  // namespace
 
-const char* VerdictName(Verdict v) {
-  switch (v) {
-    case Verdict::kBlessed:
-      return "BLESSED";
-    case Verdict::kReviewLight:
-      return "REVIEW-LIGHT";
-    case Verdict::kReview:
-      return "REVIEW";
-    case Verdict::kMismatch:
-      return "MISMATCH";
-  }
-  return "?";
-}
-
 bool FDEChecker::LandsInsideSomeFDE(uint64_t addr) const {
   return CFIContaining(addr) != nullptr;
 }

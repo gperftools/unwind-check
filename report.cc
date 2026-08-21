@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "diagnostics.h"
 
@@ -27,7 +28,7 @@ void PrintOne(const FDEResult& r, Symbolizer* sym, const ReportContext* ctx) {
   if (name.empty()) {
     name = "<no symbol>";
   }
-  absl::PrintF("%-8s %s  [0x%x - 0x%x)%s\n", VerdictName(r.verdict), name, r.pc_begin, r.pc_end,
+  absl::PrintF("%-8s %s  [0x%x - 0x%x)%s\n", absl::StrCat(r.verdict), name, r.pc_begin, r.pc_end,
                r.signal_frame ? "  (signal frame)" : "");
 
   // A window of real instructions plus their declared CFI row -- much
