@@ -765,15 +765,19 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
           // ran the cmp would already have cleared this via Join.
           if (is_ja_or_jae && state.last_cmp.has_value()) {
             int reg = state.last_cmp->reg;
+            uint8_t width = state.last_cmp->width_bits;
             uint64_t imm = state.last_cmp->imm;
             // On the in-bounds (fall-through) edge, `ja` means reg <= imm
             // and `jae` means reg < imm.
             if (!is_jae || imm != 0) {
               uint64_t ubound = is_jae ? imm - 1 : imm;
-              VLOG(1) << absl::StrFormat("0x%llx: %s taken-edge guard sets bound[%d]=%llu on fall-through to 0x%llx",
-                                         (unsigned long long)pc, is_jae ? "jae" : "ja", reg, (unsigned long long)ubound,
-                                         (unsigned long long)next);
-              fallthrough_state.SetBound(reg, ubound);
+              fallthrough_state.last_cmp->imm = ubound;
+              if (width >= 32) {
+                VLOG(1) << absl::StrFormat("0x%llx: %s taken-edge guard sets bound[%d]=%llu on fall-through to 0x%llx",
+                                           (unsigned long long)pc, is_jae ? "jae" : "ja", reg,
+                                           (unsigned long long)ubound, (unsigned long long)next);
+                fallthrough_state.SetBound(reg, ubound);
+              }
             }
           }
           propagate(next, fallthrough_state);

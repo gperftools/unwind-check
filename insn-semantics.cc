@@ -353,7 +353,13 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
           return out;
         }
       }
-      state->SetReg(d, LeaValue(*state, insn, mem));
+      const AbsVal cur = state->reg(d);
+      AbsVal val = LeaValue(*state, insn, mem);
+      state->SetReg(d, val);
+      if (d == kDWARFRsp && val.kind == AbsVal::Kind::kCFARel && cur.kind == AbsVal::Kind::kCFARel &&
+          val.delta > cur.delta) {
+        state->DropDeadSlots(val.delta);
+      }
       return out;
     }
 
@@ -388,7 +394,13 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
             // same rsi-level bound `mov %rsi,%rax` would), unlike a
             // value read, which ReadReg rightly refuses to give for a
             // sub-register.
-            carried = s >= 0 ? state->reg(s).Bound() : std::nullopt;
+            if (s >= 0) {
+              carried = state->reg(s).Bound();
+              if (!carried.has_value() && state->last_cmp.has_value() && state->last_cmp->reg == s &&
+                  state->last_cmp->width_bits == src.size) {
+                carried = state->last_cmp->imm;
+              }
+            }
           }
           state->ClobberReg(d);
           if (carried.has_value()) {
@@ -431,18 +443,41 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
     }
 
     case ZYDIS_MNEMONIC_MOVSXD: {
-      // `movslq disp(%B,%I,4),%T` -- the switch-table load: T becomes the
-      // table entry once %B is a known constant and the scale is 4 (an
-      // int32 table). Anything else falls through to the generic clobber
-      // below, same as any other unmodelled case.
-      if (insn.op_count != 2 || insn.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
-          insn.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY) {
+      if (insn.op_count != 2 || insn.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER) {
         break;
       }
       int d = DWARFRegOf(insn.operands[0].reg.value);
       if (d < 0 || !IsFull64(insn.operands[0].reg.value)) {
         break;
       }
+      // Register-to-register `movsxd %src32, %dst64`: carries the bound across if the
+      // bound is non-negative (< 2^31), so the sign bit is 0 and sign-extension matches zero-extension.
+      if (insn.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER) {
+        int s = DWARFRegOf(insn.operands[1].reg.value);
+        std::optional<uint64_t> carried;
+        if (s >= 0) {
+          std::optional<uint64_t> b = state->reg(s).Bound();
+          if (!b.has_value() && state->last_cmp.has_value() && state->last_cmp->reg == s &&
+              state->last_cmp->width_bits == 32) {
+            b = state->last_cmp->imm;
+          }
+          if (b.has_value() && *b < (1ULL << 31)) {
+            carried = b;
+          }
+        }
+        state->ClobberReg(d);
+        if (carried.has_value()) {
+          state->SetBound(d, *carried);
+        }
+        return out;
+      }
+      if (insn.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY) {
+        break;
+      }
+      // `movslq disp(%B,%I,4),%T` -- the switch-table load: T becomes the
+      // table entry once %B is a known constant and the scale is 4 (an
+      // int32 table). Anything else falls through to the generic clobber
+      // below, same as any other unmodelled case.
       const ZydisDecodedOperandMem& mem = insn.operands[1].mem;
       if (mem.index == ZYDIS_REGISTER_NONE || mem.scale != 4 || mem.base == ZYDIS_REGISTER_NONE) {
         break;
@@ -533,37 +568,63 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
     }
 
     case ZYDIS_MNEMONIC_CMP: {
-      // `cmp $non_negative_imm,%reg` -- the switch-table guard
+      // `cmp $imm,%reg` -- the switch-table guard
       // (initial-switch-tables-plan.md §3.2). cmp writes no register or
       // memory, only EFLAGS, which the unconditional check at the top of
       // this function already cleared; a matching cmp sets it again here.
-      // Anything else (cmp of two registers, a negative immediate, a
-      // memory operand) simply leaves it cleared -- not a guard this
-      // analysis resolves.
+      // Anything else (cmp of two registers, a memory operand) simply
+      // leaves it cleared -- not a guard this analysis resolves.
       if (insn.op_count == 2 && insn.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
-          insn.operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && insn.operands[1].imm.value.s >= 0) {
+          insn.operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
         int r = DWARFRegOf(insn.operands[0].reg.value);
         if (r >= 0) {
-          state->last_cmp = AbsState::FlagsGuard{r, static_cast<uint64_t>(insn.operands[1].imm.value.s)};
+          uint8_t width = insn.operands[0].size;
+          uint64_t imm = insn.operands[1].imm.value.u;
+          if (width < 64) {
+            imm &= ((1ULL << width) - 1);
+          }
+          state->last_cmp = AbsState::FlagsGuard{r, width, imm};
         }
       }
       return out;
     }
 
-    case ZYDIS_MNEMONIC_MOVZX: {
-      // `movzbl %r8b,%ecx` and friends: the destination's own identity
+    case ZYDIS_MNEMONIC_MOVZX:
+    case ZYDIS_MNEMONIC_MOVSX: {
+      // `movzbl %r8b,%ecx`, `movsbl %al,%edx` and friends: the destination's own identity
       // does not survive the truncation in general, but a numeric bound
       // established on the source does -- GCC routinely widens the guard
       // register into whatever register the table load actually reads
       // (switch-table-amend-plan.md §1), so carrying just the bound
       // across, rather than the whole value, is what lets the guard and
       // the table load disagree on register without losing the guard.
+      //
+      // For sign-extension (`movsx`), the bound is valid only when the immediate
+      // bound is small enough that the sign bit is guaranteed to be 0 (i.e.
+      // bound < (1 << (src_bits - 1))), so sign-extension is identical to zero-extension.
       if (insn.op_count == 2 && insn.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
           insn.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER) {
         int d = DWARFRegOf(insn.operands[0].reg.value);
         int s = DWARFRegOf(insn.operands[1].reg.value);
         if (d >= 0) {
-          std::optional<uint64_t> carried = s >= 0 ? state->reg(s).Bound() : std::nullopt;
+          std::optional<uint64_t> carried;
+          uint8_t src_bits = insn.operands[1].size;
+          if (s >= 0) {
+            std::optional<uint64_t> b = state->reg(s).Bound();
+            if (!b.has_value() && state->last_cmp.has_value() && state->last_cmp->reg == s &&
+                state->last_cmp->width_bits == src_bits) {
+              b = state->last_cmp->imm;
+            }
+            if (b.has_value()) {
+              if (insn.id == ZYDIS_MNEMONIC_MOVZX) {
+                carried = b;
+              } else {
+                if (src_bits < 64 && *b < (1ULL << (src_bits - 1))) {
+                  carried = b;
+                }
+              }
+            }
+          }
           state->ClobberReg(d);
           if (carried.has_value()) {
             state->SetBound(d, *carried);

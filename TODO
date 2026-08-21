@@ -57,11 +57,11 @@
 * asserts (so !NDEBUG) for stuff like accessing ConstValue on the AbsVal that isn't kConst
 
 * should SetReg automagically detect update of RSP and clobber read zone etc ?
-* handling of ZYDIS_MNEMONIC_LEA when rsp is updated is not clobbering slots
+* (DONE) handling of ZYDIS_MNEMONIC_LEA when rsp is updated is not clobbering slots
 
 * ADD/SUB addition/subtraction should be unsigned (compilers like to screw up the signed overflows)
 
-* so the logic of "move the bound over movzx" should ensure the bound
+* (DONE) so the logic of "move the bound over movzx" should ensure the bound
   is small enough that narrow src register read isn't "smaller" than bound.
 
 * Do we need "empty state" class for InsnSemantics ? Also InsnSemantics::DWARFRegOf and IsFull64 are not really used externally.

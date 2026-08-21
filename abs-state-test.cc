@@ -692,13 +692,14 @@ TEST(AbsStateTest, ClobberRegClearsAPreviouslySetBound) {
 
 TEST(AbsStateTest, JoinKeepsLastCmpOnlyWhenBothSidesAgree) {
   AbsState a;
-  a.last_cmp = AbsState::FlagsGuard{kDWARFRax, 9};
+  a.last_cmp = AbsState::FlagsGuard{kDWARFRax, 32, 9};
   AbsState b;
-  b.last_cmp = AbsState::FlagsGuard{kDWARFRax, 9};
+  b.last_cmp = AbsState::FlagsGuard{kDWARFRax, 32, 9};
 
   std::vector<JoinConflict> conflicts;
   EXPECT_FALSE(Join(b, &a, &conflicts));
   ASSERT_TRUE(a.last_cmp.has_value());
+  EXPECT_EQ(a.last_cmp->width_bits, 32u);
   EXPECT_EQ(a.last_cmp->imm, 9u);
 }
 
@@ -707,7 +708,7 @@ TEST(AbsStateTest, JoinDropsADisagreeingLastCmp) {
   // must clear it at the merge point: the guard does not dominate here,
   // so trusting it would be unsound, not merely imprecise.
   AbsState a;
-  a.last_cmp = AbsState::FlagsGuard{kDWARFRax, 9};
+  a.last_cmp = AbsState::FlagsGuard{kDWARFRax, 32, 9};
   AbsState b;  // no cmp on this path
 
   std::vector<JoinConflict> conflicts;
@@ -717,14 +718,14 @@ TEST(AbsStateTest, JoinDropsADisagreeingLastCmp) {
 
 TEST(AbsStateTest, JoinNeverResurrectsAnAlreadyClearedLastCmp) {
   AbsState a;
-  a.last_cmp = AbsState::FlagsGuard{kDWARFRax, 9};
+  a.last_cmp = AbsState::FlagsGuard{kDWARFRax, 32, 9};
   AbsState b;
   std::vector<JoinConflict> conflicts;
   ASSERT_TRUE(Join(b, &a, &conflicts));
   ASSERT_FALSE(a.last_cmp.has_value());
 
   AbsState c;
-  c.last_cmp = AbsState::FlagsGuard{kDWARFRax, 9};  // even the same guard
+  c.last_cmp = AbsState::FlagsGuard{kDWARFRax, 32, 9};  // even the same guard
   EXPECT_FALSE(Join(c, &a, &conflicts));
   EXPECT_FALSE(a.last_cmp.has_value());
 }

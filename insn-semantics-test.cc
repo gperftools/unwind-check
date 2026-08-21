@@ -260,6 +260,50 @@ TEST_F(SemanticsTest, MovzxCarriesTheSourcesBoundAcrossATruncatingWiden) {
   EXPECT_EQ(state_.reg(kDWARFRax).Bound(), 9u) << "the source's own bound is untouched by a read";
 }
 
+TEST_F(SemanticsTest, NarrowCmpAndMovzxPropagatesBound) {
+  Run({0x3c, 0x09});        // cmp $9, %al
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  EXPECT_EQ(state_.last_cmp->reg, kDWARFRax);
+  EXPECT_EQ(state_.last_cmp->width_bits, 8u);
+  EXPECT_EQ(state_.last_cmp->imm, 9u);
+
+  Run({0x0f, 0xb6, 0xc8});  // movzbl %al, %ecx
+  ASSERT_TRUE(state_.reg(kDWARFRcx).Bound().has_value());
+  EXPECT_EQ(*state_.reg(kDWARFRcx).Bound(), 9u);
+}
+
+TEST_F(SemanticsTest, NarrowCmpAndMovsxPropagatesBoundWhenSignBitIsZero) {
+  Run({0x3c, 0x09});        // cmp $9, %al
+  Run({0x0f, 0xbe, 0xc8});  // movsbl %al, %ecx
+  ASSERT_TRUE(state_.reg(kDWARFRcx).Bound().has_value());
+  EXPECT_EQ(*state_.reg(kDWARFRcx).Bound(), 9u);
+}
+
+TEST_F(SemanticsTest, NarrowCmpAndMovsxRejectsBoundWhenSignBitCanBeOne) {
+  Run({0x3c, 0xc8});        // cmp $200, %al
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  EXPECT_EQ(state_.last_cmp->imm, 200u);
+
+  Run({0x0f, 0xbe, 0xc8});  // movsbl %al, %ecx
+  EXPECT_FALSE(state_.reg(kDWARFRcx).Bound().has_value())
+      << "sign extension from 200 (negative signed byte) must not propagate bound";
+}
+
+TEST_F(SemanticsTest, MovsxdCarriesBoundFrom32BitRegWhenNonNegative) {
+  Run({0x83, 0xf8, 0x09});        // cmp $9, %eax
+  Run({0x48, 0x63, 0xc8});        // movsxd %eax, %rcx
+  ASSERT_TRUE(state_.reg(kDWARFRcx).Bound().has_value());
+  EXPECT_EQ(*state_.reg(kDWARFRcx).Bound(), 9u);
+}
+
+TEST_F(SemanticsTest, LeaOnRspDropsDeadSlotsWhenMovingUp) {
+  Run({0x48, 0x83, 0xec, 0x80});  // sub $128, %rsp
+  state_.SetSlot(-300, AbsVal::OrigReg(kDWARFRbx));
+  EXPECT_TRUE(state_.Slot(-300).IsOrigReg(kDWARFRbx));
+  Run({0x48, 0x8d, 0x64, 0x24, 0x20});  // lea 0x20(%rsp), %rsp (moves rsp up by 32 bytes)
+  EXPECT_TRUE(state_.Slot(-300).is_top()) << "slot far below red zone is dropped";
+}
+
 TEST_F(SemanticsTest, StoresThroughAnUntrackedPointerDoNotWipeTheFrame) {
   Run({0x53});  // push %rbx
   ASSERT_TRUE(state_.Slot(-16).IsOrigReg(kDWARFRbx));

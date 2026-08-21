@@ -198,6 +198,7 @@ struct AbsState {
   // rather than one per register.
   struct FlagsGuard {
     int reg = 0;
+    uint8_t width_bits = 0;
     uint64_t imm = 0;
     bool operator==(const FlagsGuard&) const = default;
   };
