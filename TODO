@@ -39,6 +39,10 @@ table is referring to "our" FDE.
   combined entire exec+read-only-data into big PT_LOAD segment
   (possibly huge-page aligned).
 
+* ensure that we flag any cases where "CFG structure" is un-discovered
+  (e.g. earlier bound is bottomed later). All cases like this need to
+  be loudly REVIEWed or MISMATCHed.
+
 -----
 
 
