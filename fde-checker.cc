@@ -25,6 +25,10 @@ namespace {
 constexpr int kCalleeSaved[] = {kDWARFRbx, kDWARFRbp, 12, 13, 14, 15};
 constexpr uint64_t kMaxJumpTableEntries = 512;
 
+constexpr char kUnresolvedIndirectJumpMsg[] =
+    "unresolved indirect jump; jump tables are not resolved in this version, so the code it reaches went "
+    "unchecked";
+
 bool IsCalleeSaved(int reg) {
   return std::find(std::begin(kCalleeSaved), std::end(kCalleeSaved), reg) != std::end(kCalleeSaved);
 }
@@ -1028,10 +1032,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry, std::vector<
       std::optional<std::vector<uint64_t>> targets =
           ResolveJumpTable(outcome.jump_table_addr, outcome.jump_table_entries);
       if (!targets.has_value()) {
-        sink.Add(Finding::Severity::kReview, pc,
-                 "unresolved indirect jump; jump tables are not resolved in this version, so the code it reaches "
-                 "went unchecked",
-                 insn_text);
+        sink.Add(Finding::Severity::kReview, pc, kUnresolvedIndirectJumpMsg, insn_text);
       } else {
         for (uint64_t target : *targets) {
           if (target < cfi.pc_begin || target >= cfi.pc_end) {
@@ -1078,10 +1079,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry, std::vector<
         }
       }
       if (!guessed) {
-        sink.Add(Finding::Severity::kReview, pc,
-                 "unresolved indirect jump; jump tables are not resolved in this version, so the code it reaches "
-                 "went unchecked",
-                 insn_text);
+        sink.Add(Finding::Severity::kReview, pc, kUnresolvedIndirectJumpMsg, insn_text);
       }
     } else if (outcome.is_return) {
       CheckExitState(pc, state, insn_text, &sink, is_canonical_entry, /*is_tail_call=*/false);
@@ -1095,45 +1093,44 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry, std::vector<
         // Indirect tail call (e.g. virtual call or function pointer tail call)
         // with valid exit state -- blessed.
       } else {
-        sink.Add(Finding::Severity::kReview, pc,
-                 "unresolved indirect jump; jump tables are not resolved in this version, so the code it reaches "
-                 "went unchecked",
-                 insn_text);
+        sink.Add(Finding::Severity::kReview, pc, kUnresolvedIndirectJumpMsg, insn_text);
       }
     }
+  }
 
-    if (options_.report_coverage_gaps) {
-      // Bytes the walk never reached were never checked, so saying the FDE
-      // is blessed would be a lie. Padding does not count.
-      uint64_t pc = cfi.pc_begin;
-      while (pc < cfi.pc_end) {
-        auto it = insn_sizes.find(pc);
-        if (it != insn_sizes.end()) {
-          pc += it->second;
+  // Bytes the walk never reached were never checked, so saying the FDE is
+  // blessed would be a lie. Padding does not count. Runs once over the
+  // whole FDE, after pass 2 -- not once per reached instruction, since it
+  // does not depend on any particular one.
+  if (options_.report_coverage_gaps) {
+    uint64_t pc = cfi.pc_begin;
+    while (pc < cfi.pc_end) {
+      auto it = insn_sizes.find(pc);
+      if (it != insn_sizes.end()) {
+        pc += it->second;
+        continue;
+      }
+      uint64_t gap_start = pc;
+      bool all_padding = true;
+      while (pc < cfi.pc_end && insn_sizes.find(pc) == insn_sizes.end()) {
+        std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
+        Instruction insn;
+        if (bytes.empty() || !disasm_->Decode(bytes.data(), bytes.size(), pc, &insn)) {
+          all_padding = false;
+          pc++;
           continue;
         }
-        uint64_t gap_start = pc;
-        bool all_padding = true;
-        while (pc < cfi.pc_end && insn_sizes.find(pc) == insn_sizes.end()) {
-          std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
-          Instruction insn;
-          if (bytes.empty() || !disasm_->Decode(bytes.data(), bytes.size(), pc, &insn)) {
-            all_padding = false;
-            pc++;
-            continue;
-          }
-          if (insn.id != ZYDIS_MNEMONIC_NOP && insn.id != ZYDIS_MNEMONIC_INT3) {
-            all_padding = false;
-          }
-          pc += insn.size;
+        if (insn.id != ZYDIS_MNEMONIC_NOP && insn.id != ZYDIS_MNEMONIC_INT3) {
+          all_padding = false;
         }
-        if (!all_padding) {
-          sink.Add(Finding::Severity::kReview, gap_start,
-                   absl::StrFormat("%d bytes from here were not reached by the control-flow walk, so their CFI went "
-                                   "unchecked (exception landing pads and jump-table targets look like this)",
-                                   pc - gap_start),
-                   "");
-        }
+        pc += insn.size;
+      }
+      if (!all_padding) {
+        sink.Add(Finding::Severity::kReview, gap_start,
+                 absl::StrFormat("%d bytes from here were not reached by the control-flow walk, so their CFI went "
+                                 "unchecked (exception landing pads and jump-table targets look like this)",
+                                 pc - gap_start),
+                 "");
       }
     }
   }
