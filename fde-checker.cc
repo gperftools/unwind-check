@@ -590,10 +590,8 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     std::vector<JoinConflict> conflicts;
     bool changed = Join(state, &it->second, &conflicts);
     if (!conflicts.empty()) {
-      auto& list = join_conflicts[pc];
-      for (auto& c : conflicts) {
-        list.push_back(std::move(c));
-      }
+      std::vector<JoinConflict>& list = join_conflicts[pc];
+      list.insert(std::end(list), conflicts.begin(), conflicts.end());
     }
     if (changed) {
       propagate_changed++;
