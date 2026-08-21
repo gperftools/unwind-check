@@ -55,13 +55,13 @@ class InsnSemantics {
   // DWARF register number for an x86 register, or -1 if it is not one of
   // the 16 GPRs. Sub-registers map to their 64-bit parent, which is what
   // we want for clobbering: writing %eax makes %rax untracked too.
-  static int DWARFRegOf(unsigned reg);
+  static int DWARFRegOf(ZydisRegister reg);
 
   // True only for the full 64-bit spelling of one of the 16 GPRs. Reading
   // %eax does not yield the value we are tracking in %rax, so only these
   // count as reads -- and RIP/RFLAGS/the MMX registers are deliberately
   // excluded even though they too are 64 bits wide (see the definition).
-  static bool IsFull64(unsigned reg);
+  static bool IsFull64(ZydisRegister reg);
 
  private:
   void ClobberWrites(const Instruction& insn, AbsState* state) const;

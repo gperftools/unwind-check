@@ -23,7 +23,7 @@ constexpr ZydisRegister kDwarfGprs[kNumGPRs] = {
 constexpr int kCallerSaved[] = {0, 1, 2, 4, 5, 8, 9, 10, 11};
 
 // The value a register operand reads, as far as we track it.
-AbsVal ReadReg(const AbsState& state, unsigned reg) {
+AbsVal ReadReg(const AbsState& state, ZydisRegister reg) {
   if (!InsnSemantics::IsFull64(reg)) {
     return AbsVal::Top();
   }
@@ -99,34 +99,48 @@ bool WritesEflags(const Instruction& insn) {
   return flags->modified != 0 || flags->set_0 != 0 || flags->set_1 != 0 || flags->undefined != 0;
 }
 
-}  // namespace
+struct RegInfoTable {
+  int8_t dwarf_reg[ZYDIS_REGISTER_MAX_VALUE + 1];
+  bool is_full_64[ZYDIS_REGISTER_MAX_VALUE + 1];
 
-int InsnSemantics::DWARFRegOf(unsigned reg) {
-  if (reg == ZYDIS_REGISTER_NONE) {
-    return -1;
-  }
-  ZydisRegister parent = ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, static_cast<ZydisRegister>(reg));
-  for (int i = 0; i < kNumGPRs; i++) {
-    if (kDwarfGprs[i] == parent) {
-      return i;
+  RegInfoTable() {
+    for (int r = 0; r <= ZYDIS_REGISTER_MAX_VALUE; ++r) {
+      dwarf_reg[r] = -1;
+      is_full_64[r] = false;
+      auto zreg = static_cast<ZydisRegister>(r);
+      ZydisRegister parent = ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, zreg);
+      for (int i = 0; i < kNumGPRs; ++i) {
+        if (kDwarfGprs[i] == parent) {
+          dwarf_reg[r] = static_cast<int8_t>(i);
+          if (parent == zreg) {
+            is_full_64[r] = true;
+          }
+          break;
+        }
+      }
     }
   }
-  return -1;
+};
+
+const RegInfoTable& GetRegInfoTable() {
+  static const RegInfoTable table;
+  return table;
 }
 
-bool InsnSemantics::IsFull64(unsigned reg) {
-  // Width alone is not a safe proxy for "is the 64-bit GPR spelling": RIP,
-  // RFLAGS and the MMX registers are all width-64 too, but none of them
-  // are one of the 16 DWARF GPRs DWARFRegOf maps -- and callers index
-  // AbsState's gpr[] array with DWARFRegOf's result right after this
-  // check passes, so getting this wrong is an out-of-bounds read, not
-  // just a precision loss.
-  int d = DWARFRegOf(reg);
-  if (d < 0) {
+}  // namespace
+
+int InsnSemantics::DWARFRegOf(ZydisRegister reg) {
+  if (reg < 0 || reg > ZYDIS_REGISTER_MAX_VALUE) {
+    return -1;
+  }
+  return GetRegInfoTable().dwarf_reg[reg];
+}
+
+bool InsnSemantics::IsFull64(ZydisRegister reg) {
+  if (reg < 0 || reg > ZYDIS_REGISTER_MAX_VALUE) {
     return false;
   }
-  return ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, static_cast<ZydisRegister>(reg)) ==
-         static_cast<ZydisRegister>(reg);
+  return GetRegInfoTable().is_full_64[reg];
 }
 
 void InsnSemantics::ClobberWrites(const Instruction& insn, AbsState* state) const {

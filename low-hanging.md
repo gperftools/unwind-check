@@ -36,9 +36,9 @@ If the selected item is too confusing/impossible/wrong. Mark it as
   magic and knows exact argument type. Like Go. So drop those 'll'-s
   and explicit casts all over the code when StrFormat-ting.
 
-* DWARFRegOf should not be linear scan
+* (DONE) DWARFRegOf should not be linear scan
 
-* various reg args, e.g. ReadRead, DWARFRegOf should perhaps be of
+* (DONE) various reg args, e.g. ReadRead, DWARFRegOf should perhaps be of
   relevant zydis type: ZydisRegister. It is nice dense type btw with
   ZYDIS_REGISTER_MAX_VALUE available
 
