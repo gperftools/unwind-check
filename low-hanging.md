@@ -46,7 +46,7 @@ If the selected item is too confusing/impossible/wrong. Mark it as
 
 * (DONE) create ZydisFormatter stuff once (new into static variable)
 
-* add assert()-s for stuff like accessing ConstValue on the AbsVal
+* (DONE) add assert()-s for stuff like accessing ConstValue on the AbsVal
   that isn't kConst. This should not "pollute" any code other then those
   accessor methods. So everything is still relatively readable.
 

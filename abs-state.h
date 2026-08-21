@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 
+#include <cassert>
 #include <optional>
 #include <string>
 #include <vector>
@@ -114,6 +115,7 @@ struct AbsVal {
     return kind == Kind::kConst;
   }
   int64_t ConstValue() const {
+    assert(IsConst());
     return delta;
   }
   bool IsTableEntry() const {
@@ -124,15 +126,18 @@ struct AbsVal {
   }
   // Valid for kTableEntry and kJumpTarget.
   uint64_t TableAddr() const {
+    assert(IsTableEntry() || IsJumpTarget());
     return static_cast<uint64_t>(delta);
   }
   int IndexReg() const {
+    assert(IsTableEntry() || IsJumpTarget());
     return reg;
   }
   // Valid for kTableEntry only: the undisplaced constant `table` was
   // derived from, which the `add %B,%T` transfer rule must match against
   // `%B` before it will resolve to a kJumpTarget.
   uint64_t TableBaseConst() const {
+    assert(IsTableEntry());
     return aux;
   }
   // The upper bound established for this value, if any -- see `bound`
