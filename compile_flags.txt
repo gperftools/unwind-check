@@ -7,3 +7,4 @@ c++
 -Ibazel-unwind-analysis/external/googletest+/googletest/include
 -Ibazel-unwind-analysis/external/googletest+/googlemock/include
 -Ibazel-unwind-analysis/external/abseil-cpp+/
+-Ibazel-unwind-analysis/external/nlohmann_json+/include
