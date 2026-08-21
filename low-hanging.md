@@ -57,7 +57,7 @@ If the selected item is too confusing/impossible/wrong. Mark it as
 * (DONE) Transfer() Handling of ADD/SUB addition/subtraction should be
   unsigned (compilers like to screw up the signed overflows)
 
-* around syscall and related instructions. Same for e.g. int $80 or
+* (DONE) around syscall and related instructions. Same for e.g. int $80 or
   whatevs. Make sure we conservately clobber registers. Over-clober is
   better than under-clobber, but e.g. important regs like RSP probably
   worth doing right.

@@ -348,5 +348,38 @@ TEST_F(SemanticsTest, StoresThroughAnUntrackedPointerDoNotWipeTheFrame) {
   EXPECT_TRUE(state_.Slot(-16).IsOrigReg(kDWARFRbx));
 }
 
+TEST_F(SemanticsTest, SyscallClobbersCallerSavedRegistersAndRedZone) {
+  state_.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));
+  state_.SetReg(kDWARFRax, AbsVal::Const(1));
+  state_.SetReg(kDWARFRbx, AbsVal::Const(2));
+  state_.SetReg(kDWARFRbp, AbsVal::CFARel(-8));
+
+  TransferOutcome out = Run({0x0f, 0x05});  // syscall
+  EXPECT_FALSE(out.is_call);
+  EXPECT_TRUE(out.falls_through);
+  EXPECT_TRUE(state_.reg(kDWARFRsp).IsCFARel(-8)) << "rsp is preserved across syscall";
+  EXPECT_TRUE(state_.reg(kDWARFRbp).IsCFARel(-8)) << "rbp is callee-saved across syscall";
+  EXPECT_TRUE(state_.reg(kDWARFRbx).IsConst()) << "rbx is callee-saved across syscall";
+  EXPECT_EQ(state_.reg(kDWARFRbx).ConstValue(), 2);
+  EXPECT_TRUE(state_.reg(kDWARFRax).is_top()) << "rax is caller-saved / clobbered by syscall";
+  EXPECT_TRUE(state_.reg(kDWARFRcx).is_top()) << "rcx is clobbered by syscall";
+  EXPECT_TRUE(state_.reg(kDWARFRdi).is_top()) << "rdi is caller-saved / clobbered by syscall";
+  EXPECT_TRUE(state_.Slot(-16).is_top()) << "red zone slots do not survive syscall";
+}
+
+TEST_F(SemanticsTest, Int80ClobbersCallerSavedRegistersAndRedZone) {
+  state_.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));
+  state_.SetReg(kDWARFRax, AbsVal::Const(1));
+  state_.SetReg(kDWARFRbx, AbsVal::Const(2));
+
+  TransferOutcome out = Run({0xcd, 0x80});  // int $0x80
+  EXPECT_FALSE(out.is_call);
+  EXPECT_TRUE(out.falls_through);
+  EXPECT_TRUE(state_.reg(kDWARFRsp).IsCFARel(-8));
+  EXPECT_TRUE(state_.reg(kDWARFRbx).IsConst());
+  EXPECT_TRUE(state_.reg(kDWARFRax).is_top());
+  EXPECT_TRUE(state_.Slot(-16).is_top());
+}
+
 }  // namespace
 }  // namespace unwind_analysis

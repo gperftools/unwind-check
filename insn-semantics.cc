@@ -260,6 +260,24 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       return out;
     }
 
+    case ZYDIS_MNEMONIC_SYSCALL:
+    case ZYDIS_MNEMONIC_SYSENTER:
+    case ZYDIS_MNEMONIC_INT:
+    case ZYDIS_MNEMONIC_INT1:
+    case ZYDIS_MNEMONIC_INT3:
+    case ZYDIS_MNEMONIC_INTO:
+    case ZYDIS_MNEMONIC_VMCALL:
+    case ZYDIS_MNEMONIC_VMMCALL: {
+      const AbsVal& rsp = state->reg(kDWARFRsp);
+      if (rsp.kind == AbsVal::Kind::kCFARel) {
+        state->DropSlotsBelow(rsp.delta);
+      }
+      for (int r : kCallerSaved) {
+        state->ClobberReg(r);
+      }
+      return out;
+    }
+
     case ZYDIS_MNEMONIC_PUSH:
     case ZYDIS_MNEMONIC_PUSHFQ: {
       // insn.operands[0].size is not the right thing to gate on here: for
