@@ -47,6 +47,19 @@ struct FDEResult {
   size_t instructions_checked = 0;
 };
 
+// One instruction as the forward dataflow walk reached it: its address
+// and the converged abstract state right before it runs -- exactly what
+// the declared CFI row at that pc is checked against. Populated only
+// when a caller passes a non-null `trace_out` to Check(): diagnostics
+// tooling (diagnostics.h) wants this to show the converged state per
+// instruction, but the ordinary whole-binary checking path does not, and
+// snapshotting an AbsState (a btree_map) for every instruction of every
+// FDE in something the size of libc would not be free.
+struct InsnTrace {
+  uint64_t pc = 0;
+  AbsState state;
+};
+
 class FDEChecker {
  public:
   struct Options {
@@ -83,7 +96,11 @@ class FDEChecker {
   // canonical x86-64 entry state, and we say so if it does not. When it
   // does not -- a cold fragment, a PLT stub -- there is nothing to
   // compare the first row against and we take it as given.
-  FDEResult Check(const CFI& cfi, bool at_function_entry) const;
+  // `trace_out`, when non-null, is filled with one entry per instruction
+  // the walk actually reached (same order Pass 2 visits them, i.e.
+  // sorted by pc) -- see InsnTrace. Diagnostics-only; leave it null on
+  // the normal checking path.
+  FDEResult Check(const CFI& cfi, bool at_function_entry, std::vector<InsnTrace>* trace_out = nullptr) const;
 
  private:
   // Reads and validates the switch table at `table_addr` with `entries`

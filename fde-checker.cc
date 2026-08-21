@@ -502,7 +502,7 @@ std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table
   return targets;
 }
 
-FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
+FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry, std::vector<InsnTrace>* trace_out) const {
   FDEResult result;
   result.fde_addr = cfi.fde_addr;
   result.pc_begin = cfi.pc_begin;
@@ -860,6 +860,9 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
 
   for (uint64_t pc : reached_pcs) {
     const AbsState& state = in_states[pc];
+    if (trace_out != nullptr) {
+      trace_out->push_back(InsnTrace{pc, state});
+    }
 
     std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
     Instruction insn;

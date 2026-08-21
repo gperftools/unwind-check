@@ -3,26 +3,33 @@
 #include <stdlib.h>
 
 #include <algorithm>
+#include <memory>
 #include <optional>
 #include <regex>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include <unistd.h>
+
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/flags/usage.h"
 #include "absl/log/globals.h"
 #include "absl/log/initialize.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_format.h"
 #include "cfi-table.h"
+#include "diagnostics.h"
 #include "disasm.h"
 #include "eh-frame-reader.h"
 #include "elf-image.h"
 #include "fde-checker.h"
 #include "report.h"
+#include "rules_cc/cc/runfiles/runfiles.h"
 #include "symbolizer.h"
 
 ABSL_FLAG(bool, show_blessed, false, "List blessed FDEs too, not just the ones needing attention.");
@@ -40,6 +47,12 @@ ABSL_FLAG(bool, report_coverage_gaps, true,
 ABSL_FLAG(bool, dump_cfi, false,
           "Print the decoded CFI row table for each selected FDE instead of checking anything. "
           "Compare against `readelf --debug-dump=frames-interp`.");
+ABSL_FLAG(bool, inspect, false,
+          "Requires --pc. Instead of checking, print objdump's disasm+jump-arrow listing of the FDE covering "
+          "--pc, with our own findings and declared CFI rows interleaved by address. Needs `ruby` and `objdump` "
+          "on PATH.");
+ABSL_FLAG(bool, inspect_deep, false,
+          "With --inspect, also show the dataflow's converged abstract state before each instruction.");
 ABSL_FLAG(std::string, addr2line, "auto",
           "'auto' to use addr2line for source lines when the binary has debug info, 'off' to skip it, "
           "or a path to the tool.");
@@ -200,7 +213,11 @@ void DumpCFI(const CFI& cfi, const Symbolizer& symbolizer) {
   }
 }
 
-int Run(const std::string& path) {
+// `ruby_script_path` is only consulted when --inspect is set; the caller
+// resolves it (or leaves it empty, if --inspect wasn't requested) via
+// the Bazel runfiles library, which needs argv[0] and so has to happen
+// in main() rather than here.
+int Run(const std::string& path, const std::string& ruby_script_path) {
   absl::StatusOr<std::unique_ptr<ELFImage>> maybe_image = ELFImage::Open(path);
   if (!maybe_image.ok()) {
     absl::FPrintF(stderr, "unwind-check: %s\n", maybe_image.status().message());
@@ -300,6 +317,56 @@ int Run(const std::string& path) {
   }
 
   const bool dump_cfi = absl::GetFlag(FLAGS_dump_cfi);
+  const bool inspect = absl::GetFlag(FLAGS_inspect);
+  const bool inspect_deep = absl::GetFlag(FLAGS_inspect_deep);
+
+  if (inspect) {
+    if (!pc_filter.has_value()) {
+      absl::FPrintF(stderr, "unwind-check: --inspect requires --pc\n");
+      return kExitFailure;
+    }
+    const CFI* target = nullptr;
+    for (const CFI* cfi : checkable) {
+      if (cfi->pc_begin <= *pc_filter && *pc_filter < cfi->pc_end) {
+        target = cfi;
+        break;
+      }
+    }
+    if (target == nullptr) {
+      absl::FPrintF(stderr, "unwind-check: no checkable FDE covers 0x%x\n", *pc_filter);
+      return kExitFailure;
+    }
+
+    std::string name = symbolizer.Name(target->pc_begin);
+    absl::PrintF("FDE 0x%x  [0x%x, 0x%x)%s%s%s\n", target->fde_addr, target->pc_begin, target->pc_end,
+                name.empty() ? "" : "  ", name, target->signal_frame ? "  (signal frame)" : "");
+    fflush(stdout);
+
+    const bool color = isatty(STDOUT_FILENO) != 0;
+    absl::StatusOr<FDEResult> inspected =
+        RunInspectPipeline(checker, *target, function_starts.contains(target->pc_begin), inspect_deep, color, path,
+                           ruby_script_path);
+    if (!inspected.ok()) {
+      absl::FPrintF(stderr, "unwind-check: %s\n", inspected.status().message());
+      return kExitFailure;
+    }
+    // Findings not tied to a specific address (a truncation notice, "gave
+    // up after N dataflow steps") never went into the pipeline's
+    // annotations -- print them here, after the listing.
+    for (const Finding& f : inspected->findings) {
+      if (f.pc == 0) {
+        absl::PrintF("  %s\n", f.message);
+      }
+    }
+    Summary s = Summarize({*inspected});
+    if (s.mismatch > 0) {
+      return kExitMismatch;
+    }
+    if (s.review > 0) {
+      return kExitReview;
+    }
+    return kExitBlessed;
+  }
 
   for (const CFI* cfi : checkable) {
     if (pc_filter.has_value() && !(cfi->pc_begin <= *pc_filter && *pc_filter < cfi->pc_end)) {
@@ -327,10 +394,23 @@ int Run(const std::string& path) {
     return kExitBlessed;
   }
 
+  // Keyed by FDEResult::pc_begin, which equals the originating CFI's
+  // pc_begin -- lets the report show a window of real instructions
+  // around each finding instead of just the one it's anchored to.
+  absl::flat_hash_map<uint64_t, const CFI*> cfi_by_pc_begin;
+  cfi_by_pc_begin.reserve(checkable.size());
+  for (const CFI* cfi : checkable) {
+    cfi_by_pc_begin.emplace(cfi->pc_begin, cfi);
+  }
+
   ReportOptions report_options;
   report_options.show_blessed = absl::GetFlag(FLAGS_show_blessed);
   report_options.summary_only = absl::GetFlag(FLAGS_summary_only);
-  PrintReport(results, &symbolizer, report_options);
+  ReportContext report_context;
+  report_context.image = &image;
+  report_context.disasm = disasm;
+  report_context.cfi_by_pc_begin = &cfi_by_pc_begin;
+  PrintReport(results, &symbolizer, report_options, &report_context);
 
   if (!enumerate_error.empty()) {
     absl::FPrintF(stderr, "unwind-check: .eh_frame walk stopped early: %s\n", enumerate_error);
@@ -361,5 +441,21 @@ int main(int argc, char** argv) {
     absl::FPrintF(stderr, "unwind-check: expected exactly one binary to check\n");
     return 3;
   }
-  return unwind_analysis::Run(positional[1]);
+
+  std::string ruby_script_path;
+  if (absl::GetFlag(FLAGS_inspect)) {
+    std::string error;
+    std::unique_ptr<rules_cc::cc::runfiles::Runfiles> runfiles(
+        rules_cc::cc::runfiles::Runfiles::Create(argv[0], &error));
+    if (runfiles == nullptr) {
+      absl::FPrintF(stderr, "unwind-check: could not locate runfiles: %s\n", error);
+      return 3;
+    }
+    ruby_script_path = runfiles->Rlocation("_main/inspect.rb");
+    if (ruby_script_path.empty() || access(ruby_script_path.c_str(), R_OK) != 0) {
+      absl::FPrintF(stderr, "unwind-check: could not locate inspect.rb in runfiles\n");
+      return 3;
+    }
+  }
+  return unwind_analysis::Run(positional[1], ruby_script_path);
 }

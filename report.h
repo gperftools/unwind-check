@@ -3,9 +3,14 @@
 #define REPORT_H_
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "cfi-table.h"
+#include "disasm.h"
+#include "elf-image.h"
 #include "fde-checker.h"
 #include "symbolizer.h"
 
@@ -14,6 +19,17 @@ namespace unwind_analysis {
 struct ReportOptions {
   bool show_blessed = false;  // also list blessed FDEs
   bool summary_only = false;  // just the histogram
+};
+
+// Optional: when given, each finding gets a few real instructions of
+// context around it (disasm text paired with the declared CFI row)
+// instead of the bare single "at: <insn>" line. `cfi_by_pc_begin` is
+// keyed by FDEResult::pc_begin (== CFI::pc_begin). Leaving this out
+// entirely -- the default -- costs nothing and keeps the old behavior.
+struct ReportContext {
+  const ELFImage* image = nullptr;
+  Disassembler* disasm = nullptr;
+  const absl::flat_hash_map<uint64_t, const CFI*>* cfi_by_pc_begin = nullptr;
 };
 
 struct Summary {
@@ -30,7 +46,8 @@ Summary Summarize(const std::vector<FDEResult>& results);
 
 // Prints the per-FDE report and the trailing histogram to stdout.
 // `symbolizer` is consulted for names and, when available, source lines.
-void PrintReport(const std::vector<FDEResult>& results, Symbolizer* symbolizer, const ReportOptions& options);
+void PrintReport(const std::vector<FDEResult>& results, Symbolizer* symbolizer, const ReportOptions& options,
+                 const ReportContext* context = nullptr);
 
 }  // namespace unwind_analysis
 

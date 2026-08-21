@@ -12,25 +12,13 @@
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/strip.h"
+#include "subprocess.h"
 
 namespace unwind_analysis {
 
 namespace {
 
 constexpr size_t kBatchSize = 4096;
-
-std::string ShellQuote(const std::string& s) {
-  std::string out = "'";
-  for (char c : s) {
-    if (c == '\'') {
-      out += "'\\''";
-    } else {
-      out += c;
-    }
-  }
-  out += "'";
-  return out;
-}
 
 bool ToolExists(const std::string& tool) {
   if (tool.find('/') != std::string::npos) {
@@ -139,18 +127,21 @@ void Symbolizer::Prepare(const std::vector<uint64_t>& addresses) {
     // nothing but .dynsym is the only source of names at all. -i is
     // deliberately left off: inlined frames would make the number of
     // output lines per address unpredictable and the pairing ambiguous.
-    std::string cmd = absl::StrFormat("%s -f -C -e %s", ShellQuote(tool_path_), ShellQuote(image_.path()));
+    std::vector<std::string> argv = {tool_path_, "-f", "-C", "-e", image_.path()};
     for (size_t i = start; i < end; i++) {
-      absl::StrAppendFormat(&cmd, " 0x%x", pending[i]);
+      argv.push_back(absl::StrFormat("0x%x", pending[i]));
     }
-    cmd += " 2>/dev/null";
 
-    FILE* pipe = popen(cmd.c_str(), "r");
-    if (pipe == nullptr) {
+    SpawnOptions spawn_options;
+    spawn_options.pipe_stdout = true;
+    spawn_options.discard_stderr = true;
+    absl::StatusOr<Subprocess> proc = SpawnProcess(argv, spawn_options);
+    if (!proc.ok()) {
       disabled_reason_ = "could not run addr2line";
       use_addr2line_ = false;
       return;
     }
+    FILE* pipe = fdopen(proc->stdout_fd, "r");
     // Exactly two lines per address, in order: function name, then
     // file:line. Either can be "??" when it is not known.
     char line[4096];
@@ -183,7 +174,8 @@ void Symbolizer::Prepare(const std::vector<uint64_t>& addresses) {
         }
       }
     }
-    pclose(pipe);
+    fclose(pipe);  // also closes proc->stdout_fd
+    WaitForProcess(proc->pid);
   }
 }
 

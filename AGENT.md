@@ -81,7 +81,24 @@ Useful flags: `--verbose` (list blessed FDEs too), `--summary_only`,
 `--function=<regex>`, `--pc=<hex>`, `--dump_cfi` (print the decoded row table
 instead of checking; compare against `readelf --debug-dump=frames-interp`),
 `--addr2line=auto|off|<path>`, `--check_unmentioned_callee_saved`,
-`--report_coverage_gaps`.
+`--report_coverage_gaps`, `--inspect` (requires `--pc`; prints a nice
+disasm+CFI listing of that FDE instead of the summary report -- see below),
+`--inspect_deep` (with `--inspect`, also shows the dataflow's converged
+abstract state before each instruction).
+
+`--inspect` doesn't draw its own disassembly or jump arrows: `diagnostics.cc`
+serializes the declared CFI rows, findings, and (deep mode) converged state as
+JSON and pipes it into `inspect.rb`, which runs `objdump -d
+--visualize-jumps` over the same address range and splices our annotations
+into objdump's output by address, right before the line each annotation
+describes. `objdump` already draws jump-arrow gutters and colorizes
+disassembly better than reimplementing that was worth it. `inspect.rb` is a
+Bazel `data` dependency of `unwind-check`, located at runtime via the
+`@rules_cc//cc/runfiles` library; both it and `subprocess.{h,cc}` (a
+`posix_spawn`-based helper used here and by `symbolizer.cc`'s `addr2line`
+invocation, argv-array only, no shell) fail loudly rather than degrade
+silently -- a missing `ruby`/`objdump`, or objdump output the script doesn't
+recognize, is a hard error naming what went wrong.
 
 ## 3. Code map
 
@@ -97,7 +114,9 @@ instead of checking; compare against `readelf --debug-dump=frames-interp`),
 | `lsda-reader.{h,cc}` | parses `.gcc_except_table`'s call-site table for exception landing pads (§4.5) |
 | `fde-checker.{h,cc}` | CFG walk, worklist dataflow, and the comparison (§4.5) |
 | `symbolizer.{h,cc}` | symbol names and source lines (§4.7) |
+| `subprocess.{h,cc}` | `posix_spawn`-based child-process helper, no shell involved |
 | `report.{h,cc}`, `unwind-check.cc` | flags, structural checks, output |
+| `diagnostics.{h,cc}`, `inspect.rb` | `--inspect`: gathers CFI rows/findings/state as JSON, pipes into `inspect.rb`, which interleaves them into `objdump --visualize-jumps`'s output |
 | `testdata/fixtures.S` | hand-written CFI whose right answer is fixed by the fixture |
 | `robustness-sweep.sh` | the non-hermetic counterpart to `bazel test`: does it survive real binaries |
 
