@@ -44,7 +44,7 @@ If the selected item is too confusing/impossible/wrong. Mark it as
 
 * (DONE) AbsState slots should be btree not std::map
 
-* create ZydisFormatter stuff once (new into static variable)
+* (DONE) create ZydisFormatter stuff once (new into static variable)
 
 * add assert()-s for stuff like accessing ConstValue on the AbsVal
   that isn't kConst. This should not "pollute" any code other then those

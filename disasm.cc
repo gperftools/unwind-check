@@ -28,18 +28,27 @@ bool Disassembler::Decode(const uint8_t* code, size_t size, uint64_t address, In
   return true;
 }
 
+static const ZydisFormatter* GetFormatter() {
+  static const ZydisFormatter* formatter = []() {
+    auto* f = new ZydisFormatter();
+    if (!ZYAN_SUCCESS(ZydisFormatterInit(f, ZYDIS_FORMATTER_STYLE_ATT))) {
+      return static_cast<ZydisFormatter*>(nullptr);
+    }
+    ZydisFormatterSetProperty(f, ZYDIS_FORMATTER_PROP_FORCE_RELATIVE_RIPREL, ZYAN_TRUE);
+    return f;
+  }();
+  return formatter;
+}
+
 absl::StatusOr<std::string> Disassembler::Text(const Instruction& insn) {
-  ZydisFormatter formatter;
-  if (!ZYAN_SUCCESS(ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_ATT))) {
+  const ZydisFormatter* formatter = GetFormatter();
+  if (formatter == nullptr) {
     return absl::InternalError("ZydisFormatterInit failed");
   }
-  ZydisFormatterSetProperty(&formatter,
-                            ZYDIS_FORMATTER_PROP_FORCE_RELATIVE_RIPREL,
-                            ZYAN_TRUE);
   char buffer[256];
-  if (!ZYAN_SUCCESS(ZydisFormatterFormatInstruction(&formatter, &insn.insn, insn.operands,
-                                                     insn.insn.operand_count_visible, buffer, sizeof(buffer),
-                                                     insn.address, nullptr))) {
+  if (!ZYAN_SUCCESS(ZydisFormatterFormatInstruction(formatter, &insn.insn, insn.operands,
+                                                    insn.insn.operand_count_visible, buffer, sizeof(buffer),
+                                                    insn.address, nullptr))) {
     return absl::InternalError(absl::StrFormat("cannot format instruction at 0x%x", insn.address));
   }
   return std::string(buffer);
