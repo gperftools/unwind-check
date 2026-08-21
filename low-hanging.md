@@ -14,7 +14,7 @@ If the selected item is too confusing/impossible/wrong. Mark it as
 * (DONE) Disassembler::Text should return absl::StatusOr (zydis formatter may fail
   for whatever reason).
 
-* Disassembler::DecodeOne should probably not use ptr to itself and
+* (DONE) Disassembler::DecodeOne should probably not use ptr to itself and
   risk clobbering instr_ after unrelated decodes (e.g. in
   ResolveJumpTable etc). Have it decode into &out parameter and
   returns true/false. Rename it as well into Decode to avoid any

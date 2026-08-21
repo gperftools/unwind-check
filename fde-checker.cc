@@ -498,8 +498,8 @@ std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table
       return std::nullopt;
     }
     std::span<const uint8_t> tbytes = image_.BytesAt(target, 16);
-    const Instruction* tinsn = tbytes.empty() ? nullptr : disasm_->DecodeOne(tbytes.data(), tbytes.size(), target);
-    if (tinsn == nullptr) {
+    Instruction tinsn;
+    if (tbytes.empty() || !disasm_->Decode(tbytes.data(), tbytes.size(), target, &tinsn)) {
       VLOG(1) << absl::StrFormat(
           "ResolveJumpTable(0x%llx): entry %llu -> 0x%llx does not decode as an instruction, rejecting whole table",
           (unsigned long long)table_addr, (unsigned long long)i, (unsigned long long)target);
@@ -729,19 +729,19 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       AbsState state = in_states[pc];
 
       std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
-      const Instruction* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
-      if (insn == nullptr || pc + insn->size > cfi.pc_end) {
+      Instruction insn;
+      if (bytes.empty() || !disasm_->Decode(bytes.data(), bytes.size(), pc, &insn) || pc + insn.size > cfi.pc_end) {
         continue;
       }
-      size_t insn_size = insn->size;
+      size_t insn_size = insn.size;
       insn_sizes[pc] = insn_size;
-      bool is_ja_or_jae = insn->id == ZYDIS_MNEMONIC_JNBE || insn->id == ZYDIS_MNEMONIC_JNB;
-      bool is_jae = insn->id == ZYDIS_MNEMONIC_JNB;
+      bool is_ja_or_jae = insn.id == ZYDIS_MNEMONIC_JNBE || insn.id == ZYDIS_MNEMONIC_JNB;
+      bool is_jae = insn.id == ZYDIS_MNEMONIC_JNB;
 
       const CFIRow* row = cfi.RowAt(pc);
       AbsVal before[kNumGPRs];
       std::copy(std::begin(state.gpr), std::end(state.gpr), std::begin(before));
-      TransferOutcome outcome = semantics.Transfer(*insn, &state);
+      TransferOutcome outcome = semantics.Transfer(insn, &state);
 
       if (outcome.is_call) {
         std::optional<uint64_t> lp = landing_pad_for_call(pc);
@@ -873,14 +873,14 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     const AbsState& state = in_states[pc];
 
     std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
-    const Instruction* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
-    if (insn == nullptr) {
+    Instruction insn;
+    if (bytes.empty() || !disasm_->Decode(bytes.data(), bytes.size(), pc, &insn)) {
       sink.Add(Finding::Severity::kReview, pc, "cannot decode the instruction at this address", "");
       continue;
     }
     std::string insn_text =
-        Disassembler::Text(*insn).value_or(absl::StrFormat("<cannot format instruction at 0x%llx>", (unsigned long long)pc));
-    if (pc + insn->size > cfi.pc_end) {
+        Disassembler::Text(insn).value_or(absl::StrFormat("<cannot format instruction at 0x%llx>", (unsigned long long)pc));
+    if (pc + insn.size > cfi.pc_end) {
       sink.Add(Finding::Severity::kReview, pc, "instruction runs past the end of the FDE's PC range",
                insn_text);
       continue;
@@ -917,7 +917,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     }
 
     AbsState state_copy = state;
-    TransferOutcome outcome = semantics.Transfer(*insn, &state_copy);
+    TransferOutcome outcome = semantics.Transfer(insn, &state_copy);
     if (outcome.review_reason != nullptr) {
       sink.Add(Finding::Severity::kReview, pc, outcome.review_reason, insn_text);
     }
@@ -977,16 +977,16 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
         bool all_padding = true;
         while (pc < cfi.pc_end && insn_sizes.find(pc) == insn_sizes.end()) {
           std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi.pc_end - pc));
-          const Instruction* insn = bytes.empty() ? nullptr : disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
-          if (insn == nullptr) {
+          Instruction insn;
+          if (bytes.empty() || !disasm_->Decode(bytes.data(), bytes.size(), pc, &insn)) {
             all_padding = false;
             pc++;
             continue;
           }
-          if (insn->id != ZYDIS_MNEMONIC_NOP && insn->id != ZYDIS_MNEMONIC_INT3) {
+          if (insn.id != ZYDIS_MNEMONIC_NOP && insn.id != ZYDIS_MNEMONIC_INT3) {
             all_padding = false;
           }
-          pc += insn->size;
+          pc += insn.size;
         }
         if (!all_padding) {
           sink.Add(Finding::Severity::kReview, gap_start,

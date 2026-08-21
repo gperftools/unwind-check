@@ -96,9 +96,10 @@ class FixturesTest : public testing::Test {
     uint64_t pc = r.pc_begin;
     for (int i = 0; i < index; i++) {
       std::span<const uint8_t> bytes = image_->BytesAt(pc, 16);
-      const Instruction* insn = disasm_->DecodeOne(bytes.data(), bytes.size(), pc);
-      EXPECT_NE(insn, nullptr);
-      pc += insn->size;
+      Instruction insn;
+      EXPECT_FALSE(bytes.empty());
+      EXPECT_TRUE(disasm_->Decode(bytes.data(), bytes.size(), pc, &insn));
+      pc += insn.size;
     }
     return pc;
   }

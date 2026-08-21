@@ -14,18 +14,18 @@ absl::StatusOr<std::unique_ptr<Disassembler>> Disassembler::Create() {
   return d;
 }
 
-const Instruction* Disassembler::DecodeOne(const uint8_t* code, size_t size, uint64_t address) {
-  if (size == 0) {
-    return nullptr;
+bool Disassembler::Decode(const uint8_t* code, size_t size, uint64_t address, Instruction* out) {
+  if (size == 0 || out == nullptr) {
+    return false;
   }
-  if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder_, code, size, &insn_.insn, insn_.operands))) {
-    return nullptr;
+  if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder_, code, size, &out->insn, out->operands))) {
+    return false;
   }
-  insn_.address = address;
-  insn_.size = insn_.insn.length;
-  insn_.id = insn_.insn.mnemonic;
-  insn_.op_count = insn_.insn.operand_count_visible;
-  return &insn_;
+  out->address = address;
+  out->size = out->insn.length;
+  out->id = out->insn.mnemonic;
+  out->op_count = out->insn.operand_count_visible;
+  return true;
 }
 
 absl::StatusOr<std::string> Disassembler::Text(const Instruction& insn) {

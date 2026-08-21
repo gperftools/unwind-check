@@ -35,9 +35,8 @@ class Disassembler {
   static absl::StatusOr<std::unique_ptr<Disassembler>> Create();
 
   // Decodes one instruction at address, out of at most size bytes of
-  // code. Returns nullptr when Zydis cannot decode it. The result is
-  // owned by this object and is valid only until the next call.
-  const Instruction* DecodeOne(const uint8_t* code, size_t size, uint64_t address);
+  // code into `out`. Returns true on success, or false when Zydis cannot decode it.
+  bool Decode(const uint8_t* code, size_t size, uint64_t address, Instruction* out);
 
   // "add $0x8,%rsp", for diagnostics -- always AT&T syntax. Unlike
   // Capstone, where explicitly selecting AT&T syntax is known to also
@@ -51,7 +50,6 @@ class Disassembler {
   Disassembler() = default;
 
   ZydisDecoder decoder_{};
-  Instruction insn_;
 };
 
 }  // namespace unwind_analysis

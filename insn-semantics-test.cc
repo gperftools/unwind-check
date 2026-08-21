@@ -24,15 +24,16 @@ class SemanticsTest : public testing::Test {
   // Runs a literal instruction encoding through the transfer function.
   TransferOutcome Run(std::initializer_list<uint8_t> bytes) {
     std::vector<uint8_t> code{bytes};
-    const Instruction* insn = disasm_->DecodeOne(code.data(), code.size(), kBase);
-    EXPECT_NE(insn, nullptr) << "Zydis could not decode the test encoding";
-    if (insn == nullptr) {
+    Instruction insn;
+    bool ok = disasm_->Decode(code.data(), code.size(), kBase, &insn);
+    EXPECT_TRUE(ok) << "Zydis could not decode the test encoding";
+    if (!ok) {
       return TransferOutcome{};
     }
-    EXPECT_EQ(insn->size, code.size())
-        << "test encoding is not exactly one instruction: " << Disassembler::Text(*insn).value_or("<cannot format>");
+    EXPECT_EQ(insn.size, code.size())
+        << "test encoding is not exactly one instruction: " << Disassembler::Text(insn).value_or("<cannot format>");
     InsnSemantics semantics;
-    return semantics.Transfer(*insn, &state_);
+    return semantics.Transfer(insn, &state_);
   }
 
   std::unique_ptr<Disassembler> disasm_;
