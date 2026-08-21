@@ -34,11 +34,17 @@ struct ReportContext {
 
 struct Summary {
   size_t blessed = 0;
+  // REVIEW-LIGHT: a REVIEW whose sole unresolved indirect jump was
+  // recovered by guessing (see FDEChecker::CheckWithGuessing). Counted
+  // separately from `review` -- it still exits non-zero, same as any
+  // other review, but reads as "mostly understood" rather than "beyond
+  // this version's heuristics".
+  size_t review_light = 0;
   size_t review = 0;
   size_t mismatch = 0;
 
   size_t total() const {
-    return blessed + review + mismatch;
+    return blessed + review_light + review + mismatch;
   }
 };
 

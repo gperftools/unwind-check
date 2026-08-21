@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <utility>
@@ -17,9 +18,10 @@
 namespace unwind_analysis {
 
 enum class Verdict {
-  kBlessed,   // every instruction's declared CFI matched what the code does
-  kReview,    // nothing looked wrong, but something was beyond our heuristics
-  kMismatch,  // the CFI contradicts the code
+  kBlessed,      // every instruction's declared CFI matched what the code does
+  kReviewLight,  // a REVIEW that guessing fully recovered from -- see below
+  kReview,       // nothing looked wrong, but something was beyond our heuristics
+  kMismatch,     // the CFI contradicts the code
 };
 
 const char* VerdictName(Verdict v);
@@ -37,6 +39,16 @@ struct Finding {
   int repeats = 0;
 };
 
+// One switch-table dispatch resolved by guessing rather than a
+// compiler-declared bound (see FDEChecker::CheckWithGuessing). Purely
+// diagnostic: it never feeds back into a verdict, only into what a human
+// (or --inspect) is shown about why a REVIEW-LIGHT FDE reads as it does.
+struct GuessedJumpTable {
+  uint64_t pc = 0;          // the jmp instruction's address
+  uint64_t table_addr = 0;
+  std::vector<uint64_t> targets;  // resolved absolute addresses, in index order
+};
+
 struct FDEResult {
   uint64_t fde_addr = 0;
   uint64_t pc_begin = 0;
@@ -45,6 +57,19 @@ struct FDEResult {
   Verdict verdict = Verdict::kBlessed;
   std::vector<Finding> findings;
   size_t instructions_checked = 0;
+
+  // Set by a normal (guessing-disabled) Check() when it found exactly one
+  // indirect jump whose table shape (base, index register, entry width)
+  // fully resolved but whose bound did not -- the sole precondition
+  // CheckWithGuessing requires before it will even attempt a guessing
+  // retry. Left unset when no such jump exists, or when more than one
+  // does: guessing is only attempted when it is the FDE's one point of
+  // uncertainty of this specific kind, not a general "try harder" knob.
+  std::optional<uint64_t> guessable_jump_pc;
+
+  // Populated only by a guessing-enabled Check(): every jump table it
+  // resolved by probing instead of a declared bound.
+  std::vector<GuessedJumpTable> guessed_jump_tables;
 };
 
 // One instruction as the forward dataflow walk reached it: its address
@@ -100,13 +125,67 @@ class FDEChecker {
   // the walk actually reached (same order Pass 2 visits them, i.e.
   // sorted by pc) -- see InsnTrace. Diagnostics-only; leave it null on
   // the normal checking path.
-  FDEResult Check(const CFI& cfi, bool at_function_entry, std::vector<InsnTrace>* trace_out = nullptr) const;
+  //
+  // `guessing_enabled` switches on the one heuristic recovery this
+  // checker does: when an indirect jump's table shape is fully resolved
+  // (base, index register, entry width) but no compiler-declared bound
+  // was ever captured for it, probe the table directly instead of
+  // reporting it unresolved -- see CheckWithGuessing, which is what
+  // should actually be called from a top level driver; this parameter
+  // exists so CheckWithGuessing can ask for a second, independent run of
+  // the same algorithm rather than duplicating it.
+  FDEResult Check(const CFI& cfi, bool at_function_entry, std::vector<InsnTrace>* trace_out = nullptr,
+                   bool guessing_enabled = false) const;
+
+  // Runs Check() normally. If the result is a REVIEW whose sole point of
+  // uncertainty was one table-shaped-but-unbounded indirect jump
+  // (FDEResult::guessable_jump_pc), retries once with guessing enabled.
+  // The retry is trusted -- and the returned result downgraded from
+  // REVIEW to REVIEW-LIGHT, with the retry's guessed_jump_tables attached
+  // for diagnostics -- only when it comes back fully BLESSED. Any other
+  // outcome (no guessable jump, or a retry that still finds something)
+  // returns the original, untouched result: guessing is only ever worth
+  // reporting when it recovers a clean answer, never as a weaker partial
+  // one.
+  FDEResult CheckWithGuessing(const CFI& cfi, bool at_function_entry, std::vector<InsnTrace>* trace_out = nullptr) const;
 
  private:
   // Reads and validates the switch table at `table_addr` with `entries`
   // int32 entries, all-or-nothing: any entry failing any check discards
   // the whole table. Returns the resolved absolute targets, or nullopt.
   std::optional<std::vector<uint64_t>> ResolveJumpTable(uint64_t table_addr, uint64_t entries) const;
+  // One switch-table entry's decode-and-validate: same acceptance rule
+  // ResolveJumpTable applies per entry (lands inside some FDE, decodes as
+  // an instruction), factored out so guessing mode's open-ended probe
+  // doesn't duplicate it. No logging of its own -- callers own that,
+  // since ResolveJumpTable and ProbeJumpTable want different messages.
+  std::optional<uint64_t> ResolveTableEntry(uint64_t table_addr, uint64_t index) const;
+  // Guessing mode's recovery for a table-shaped indirect jump with no
+  // captured bound: index 0 is always safe to try (a known-good table
+  // base's first entry), and each subsequent index is trusted only as
+  // long as it keeps passing two tests -- ResolveTableEntry's structural
+  // one (decodes as an instruction, lands inside some FDE) and the
+  // caller-supplied `target_is_compatible`, which checks the actual
+  // declared CFI row at that target against the state the jump carries,
+  // exactly the same row-check an ordinary resolved dispatch gets (see
+  // RowMatchesCleanly and the call sites in Check()) -- so the guess's
+  // boundary is decided by real compatibility, not merely "this address
+  // decodes to something". Stops at the first index that fails either
+  // test, or at kMaxJumpTableEntries, whichever comes first. This is
+  // still a guess, not a proof -- a coincidentally CFI-compatible
+  // neighbor cannot be ruled out this way either, which is exactly why a
+  // successful guess downgrades a verdict to REVIEW-LIGHT rather than
+  // BLESSED. Returns nullopt only when even index 0 fails.
+  std::optional<std::vector<uint64_t>> ProbeJumpTable(
+      uint64_t table_addr, const std::function<bool(uint64_t target)>& target_is_compatible) const;
+  // Builds the predicate ProbeJumpTable uses above: local targets (inside
+  // `cfi`'s own range) are checked against `cfi`'s declared row at that
+  // address, everything else against whatever FDE (if any) covers it --
+  // the same in-FDE vs. cross-FDE split every other jump-table edge in
+  // this file goes through, minus the finding emission, since the probe
+  // may still end up discarding this candidate.
+  std::function<bool(uint64_t target)> JumpTargetCompatiblePredicate(const CFI& cfi, uint64_t jmp_pc,
+                                                                     const AbsState& state) const;
   bool LandsInsideSomeFDE(uint64_t addr) const;
   // The checkable FDE covering `pc`, or nullptr if none does.
   const CFI* CFIContaining(uint64_t pc) const;

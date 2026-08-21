@@ -28,6 +28,18 @@ struct TransferOutcome {
   uint64_t jump_table_addr = 0;
   uint64_t jump_table_entries = 0;
 
+  // Set when this is `jmp *%reg` and reg resolved to a kJumpTarget (table
+  // base and index register both known) but no bound was ever captured for
+  // the index -- the table shape is right, only the compiler-declared size
+  // is missing. Mutually exclusive with has_jump_table: a kJumpTarget sets
+  // exactly one of the two, depending on whether AbsVal::Bound() had a
+  // value. Guessing mode (FDEChecker::CheckWithGuessing) is what this
+  // exists for; the ordinary checking path only uses it to fall back to
+  // the same "unresolved indirect jump" review has_jump_table's own
+  // resolution failure produces.
+  bool has_unbounded_jump_target = false;
+  uint64_t unbounded_jump_table_addr = 0;
+
   // Set when the instruction does something to the stack we decline to
   // model exactly. The FDE gets flagged for review rather than analysed
   // on a guess.

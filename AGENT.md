@@ -18,11 +18,19 @@ of hand-written assembly with missing or wrong `.cfi_*`.
 
 **The contract, and it governs every judgement call in here:** bless the easy
 cases, and flag anything else for a human with a diagnostic saying why. There
-are exactly three verdicts:
+are three verdicts, plus one deliberately weaker shade of `REVIEW`:
 
 * `BLESSED` — every instruction reached was checked and agreed.
 * `REVIEW` — nothing looked wrong, but something was beyond what this version
   can analyse. Named explicitly, never silent.
+* `REVIEW-LIGHT` — a `REVIEW` whose sole point of uncertainty was one
+  table-shaped indirect jump with no compiler-declared bound, which guessing
+  then fully recovered (§6, "Guessing recovery for unbounded jump tables").
+  Grouped separately in reports and the summary line, still exits non-zero
+  like any other review, and never a synonym for
+  `BLESSED`: it is only ever reached by falling back to the original
+  `REVIEW`'s own findings, downgraded, when a second, independent analysis
+  guessing the table's size came back completely clean.
 * `MISMATCH` — the CFI contradicts the code.
 
 Silence is never an answer. An unhandled construct is a loud `REVIEW`, and code
@@ -529,6 +537,12 @@ exact digits, as durable):
 | `/usr/bin/gcc` | 2448 | 2295 | 152 | 1 |
 | a `-static` hello world | 1090 | 1055 | 32 | 3 |
 
+This table predates guessing recovery (§6): on current binaries some of each
+`review` column now further splits into `review-light`, e.g. `/usr/bin/gcc`
+currently reports 2294 blessed, 3 review-light, 150 review, 1 mismatch —
+still 2448 total, just a few of the old reviews now guessed clean. Shape,
+not exact digits, applies here too.
+
 The Capstone-to-Zydis migration was validated by A/B-diffing both decoders'
 output, on the same machine, over this table's binaries plus the 400-binary
 `robustness-sweep.sh` sample: identical verdict counts everywhere except one
@@ -615,6 +629,62 @@ correctness question called out below rather than left silent.
   a two-phase "settle everything else, then resolve tables" ordering does
   not work, because a table's own targets (and exception landing pads) can
   reveal code relevant to *other*, not-yet-resolved dispatches' bounds.
+* **Guessing recovery for unbounded jump tables** (`fde-checker.{h,cc}`:
+  `FDEChecker::CheckWithGuessing`, `ProbeJumpTable`,
+  `JumpTargetCompatiblePredicate`, `RowMatchesCleanly`). The bullet above
+  covers a table whose `cmp $imm,%r; ja default` guard was found; this one
+  is for an indirect jump whose `kJumpTarget` shape is otherwise fully
+  resolved (table base, index register, entry width) but which never had a
+  bound captured at all — `insn-semantics.cc`'s `Transfer` now marks that
+  case `has_unbounded_jump_target` instead of folding it into the generic
+  "unresolved indirect jump" `REVIEW`.
+
+  A normal `Check()` run still reports that `REVIEW` (findings are what a
+  human reads), but also counts how many such jumps it saw in
+  `FDEResult::guessable_jump_pc` — populated only when there was **exactly
+  one**, on the theory that guessing across several independent
+  uncertainties in one FDE compounds risk for no proportionate gain.
+  `CheckWithGuessing`, the entry point `unwind-check.cc` and `--inspect`
+  actually call, checks that field and, when set, runs a **second,
+  independent `Check()`** with `guessing_enabled = true`. That run reaches
+  the same jump and, instead of giving up, calls `ProbeJumpTable`: index 0
+  is always worth trying (a known-good table base's first entry), and each
+  subsequent index is trusted only as long as it keeps decoding to a real
+  instruction landing inside some FDE *and* passes
+  `JumpTargetCompatiblePredicate` — the actual declared CFI row at that
+  target (this FDE's own row if the target lands inside it, otherwise
+  whichever FDE covers it, exactly the in-FDE/cross-FDE split §4.6 already
+  uses for a real resolved table) checked against the state the jump
+  carries, via `RowMatchesCleanly` — a dry run of the same `RowChecker`
+  logic into a scratch sink, so a candidate that will not check out cleanly
+  never pollutes the real report before the guess decides to stop trusting
+  it. The probe stops at the first index that fails either test, or at
+  `kMaxJumpTableEntries`, whichever comes first, and the recovered entries
+  then get walked and verified exactly like any other resolved dispatch.
+
+  `CheckWithGuessing` accepts this second run's result only when it comes
+  back **fully `BLESSED`** — any remaining finding, guessed-table-related
+  or not, means the original `REVIEW` is returned untouched, findings and
+  all. On success, the original result's verdict becomes `REVIEW-LIGHT`
+  and its findings are kept as-is (so a human still sees exactly why the
+  FDE was flagged), with the retry's `guessed_jump_tables` (the guessed
+  entry count and every resolved target address) attached for the report
+  and `--inspect` to show.
+
+  **This is a guess, not a proof**, and deliberately reported as one:
+  nothing in the acceptance test can distinguish "still inside the real
+  table" from "wandered into a second table placed immediately after it in
+  `.rodata`" — a real risk, since back-to-back switch tables are common and
+  a neighboring table's entries are, by construction, also valid-looking
+  code addresses. Checking each candidate's CFI compatibility during the
+  probe (rather than only structural decode-and-lands-in-FDE, which was
+  this feature's first cut) tightens the boundary a lot in practice — a
+  genuinely different dispatch's targets are checked against *this* jump's
+  live register state, which usually will not match — but it is still a
+  heuristic acceptance test, not a guarantee, which is exactly why a
+  successful guess downgrades to `REVIEW-LIGHT` rather than `BLESSED`
+  outright, and why `REVIEW-LIGHT` keeps the original findings visible
+  rather than presenting as a clean pass.
 * **DWARF expressions.** Recorded, never evaluated. A tiny expression
   interpreter plus the four-state DRAP recogniser from
   `../backtrace-test/doc/amd64-drap-problem.adoc` — including the known gcc<16

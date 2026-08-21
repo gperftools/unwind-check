@@ -123,7 +123,7 @@ absl::StatusOr<FDEResult> RunInspectPipeline(const FDEChecker& checker, const CF
                                              bool deep, bool color, const std::string& binary_path,
                                              const std::string& ruby_script_path) {
   std::vector<InsnTrace> trace;
-  FDEResult result = checker.Check(cfi, at_function_entry, deep ? &trace : nullptr);
+  FDEResult result = checker.CheckWithGuessing(cfi, at_function_entry, deep ? &trace : nullptr);
 
   // Everything inspect.rb needs to know, keyed by address: the declared
   // CFI row at every row boundary, the converged state before every
@@ -151,6 +151,17 @@ absl::StatusOr<FDEResult> RunInspectPipeline(const FDEChecker& checker, const CF
       item["repeats"] = f.repeats;
     }
     annotations.push_back(std::move(item));
+  }
+  // Annotated at the jmp's own pc only -- that's the one address this
+  // annotation can be sure objdump's listing printed; a guessed target
+  // can legitimately land outside [pc_begin, pc_end) via a cross-FDE edge
+  // (§6), which this listing never covers.
+  for (const GuessedJumpTable& gjt : result.guessed_jump_tables) {
+    std::string text = absl::StrFormat("table at 0x%x, %d guessed entries:", gjt.table_addr, gjt.targets.size());
+    for (uint64_t target : gjt.targets) {
+      absl::StrAppendFormat(&text, " 0x%x", target);
+    }
+    annotations.push_back({{"pc", gjt.pc}, {"kind", "guessed"}, {"text", text}});
   }
 
   std::vector<std::string> argv = {

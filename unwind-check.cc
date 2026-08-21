@@ -360,7 +360,7 @@ int Run(const std::string& path, const std::string& ruby_script_path) {
     if (s.mismatch > 0) {
       return kExitMismatch;
     }
-    if (s.review > 0) {
+    if (s.review > 0 || s.review_light > 0) {
       return kExitReview;
     }
     return kExitBlessed;
@@ -381,7 +381,7 @@ int Run(const std::string& path, const std::string& ruby_script_path) {
       continue;
     }
     try {
-      results.push_back(checker.Check(*cfi, function_starts.contains(cfi->pc_begin)));
+      results.push_back(checker.CheckWithGuessing(*cfi, function_starts.contains(cfi->pc_begin)));
     } catch (const EHFrameError& e) {
       results.push_back(MakeStructuralResult(cfi->fde_addr, cfi->pc_begin, cfi->pc_end, Finding::Severity::kReview,
                                              absl::StrFormat("analysis aborted: %s", e.what())));
@@ -418,7 +418,7 @@ int Run(const std::string& path, const std::string& ruby_script_path) {
   if (summary.mismatch > 0) {
     return kExitMismatch;
   }
-  if (summary.review > 0) {
+  if (summary.review > 0 || summary.review_light > 0) {
     return kExitReview;
   }
   return kExitBlessed;

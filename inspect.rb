@@ -38,7 +38,7 @@ annotations =
 
 # Within one address, a fixed render order regardless of the order
 # unwind-check emitted them in.
-KIND_ORDER = { 'cfi_row' => 0, 'state' => 1, 'finding' => 2 }.freeze
+KIND_ORDER = { 'cfi_row' => 0, 'state' => 1, 'guessed' => 2, 'finding' => 3 }.freeze
 
 by_pc = Hash.new { |h, k| h[k] = [] }
 annotations.each do |a|
@@ -63,6 +63,9 @@ def render_annotation(a, color)
   when 'state'
     text = "state: #{a.fetch('text')}"
     '    ' + (color ? colorize(text, DIM) : text)
+  when 'guessed'
+    text = "guessed: #{a.fetch('text')}"
+    '    ' + (color ? colorize(text, YELLOW) : text)
   when 'finding'
     severity = a.fetch('severity')
     label = severity == 'mismatch' ? 'MISMATCH' : 'REVIEW'
@@ -95,6 +98,7 @@ ADDRESS_LINE = /\A\s*([0-9a-fA-F]+):\t/.freeze
 seen_pcs = {}
 
 begin
+  puts "objdump_argv: #{objdump_argv.inspect}"
   Open3.popen2(*objdump_argv) do |stdin, stdout, wait_thr|
     stdin.close
     stdout.each_line do |line|

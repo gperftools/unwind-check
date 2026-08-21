@@ -224,6 +224,8 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
           out.jump_table_entries = *bound + 1;
           return out;
         }
+        out.has_unbounded_jump_target = true;
+        out.unbounded_jump_table_addr = v.TableAddr();
       }
     }
     VLOG(1) << absl::StrFormat("0x%x: indirect jmp not resolved to a switch table", insn.address);

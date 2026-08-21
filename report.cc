@@ -55,6 +55,17 @@ void PrintOne(const FDEResult& r, Symbolizer* sym, const ReportContext* ctx) {
       absl::PrintF("      at: %s\n", f.insn_text);
     }
   }
+
+  // Not a Finding -- these carry no severity of their own, they're just
+  // what made a REVIEW-LIGHT verdict possible in the first place, kept
+  // visible so a human can judge the guess rather than take it on faith.
+  for (const GuessedJumpTable& gjt : r.guessed_jump_tables) {
+    absl::PrintF("  %s: guessed %d switch-table entries (table at 0x%x), targets:\n", Location(sym, gjt.pc),
+                 gjt.targets.size(), gjt.table_addr);
+    for (uint64_t target : gjt.targets) {
+      absl::PrintF("      -> %s\n", Location(sym, target));
+    }
+  }
 }
 
 }  // namespace
@@ -65,6 +76,9 @@ Summary Summarize(const std::vector<FDEResult>& results) {
     switch (r.verdict) {
       case Verdict::kBlessed:
         s.blessed++;
+        break;
+      case Verdict::kReviewLight:
+        s.review_light++;
         break;
       case Verdict::kReview:
         s.review++;
@@ -91,6 +105,10 @@ void PrintReport(const std::vector<FDEResult>& results, Symbolizer* symbolizer, 
       for (const Finding& f : r.findings) {
         interesting.push_back(f.pc);
       }
+      for (const GuessedJumpTable& gjt : r.guessed_jump_tables) {
+        interesting.push_back(gjt.pc);
+        interesting.insert(interesting.end(), gjt.targets.begin(), gjt.targets.end());
+      }
     }
     symbolizer->Prepare(interesting);
 
@@ -116,7 +134,8 @@ void PrintReport(const std::vector<FDEResult>& results, Symbolizer* symbolizer, 
   }
 
   Summary s = Summarize(results);
-  absl::PrintF("%d FDEs: %d blessed, %d review, %d mismatch\n", s.total(), s.blessed, s.review, s.mismatch);
+  absl::PrintF("%d FDEs: %d blessed, %d review-light, %d review, %d mismatch\n", s.total(), s.blessed,
+               s.review_light, s.review, s.mismatch);
   if (!symbolizer->disabled_reason().empty()) {
     absl::PrintF("(source lines unavailable: %s)\n", symbolizer->disabled_reason());
   }

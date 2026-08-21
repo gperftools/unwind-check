@@ -41,6 +41,7 @@ class FindingSink {
   }
 
   void Add(Finding::Severity severity, uint64_t pc, std::string message, std::string insn_text) {
+    VLOG(2) << absl::StrFormat("Sink->Add(%d, 0x%x, \"%s\", \"%s\")", severity, pc, message, insn_text);
     auto it = index_.find(message);
     if (it != index_.end()) {
       findings_[it->second].repeats++;
@@ -247,6 +248,23 @@ class RowChecker {
   bool force_callee_saved_same_value_ = false;
 };
 
+// Runs the same row-check RowChecker::Check performs, but into a scratch
+// sink that gets thrown away rather than the real one: guessing mode
+// (FDEChecker::ProbeJumpTable) needs to ask "would this candidate target
+// actually check out" for each entry it is deciding whether to trust, and
+// must not pollute the real report with findings for a table it may end
+// up rejecting a later entry of. Returns true only when the row-check
+// produced nothing at all -- a Review-level "can't tell" is not
+// "compatible" here, since a guess is supposed to be tighter than what
+// this tool would merely fail to complain about.
+bool RowMatchesCleanly(const FDEChecker::Options& options, uint64_t pc, const CFIRow& row, const AbsState& state,
+                       bool force_callee_saved_same_value) {
+  FindingSink scratch{1};
+  RowChecker checker{options, &scratch};
+  checker.Check(pc, row, state, /*insn_text=*/"", /*edge_context=*/"", force_callee_saved_same_value);
+  return scratch.Take().empty();
+}
+
 // Whether the CFI in force at some address actually consults the thing
 // two paths disagreed about. If it never reads that register or that
 // slot, the disagreement cannot make the row wrong -- it costs us
@@ -431,6 +449,8 @@ const char* VerdictName(Verdict v) {
   switch (v) {
     case Verdict::kBlessed:
       return "BLESSED";
+    case Verdict::kReviewLight:
+      return "REVIEW-LIGHT";
     case Verdict::kReview:
       return "REVIEW";
     case Verdict::kMismatch:
@@ -457,6 +477,29 @@ const CFI* FDEChecker::CFIContaining(uint64_t pc) const {
   return it->second;
 }
 
+std::optional<uint64_t> FDEChecker::ResolveTableEntry(uint64_t table_addr, uint64_t index) const {
+  uint64_t entry_addr = table_addr + index * 4;
+  if (!image_.IsFileBackedNonExecutable(entry_addr, 4)) {
+    return std::nullopt;
+  }
+  std::span<const uint8_t> bytes = image_.BytesAt(entry_addr, 4);
+  if (bytes.size() != 4) {
+    return std::nullopt;
+  }
+  int32_t rel;
+  memcpy(&rel, bytes.data(), 4);
+  uint64_t target = table_addr + static_cast<int64_t>(rel);
+  if (!LandsInsideSomeFDE(target)) {
+    return std::nullopt;
+  }
+  std::span<const uint8_t> tbytes = image_.BytesAt(target, 16);
+  Instruction tinsn;
+  if (tbytes.empty() || !disasm_->Decode(tbytes.data(), tbytes.size(), target, &tinsn)) {
+    return std::nullopt;
+  }
+  return target;
+}
+
 std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table_addr, uint64_t entries) const {
   VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%x, %u entries)", table_addr, entries);
   if (entries == 0 || entries > kMaxJumpTableEntries) {
@@ -470,39 +513,72 @@ std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table
                                table_addr, size);
     return std::nullopt;
   }
-  std::span<const uint8_t> bytes = image_.BytesAt(table_addr, size);
-  if (bytes.size() != size) {
-    VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%x): could only read %u of %u bytes, rejecting", table_addr,
-                               bytes.size(), size);
-    return std::nullopt;
-  }
   std::vector<uint64_t> targets;
   targets.reserve(entries);
   for (uint64_t i = 0; i < entries; i++) {
-    int32_t rel;
-    memcpy(&rel, bytes.data() + i * 4, 4);
-    uint64_t target = table_addr + static_cast<int64_t>(rel);
-    if (!LandsInsideSomeFDE(target)) {
-      VLOG(1) << absl::StrFormat(
-          "ResolveJumpTable(0x%x): entry %u -> 0x%x lands outside any FDE, rejecting whole table", table_addr, i,
-          target);
+    std::optional<uint64_t> target = ResolveTableEntry(table_addr, i);
+    if (!target.has_value()) {
+      VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%x): entry %u invalid, rejecting whole table", table_addr, i);
       return std::nullopt;
     }
-    std::span<const uint8_t> tbytes = image_.BytesAt(target, 16);
-    Instruction tinsn;
-    if (tbytes.empty() || !disasm_->Decode(tbytes.data(), tbytes.size(), target, &tinsn)) {
-      VLOG(1) << absl::StrFormat(
-          "ResolveJumpTable(0x%x): entry %u -> 0x%x does not decode as an instruction, rejecting whole table",
-          table_addr, i, target);
-      return std::nullopt;
-    }
-    targets.push_back(target);
+    targets.push_back(*target);
   }
   VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%x): resolved all %u entries", table_addr, entries);
   return targets;
 }
 
-FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry, std::vector<InsnTrace>* trace_out) const {
+std::optional<std::vector<uint64_t>> FDEChecker::ProbeJumpTable(
+    uint64_t table_addr, const std::function<bool(uint64_t target)>& target_is_compatible) const {
+  std::vector<uint64_t> targets;
+  while (targets.size() < kMaxJumpTableEntries) {
+    std::optional<uint64_t> target = ResolveTableEntry(table_addr, targets.size());
+    if (!target.has_value()) {
+      VLOG(1) << absl::StrFormat("ProbeJumpTable(0x%x): entry %u fails the structural check (decode/lands-in-FDE)",
+                                 table_addr, targets.size());
+      break;
+    }
+    if (!target_is_compatible(*target)) {
+      VLOG(1) << absl::StrFormat(
+          "ProbeJumpTable(0x%x): entry %u -> 0x%x decodes fine but its declared CFI row doesn't match the state at "
+          "the jump, stopping the guess here",
+          table_addr, targets.size(), *target);
+      break;
+    }
+    targets.push_back(*target);
+  }
+  if (targets.empty()) {
+    VLOG(1) << absl::StrFormat("ProbeJumpTable(0x%x): index 0 already invalid, nothing to guess", table_addr);
+    return std::nullopt;
+  }
+  VLOG(1) << absl::StrFormat("ProbeJumpTable(0x%x): guessed %u entries", table_addr, targets.size());
+  return targets;
+}
+
+std::function<bool(uint64_t)> FDEChecker::JumpTargetCompatiblePredicate(const CFI& cfi, uint64_t jmp_pc,
+                                                                        const AbsState& state) const {
+  return [this, &cfi, jmp_pc, state](uint64_t target) {
+    if (target >= cfi.pc_begin && target < cfi.pc_end) {
+      const CFIRow* row = cfi.RowAt(target);
+      if (row == nullptr) {
+        return false;
+      }
+      return RowMatchesCleanly(options_, jmp_pc, *row, state, /*force_callee_saved_same_value=*/false);
+    }
+    const CFI* target_cfi = CFIContaining(target);
+    if (target_cfi == nullptr) {
+      return false;
+    }
+    const CFIRow* target_row = target_cfi->RowAt(target);
+    if (target_row == nullptr) {
+      return false;
+    }
+    bool target_is_canonical_entry = target == target_cfi->pc_begin && target_row->IsCanonicalEntry();
+    return RowMatchesCleanly(options_, jmp_pc, *target_row, state, target_is_canonical_entry);
+  };
+}
+
+FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry, std::vector<InsnTrace>* trace_out,
+                            bool guessing_enabled) const {
   FDEResult result;
   result.fde_addr = cfi.fde_addr;
   result.pc_begin = cfi.pc_begin;
@@ -794,6 +870,21 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry, std::vector<
             // trying to follow.
           }
         }
+      } else if (guessing_enabled && outcome.has_unbounded_jump_target) {
+        // Same shape as has_jump_table above, except the entry count comes
+        // from ProbeJumpTable's guess instead of a declared bound -- see
+        // CheckWithGuessing.
+        std::optional<std::vector<uint64_t>> targets =
+            ProbeJumpTable(outcome.unbounded_jump_table_addr, JumpTargetCompatiblePredicate(cfi, pc, state));
+        if (targets.has_value()) {
+          for (uint64_t target : *targets) {
+            if (target >= cfi.pc_begin && target < cfi.pc_end) {
+              propagate(target, state);
+            } else {
+              VLOG(2) << absl::StrFormat("possible target 0x%x outside of current FDE", target);
+            }
+          }
+        }
       }
     }
   };
@@ -851,6 +942,11 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry, std::vector<
   }
 
   // Pass 2: Verify settled states against declared CFI rows in deterministic (sorted PC) order.
+  // Counted here rather than in pass 1: a table-shaped-but-unbounded jump
+  // is only interesting to the top level once, in the same deterministic
+  // sorted-pc order everything else in pass 2 is reported in.
+  size_t unbounded_jump_count = 0;
+  uint64_t unbounded_jump_pc = 0;
   std::vector<uint64_t> reached_pcs;
   reached_pcs.reserve(in_states.size());
   for (const auto& [pc, _] : in_states) {
@@ -935,6 +1031,43 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry, std::vector<
         // In-range targets were walked in pass 1 and are checked in their
         // own right when pass 2 reaches them; nothing further to say here.
       }
+    } else if (outcome.has_unbounded_jump_target) {
+      // Table shape resolved (base, index register, entry width) but no
+      // declared bound -- exactly what guessing mode exists for. Track it
+      // regardless of guessing_enabled so a normal run can tell the top
+      // level "this FDE has exactly one guessable jump" via
+      // guessable_jump_pc; only actually probe when guessing is enabled.
+      unbounded_jump_count++;
+      unbounded_jump_pc = pc;
+      bool guessed = false;
+      if (guessing_enabled) {
+        std::optional<std::vector<uint64_t>> targets =
+            ProbeJumpTable(outcome.unbounded_jump_table_addr, JumpTargetCompatiblePredicate(cfi, pc, state));
+        if (targets.has_value()) {
+          guessed = true;
+          result.guessed_jump_tables.push_back(
+              GuessedJumpTable{pc, outcome.unbounded_jump_table_addr, *targets});
+          for (uint64_t target : *targets) {
+            if (target < cfi.pc_begin || target >= cfi.pc_end) {
+              if (!check_cross_fde_edge(pc, target, state, insn_text)) {
+                sink.Add(Finding::Severity::kReview, pc,
+                         absl::StrFormat("guessed switch-table entry at 0x%x lands outside this FDE's range and no "
+                                         "FDE covers it, so there is no declared row to check it against",
+                                         target),
+                         insn_text);
+              }
+            }
+            // In-range targets were walked in pass 1 and are checked in
+            // their own right when pass 2 reaches them.
+          }
+        }
+      }
+      if (!guessed) {
+        sink.Add(Finding::Severity::kReview, pc,
+                 "unresolved indirect jump; jump tables are not resolved in this version, so the code it reaches "
+                 "went unchecked",
+                 insn_text);
+      }
     } else if (outcome.is_return) {
       CheckExitState(pc, state, insn_text, &sink, is_canonical_entry, /*is_tail_call=*/false);
     } else if (!outcome.falls_through && outcome.has_direct_target &&
@@ -990,6 +1123,10 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry, std::vector<
     }
   }
 
+  if (unbounded_jump_count == 1) {
+    result.guessable_jump_pc = unbounded_jump_pc;
+  }
+
   result.findings = sink.Take();
   result.verdict = Verdict::kBlessed;
   for (const Finding& f : result.findings) {
@@ -999,6 +1136,24 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry, std::vector<
     }
     result.verdict = Verdict::kReview;
   }
+  return result;
+}
+
+FDEResult FDEChecker::CheckWithGuessing(const CFI& cfi, bool at_function_entry,
+                                        std::vector<InsnTrace>* trace_out) const {
+  FDEResult result = Check(cfi, at_function_entry, trace_out);
+  if (result.verdict != Verdict::kReview || !result.guessable_jump_pc.has_value()) {
+    return result;
+  }
+  VLOG(1) << "Going to do another Check run with guessing enabled. Guessable jump: 0x" << absl::Hex(result.guessable_jump_pc.value());
+  FDEResult retry = Check(cfi, at_function_entry, /*trace_out=*/nullptr, /*guessing_enabled=*/true);
+  if (retry.verdict != Verdict::kBlessed) {
+    // Guessing didn't fully recover this FDE -- report the original
+    // findings untouched rather than a partial, still-uncertain result.
+    return result;
+  }
+  result.verdict = Verdict::kReviewLight;
+  result.guessed_jump_tables = std::move(retry.guessed_jump_tables);
   return result;
 }
 
