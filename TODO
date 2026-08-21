@@ -16,3 +16,89 @@
 * ensure that we flag any cases where "CFG structure" is un-discovered
   (e.g. earlier bound is bottomed later). All cases like this need to
   be loudly REVIEWed or MISMATCHed.
+
+--
+
+* Disassembler::Text should return StatusOr (zydis formatter may fail for whatever reason)
+
+* and create ZydisFormatter stuff once (new into static variable)
+
+* AbsState slots should be btree not std::map
+
+* various reg args, e.g. ReadRead, DWARFRegOf should perhaps be of relevant zydis type: ZydisRegister. It is nice dense type btw with ZYDIS_REGISTER_MAX_VALUE available
+
+* DWARFRegOf should not be linear scan
+
+* ClobberWrites doesn't seem to handle clobbering eflags state. But it is handled separately by Transfer at the very start
+
+* Instruction operands should likely be span instead of pair of operand_count and operands array. I.e. parhaps std::array for backing and span for real thing. Or have operands() const method that builds span of operands, i.e. to avoid storing full span state
+
+* syscall instruction check what registers are being clobbered by it (might need explicit clobers for Linux/amd64). We want to be conservative. Same for e.g. int $80 or whatevs.
+
+* confused by insn-semantics PUSH comment. So is push $imm8 ever handled?
+  * double-check that insn.operand_width for push $imm8 is indeed 64
+
+* remove references to switch-tables plans in comments
+
+* very odd handling of less than 64-bit moves with destination first
+  clobbered and then bound carried from src and in an odd way through
+  std::option
+
+* looks like nothing in our MOVSXD handling is ensuring that operand width (number of bits we load from memory) is 32-bit
+
+* I dislike Bound/SetBound helpers on state, getting them normally form value likely more logical code
+
+* maybe some helper for DWARFRegOf where we need full64 bit reg. Or
+  actually the other way around. DWARFRegOf should be common case only
+  mapping 64 bit regs and for less common case: "I want generalized
+  full 64 bit dwarf reg matching given architectural possibly narrower
+  reg" we need different function.
+
+* asserts (so !NDEBUG) for stuff like accessing ConstValue on the AbsVal that isn't kConst
+
+* should SetReg automagically detect update of RSP and clobber read zone etc ?
+* handling of ZYDIS_MNEMONIC_LEA when rsp is updated is not clobbering slots
+
+* ADD/SUB addition/subtraction should be unsigned (compilers like to screw up the signed overflows)
+
+* so the logic of "move the bound over movzx" should ensure the bound
+  is small enough that narrow src register read isn't "smaller" than bound.
+
+* Do we need "empty state" class for InsnSemantics ? Also InsnSemantics::DWARFRegOf and IsFull64 are not really used externally.
+
+* FDEChecker probably doesn't need to be declared in .h. Allows it to keep stuff like sink etc and simplify stuff internally. Make FDECheckerOptions standalong. Forward-declare FDEChecker. Have CreateFDEChecker that returns unique_ptr with custom deleter. And have standalone CheckFDE function that receives the FDEChecker. Alternative is abstract FDEChecker class or FDECheckerIface or something. And the concrete implementation. Maybe less ceremony around unique_ptr etc.
+** actually no. since current fde checker constructor is just storing image/disasm/options etc it is not needed. Just have CheckFDE function call that receives everything. Put image and disasm into options. Then in the .cc we can have FDEChecker with all the state gathered (sink, etc)
+*** what we are looking to achieve is avoiding repetitions from stuff like:       sink->Add(Finding::Severity::kMismatch, pc,
+                absl::StrFormat("return with rsp at CFA%+d (should be CFA-8)", static_cast<int>(rsp.delta)), insn_text);
+ manually passing severity, pc, insn_text and so on
+*** perhaps separate RowChecker isn't needed, just InsnState or something. Having all state and logic for dealing with one specific instruction. I.e. holding pc_ and insn_text_ and Review/Mismatch methods.
+*** in general fde checker's state being global / TLS might be fine as well maybe to keep it simpest ?
+
+* RowChecker::RegValue should probably be AbsState::MaybeReg or something. Or have existing reg(r) accessor return option.
+
+* double check force_callee_saved_same_value use
+
+* fde-checker.cc:IsCalleeSaved should not be linear scan maybe
+
+* StrFormat supports go-like %v format. So use that and avoid casts
+  like (unsigned long long) everywhere. Also StrFormat explicitly
+  doesn't need size prefixes since it does C++ magic and knows exact
+  argument type. Again, like Go
+
+* why CheckExitState is barking on !at_function_entry without really checking the state ?
+
+* Disassembler::DecodeOne should probably not use ptr to itself and
+  risk clobbering instr_ after unrelated decodes (e.g. in
+  ResolveJumpTable etc). Have it return option or something. Or have
+  variant that decodes into &out parameter and returns true/false
+  likely better.
+
+* pending_pushes stuff is wrong (decrement instead of drop in the
+  drain loop). just make hash of addr -> bool instead. and keep the
+  entries for efficiency, but set to false on dequeue
+
+* consider some sort of reserve call for all kinds of containers in
+  the Check. Slight efficiency win.
+
+* double check if say storing {x,y,z}mm field over set of slots is
+  clobbring them. Probably not.
