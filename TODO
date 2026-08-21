@@ -80,18 +80,17 @@
 
 * fde-checker.cc:IsCalleeSaved should not be linear scan maybe
 
-* StrFormat supports go-like %v format. So use that and avoid casts
-  like (unsigned long long) everywhere. Also StrFormat explicitly
-  doesn't need size prefixes since it does C++ magic and knows exact
-  argument type. Again, like Go
+* StrFormat explicitly doesn't need size prefixes since it does C++
+  magic and knows exact argument type. Like Go. So drop those 'll'-s
+  and explicit casts all over the code when StrFormat-ting.
 
 * why CheckExitState is barking on !at_function_entry without really checking the state ?
 
 * Disassembler::DecodeOne should probably not use ptr to itself and
   risk clobbering instr_ after unrelated decodes (e.g. in
-  ResolveJumpTable etc). Have it return option or something. Or have
-  variant that decodes into &out parameter and returns true/false
-  likely better.
+  ResolveJumpTable etc). Have it decode into &out parameter and
+  returns true/false. Rename it as well into Decode to avoid any
+  confusion.
 
 * pending_pushes stuff is wrong (decrement instead of drop in the
   drain loop). just make hash of addr -> bool instead. and keep the
