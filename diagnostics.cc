@@ -95,8 +95,8 @@ std::vector<ListedInsn> ListInstructions(const ELFImage& image, Disassembler* di
 }
 
 int FindListedInsn(const std::vector<ListedInsn>& listing, uint64_t pc) {
-  auto it = std::lower_bound(listing.begin(), listing.end(), pc,
-                             [](const ListedInsn& li, uint64_t p) { return li.pc < p; });
+  auto it =
+      std::lower_bound(listing.begin(), listing.end(), pc, [](const ListedInsn& li, uint64_t p) { return li.pc < p; });
   if (it == listing.end() || it->pc != pc) {
     return -1;
   }

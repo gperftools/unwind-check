@@ -1,6 +1,7 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <memory>
@@ -9,8 +10,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#include <unistd.h>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
@@ -339,13 +338,12 @@ int Run(const std::string& path, const std::string& ruby_script_path) {
 
     std::string name = symbolizer.Name(target->pc_begin);
     absl::PrintF("FDE 0x%x  [0x%x, 0x%x)%s%s%s\n", target->fde_addr, target->pc_begin, target->pc_end,
-                name.empty() ? "" : "  ", name, target->signal_frame ? "  (signal frame)" : "");
+                 name.empty() ? "" : "  ", name, target->signal_frame ? "  (signal frame)" : "");
     fflush(stdout);
 
     const bool color = isatty(STDOUT_FILENO) != 0;
-    absl::StatusOr<FDEResult> inspected =
-        RunInspectPipeline(checker, *target, function_starts.contains(target->pc_begin), inspect_deep, color, path,
-                           ruby_script_path);
+    absl::StatusOr<FDEResult> inspected = RunInspectPipeline(
+        checker, *target, function_starts.contains(target->pc_begin), inspect_deep, color, path, ruby_script_path);
     if (!inspected.ok()) {
       absl::FPrintF(stderr, "unwind-check: %s\n", inspected.status().message());
       return kExitFailure;
