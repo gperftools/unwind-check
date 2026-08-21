@@ -946,7 +946,7 @@ void FDEChecker::VerifyPass() {
 
     AbsState state_copy = state;
     TransferOutcome outcome = semantics_.Transfer(insn, &state_copy);
-    if (outcome.review_reason != nullptr) {
+    if (!outcome.review_reason.empty()) {
       sink_.Add(Finding::Severity::kReview, pc, outcome.review_reason, insn_text);
     }
     if (outcome.has_jump_table) {

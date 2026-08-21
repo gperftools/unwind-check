@@ -4,6 +4,8 @@
 
 #include <stdint.h>
 
+#include <string>
+
 #include "abs-state.h"
 #include "disasm.h"
 
@@ -43,7 +45,7 @@ struct TransferOutcome {
   // Set when the instruction does something to the stack we decline to
   // model exactly. The FDE gets flagged for review rather than analysed
   // on a guess.
-  const char* review_reason = nullptr;
+  std::string review_reason;
 };
 
 // The stack-effect semantics table.
