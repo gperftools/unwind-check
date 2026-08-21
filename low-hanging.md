@@ -4,6 +4,9 @@ the selected item, get it "done", ensure that all the tests updated
 (when necessary) and all pass. AGENT.md updated and so
 on. Then mark item as done (e.g. "* (DONE)" ) and git commit.
 
+If the selected item is too confusing/impossible/wrong. Mark it as
+(SKIP) and don't select it again.
+
 * remove references to switch-tables plans in comments. Those plans
   are obsolete and files are gone (double check and remove if
   necessary).
