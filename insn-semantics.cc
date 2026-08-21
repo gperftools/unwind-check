@@ -307,7 +307,6 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       if (rsp.kind == AbsVal::Kind::kCFARel) {
         popped = state->Slot(rsp.delta);
         state->SetReg(kDWARFRsp, AbsVal::CFARel(rsp.delta + 8));
-        state->DropDeadSlots(rsp.delta + 8);
       }
       if (insn.id == ZYDIS_MNEMONIC_POP) {
         const ZydisDecodedOperand& op = insn.operands[0];
@@ -333,7 +332,6 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       if (rsp.kind == AbsVal::Kind::kCFARel) {
         state->SetReg(kDWARFRbp, state->Slot(rsp.delta));
         state->SetReg(kDWARFRsp, AbsVal::CFARel(rsp.delta + 8));
-        state->DropDeadSlots(rsp.delta + 8);
       } else {
         state->ClobberReg(kDWARFRbp);
       }
@@ -366,13 +364,8 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
           return out;
         }
       }
-      const AbsVal cur = state->reg(d);
       AbsVal val = LeaValue(*state, insn, mem);
       state->SetReg(d, val);
-      if (d == kDWARFRsp && val.kind == AbsVal::Kind::kCFARel && cur.kind == AbsVal::Kind::kCFARel &&
-          val.delta > cur.delta) {
-        state->DropDeadSlots(val.delta);
-      }
       return out;
     }
 
@@ -571,9 +564,6 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       int64_t imm = insn.operands[1].imm.value.s;
       int64_t delta = insn.id == ZYDIS_MNEMONIC_ADD ? cur.delta + imm : cur.delta - imm;
       state->SetReg(d, AbsVal::CFARel(delta));
-      if (d == kDWARFRsp && delta > cur.delta) {
-        state->DropDeadSlots(delta);
-      }
       return out;
     }
 

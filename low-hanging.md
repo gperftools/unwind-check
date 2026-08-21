@@ -50,7 +50,7 @@ If the selected item is too confusing/impossible/wrong. Mark it as
   that isn't kConst. This should not "pollute" any code other then those
   accessor methods. So everything is still relatively readable.
 
-* SetReg should automagically detect update of RSP and clobber read
+* (DONE) SetReg should automagically detect update of RSP and clobber read
   zone etc. (Then avoid checks of rsp and calls to DropDeadSlots when updating
   rsp in Transfer)
 

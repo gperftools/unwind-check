@@ -249,6 +249,9 @@ struct AbsState {
   }
   void SetReg(int r, const AbsVal& v) {
     gpr[r] = v;
+    if (r == kDWARFRsp && v.kind == AbsVal::Kind::kCFARel) {
+      DropDeadSlots(v.delta);
+    }
   }
   void ClobberReg(int r) {
     gpr[r] = AbsVal::Top();

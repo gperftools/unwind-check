@@ -156,6 +156,15 @@ TEST(AbsStateTest, DropDeadSlotsKeepsTheRedZoneBoundarySlot) {
   EXPECT_TRUE(s.Slot(-9 - AbsState::kRedZoneBytes).is_top()) << "one byte past the red zone";
 }
 
+TEST(AbsStateTest, SetRegRspAutomaticallyDropsDeadSlots) {
+  AbsState s = AbsState::Entry();
+  s.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));
+  s.SetSlot(-400, AbsVal::OrigReg(kDWARFRbp));
+  s.SetReg(kDWARFRsp, AbsVal::CFARel(-8));
+  EXPECT_TRUE(s.Slot(-16).IsOrigReg(kDWARFRbx));
+  EXPECT_TRUE(s.Slot(-400).is_top());
+}
+
 // --- Join: registers, one case per lattice combination -------------------
 
 TEST(AbsStateTest, JoinKeepsAgreementAndDropsDisagreement) {
