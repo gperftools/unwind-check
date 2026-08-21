@@ -42,7 +42,7 @@ If the selected item is too confusing/impossible/wrong. Mark it as
   relevant zydis type: ZydisRegister. It is nice dense type btw with
   ZYDIS_REGISTER_MAX_VALUE available
 
-* AbsState slots should be btree not std::map
+* (DONE) AbsState slots should be btree not std::map
 
 * create ZydisFormatter stuff once (new into static variable)
 

@@ -4,11 +4,11 @@
 
 #include <stdint.h>
 
-#include <map>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "absl/container/btree_map.h"
 #include "cfi-table.h"
 
 namespace unwind_analysis {
@@ -169,7 +169,7 @@ struct AbsVal {
 // and the return address the call put there lives at slot -8.
 struct AbsState {
   AbsVal gpr[kNumGPRs];
-  std::map<int64_t, AbsVal> slots;
+  absl::btree_map<int64_t, AbsVal> slots;
 
   // Thin wrappers over gpr[r]'s own bound field (see AbsVal::bound):
   // read/write the register's upper bound in place without disturbing
