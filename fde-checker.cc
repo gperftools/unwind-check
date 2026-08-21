@@ -571,8 +571,8 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
   // before the target is dequeued produces duplicate pops that redo
   // decode/Transfer work for no new information (the state read out of
   // in_states is already fully joined by the time any of the duplicates
-  // run). Cleared when the pc is actually popped in `drain`.
-  absl::flat_hash_map<uint64_t, size_t> pending_pushes;
+  // run). Cleared to false when the pc is actually popped in `drain`.
+  absl::flat_hash_map<uint64_t, bool> pending_pushes;
   size_t propagate_calls = 0;
   size_t propagate_changed = 0;
   size_t propagate_dedup_skipped = 0;
@@ -583,7 +583,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     if (it == in_states.end()) {
       in_states.emplace(pc, state);
       worklist.push_back(pc);
-      pending_pushes[pc]++;
+      pending_pushes[pc] = true;
       VLOG(2) << absl::StrFormat("propagate(0x%llx): first sighting, enqueued", (unsigned long long)pc);
       return;
     }
@@ -595,13 +595,13 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
     }
     if (changed) {
       propagate_changed++;
-      if (pending_pushes[pc] > 0) {
+      if (pending_pushes[pc]) {
         propagate_dedup_skipped++;
         VLOG(2) << absl::StrFormat(
-            "propagate(0x%llx): state changed but %zu entr%s already pending -- not re-enqueuing",
-            (unsigned long long)pc, pending_pushes[pc], pending_pushes[pc] == 1 ? "y" : "ies");
+            "propagate(0x%llx): state changed but entry already pending -- not re-enqueuing",
+            (unsigned long long)pc);
       } else {
-        pending_pushes[pc]++;
+        pending_pushes[pc] = true;
         worklist.push_back(pc);
         VLOG(2) << absl::StrFormat("propagate(0x%llx): state changed, enqueued", (unsigned long long)pc);
       }
@@ -721,9 +721,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry) const {
       }
       uint64_t pc = worklist.back();
       worklist.pop_back();
-      if (pending_pushes[pc] > 0) {
-        pending_pushes[pc]--;
-      }
+      pending_pushes[pc] = false;
       VLOG(2) << absl::StrFormat("drain: pop 0x%llx (iteration %zu, %zu still queued)", (unsigned long long)pc,
                                  iterations, worklist.size());
       AbsState state = in_states[pc];

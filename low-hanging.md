@@ -20,7 +20,7 @@ If the selected item is too confusing/impossible/wrong. Mark it as
   returns true/false. Rename it as well into Decode to avoid any
   confusion.
 
-* in fde-checker.cc pending_pushes stuff is wrong (decrement instead
+* (DONE) in fde-checker.cc pending_pushes stuff is wrong (decrement instead
   of drop in the drain loop). just make hash of addr -> bool
   instead. and keep the entries for efficiency, but set to false on
   dequeue
