@@ -134,8 +134,8 @@ void PrintReport(const std::vector<FDEResult>& results, Symbolizer* symbolizer, 
   }
 
   Summary s = Summarize(results);
-  absl::PrintF("%d FDEs: %d blessed, %d review-light, %d review, %d mismatch\n", s.total(), s.blessed,
-               s.review_light, s.review, s.mismatch);
+  absl::PrintF("%d FDEs: %d blessed, %d review-light, %d review, %d mismatch\n", s.total(), s.blessed, s.review_light,
+               s.review, s.mismatch);
   if (!symbolizer->disabled_reason().empty()) {
     absl::PrintF("(source lines unavailable: %s)\n", symbolizer->disabled_reason());
   }

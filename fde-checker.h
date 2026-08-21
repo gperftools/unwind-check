@@ -44,7 +44,7 @@ struct Finding {
 // diagnostic: it never feeds back into a verdict, only into what a human
 // (or --inspect) is shown about why a REVIEW-LIGHT FDE reads as it does.
 struct GuessedJumpTable {
-  uint64_t pc = 0;          // the jmp instruction's address
+  uint64_t pc = 0;  // the jmp instruction's address
   uint64_t table_addr = 0;
   std::vector<uint64_t> targets;  // resolved absolute addresses, in index order
 };
@@ -135,7 +135,7 @@ class FDEChecker {
   // exists so CheckWithGuessing can ask for a second, independent run of
   // the same algorithm rather than duplicating it.
   FDEResult Check(const CFI& cfi, bool at_function_entry, std::vector<InsnTrace>* trace_out = nullptr,
-                   bool guessing_enabled = false) const;
+                  bool guessing_enabled = false) const;
 
   // Runs Check() normally. If the result is a REVIEW whose sole point of
   // uncertainty was one table-shaped-but-unbounded indirect jump
@@ -147,7 +147,8 @@ class FDEChecker {
   // returns the original, untouched result: guessing is only ever worth
   // reporting when it recovers a clean answer, never as a weaker partial
   // one.
-  FDEResult CheckWithGuessing(const CFI& cfi, bool at_function_entry, std::vector<InsnTrace>* trace_out = nullptr) const;
+  FDEResult CheckWithGuessing(const CFI& cfi, bool at_function_entry,
+                              std::vector<InsnTrace>* trace_out = nullptr) const;
 
  private:
   // Reads and validates the switch table at `table_addr` with `entries`

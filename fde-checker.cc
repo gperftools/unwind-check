@@ -1045,8 +1045,7 @@ FDEResult FDEChecker::Check(const CFI& cfi, bool at_function_entry, std::vector<
             ProbeJumpTable(outcome.unbounded_jump_table_addr, JumpTargetCompatiblePredicate(cfi, pc, state));
         if (targets.has_value()) {
           guessed = true;
-          result.guessed_jump_tables.push_back(
-              GuessedJumpTable{pc, outcome.unbounded_jump_table_addr, *targets});
+          result.guessed_jump_tables.push_back(GuessedJumpTable{pc, outcome.unbounded_jump_table_addr, *targets});
           for (uint64_t target : *targets) {
             if (target < cfi.pc_begin || target >= cfi.pc_end) {
               if (!check_cross_fde_edge(pc, target, state, insn_text)) {
@@ -1145,7 +1144,8 @@ FDEResult FDEChecker::CheckWithGuessing(const CFI& cfi, bool at_function_entry,
   if (result.verdict != Verdict::kReview || !result.guessable_jump_pc.has_value()) {
     return result;
   }
-  VLOG(1) << "Going to do another Check run with guessing enabled. Guessable jump: 0x" << absl::Hex(result.guessable_jump_pc.value());
+  VLOG(1) << "Going to do another Check run with guessing enabled. Guessable jump: 0x"
+          << absl::Hex(result.guessable_jump_pc.value());
   FDEResult retry = Check(cfi, at_function_entry, /*trace_out=*/nullptr, /*guessing_enabled=*/true);
   if (retry.verdict != Verdict::kBlessed) {
     // Guessing didn't fully recover this FDE -- report the original
