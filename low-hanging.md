@@ -28,7 +28,7 @@ If the selected item is too confusing/impossible/wrong. Mark it as
 * (DONE) consider some sort of reserve call for all kinds of containers in
   the Check. Slight efficiency win. Just give them few K of capacity.
 
-* double check if say storing {x,y,z}mm field over set of slots is
+* (DONE) double check if say storing {x,y,z}mm field over set of slots is
   clobbring them. Probably not. Make sure we clobber the slots from
   wide writes like these.
 

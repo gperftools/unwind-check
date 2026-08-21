@@ -66,6 +66,9 @@ AbsVal LeaValue(const AbsState& state, const Instruction& insn, const ZydisDecod
 }
 
 void EraseSlots(AbsState* state, int64_t start, int64_t size) {
+  if (size <= 0) {
+    return;
+  }
   auto it = state->slots.lower_bound(start - 7);
   while (it != state->slots.end() && it->first < start + size) {
     it = state->slots.erase(it);
@@ -147,7 +150,7 @@ void InsnSemantics::ClobberWrites(const Instruction& insn, AbsState* state) cons
     } else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
       std::optional<int64_t> slot = MemSlot(*state, insn, op.mem);
       if (slot.has_value()) {
-        EraseSlots(state, *slot, op.size / 8);
+        EraseSlots(state, *slot, std::max<int64_t>(1, op.size / 8));
       } else {
         HandleUnplacedMemWrite(state);
       }
@@ -431,11 +434,10 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
           HandleUnplacedMemWrite(state);
           return out;
         }
-        if (dst.size != 64) {
-          EraseSlots(state, *slot, dst.size / 8);
-          return out;
+        EraseSlots(state, *slot, std::max<int64_t>(1, dst.size / 8));
+        if (dst.size == 64 && src.type == ZYDIS_OPERAND_TYPE_REGISTER && IsFull64(src.reg.value)) {
+          state->SetSlot(*slot, ReadReg(*state, src.reg.value));
         }
-        state->SetSlot(*slot, src.type == ZYDIS_OPERAND_TYPE_REGISTER ? ReadReg(*state, src.reg.value) : AbsVal::Top());
         return out;
       }
       break;

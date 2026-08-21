@@ -80,6 +80,43 @@ TEST_F(SemanticsTest, MovSpillAndReloadThroughRsp) {
   EXPECT_TRUE(state_.reg(kDWARFRbx).IsOrigReg(kDWARFRbx));
 }
 
+TEST_F(SemanticsTest, WideVectorStoreClobbersMultipleSlots) {
+  // Set up rbp = CFA-16
+  Run({0x55});              // push %rbp
+  Run({0x48, 0x89, 0xe5});  // mov %rsp, %rbp
+  state_.SetSlot(-24, AbsVal::OrigReg(kDWARFRbx));
+  state_.SetSlot(-32, AbsVal::OrigReg(12));
+  state_.SetSlot(-40, AbsVal::OrigReg(13));
+  state_.SetSlot(-48, AbsVal::OrigReg(14));
+  state_.SetSlot(-56, AbsVal::OrigReg(15));
+
+  // movaps %xmm0, -0x10(%rbp) writes 16 bytes at CFA-32 to CFA-16 (covering -32 and -24)
+  Run({0x0f, 0x29, 0x45, 0xf0});
+  EXPECT_TRUE(state_.Slot(-24).is_top());
+  EXPECT_TRUE(state_.Slot(-32).is_top());
+  EXPECT_TRUE(state_.Slot(-40).IsOrigReg(13));
+  EXPECT_TRUE(state_.Slot(-48).IsOrigReg(14));
+  EXPECT_TRUE(state_.Slot(-56).IsOrigReg(15));
+
+  // vmovups %ymm0, -0x28(%rbp) writes 32 bytes at CFA-56 to CFA-24 (covering -56, -48, -40, -32)
+  state_.SetSlot(-32, AbsVal::OrigReg(12));
+  Run({0xc5, 0xfd, 0x11, 0x45, 0xd8});
+  EXPECT_TRUE(state_.Slot(-32).is_top());
+  EXPECT_TRUE(state_.Slot(-40).is_top());
+  EXPECT_TRUE(state_.Slot(-48).is_top());
+  EXPECT_TRUE(state_.Slot(-56).is_top());
+}
+
+TEST_F(SemanticsTest, NarrowStoreClobbersEnclosingSlot) {
+  // Set up rbp = CFA-16
+  Run({0x55});              // push %rbp
+  Run({0x48, 0x89, 0xe5});  // mov %rsp, %rbp
+  state_.SetSlot(-24, AbsVal::OrigReg(kDWARFRbx));
+  // movl %eax, -0x8(%rbp) -> 32-bit store at CFA-24
+  Run({0x89, 0x45, 0xf8});
+  EXPECT_TRUE(state_.Slot(-24).is_top());
+}
+
 TEST_F(SemanticsTest, LeaComputesAStackAddress) {
   Run({0x4c, 0x8d, 0x54, 0x24, 0x08});  // lea 0x8(%rsp), %r10
   EXPECT_TRUE(state_.reg(10).IsCFARel(0));
