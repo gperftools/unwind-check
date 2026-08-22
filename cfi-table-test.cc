@@ -178,5 +178,10 @@ TEST(RegRuleTest, StringifyFormatsRulesCorrectly) {
   EXPECT_EQ(absl::StrCat(val_expr), "<DWARF val expression>");
 }
 
+TEST(DWARFRegNameTest, BASIC) {
+  EXPECT_EQ(DWARFRegName(7), "rsp");
+  EXPECT_EQ(DWARFRegName(-1), "r{-1}");
+}
+
 }  // namespace
 }  // namespace unwind_analysis

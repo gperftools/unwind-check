@@ -2,6 +2,7 @@
 #include "cfi-table.h"
 
 #include <algorithm>
+#include <map>
 
 #include "absl/strings/str_format.h"
 #include "eh-frame-reader.h"
@@ -9,9 +10,6 @@
 namespace unwind_analysis {
 
 namespace {
-
-constexpr const char* kRegNames[] = {"rax", "rdx", "rcx", "rbx", "rsi", "rdi", "rbp", "rsp", "r8",
-                                     "r9",  "r10", "r11", "r12", "r13", "r14", "r15", "ra"};
 
 // Turns the CFI opcode stream of one FDE into a row table.
 //
@@ -183,9 +181,18 @@ class TableBuilder : public UnwindVisitor {
 
 }  // namespace
 
-const char* DWARFRegName(int reg) {
+std::string_view DWARFRegName(int reg) {
+  static constinit std::string_view kRegNames[] = {"rax", "rdx", "rcx", "rbx", "rsi", "rdi", "rbp", "rsp", "r8",
+                                                   "r9",  "r10", "r11", "r12", "r13", "r14", "r15", "ra"};
   if (reg < 0 || reg >= kNumDWARFRegs) {
-    return "r?";
+    static std::map<int, std::string*> interned;
+    // FIXME: yes this is raceful, but the code is single threaded. So far.
+    std::string*& place = interned[reg];
+    if (place == nullptr) {
+      // yes, we kinda "leak". I say we "intern" (without cleanup). Not too uncommon.
+      place = new std::string{absl::StrFormat("r{%d}", reg)};
+    }
+    return *place;
   }
   return kRegNames[reg];
 }

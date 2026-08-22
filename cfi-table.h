@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-#include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/strings/str_format.h"
@@ -27,7 +27,7 @@ inline constexpr int kDWARFRbp = 6;
 inline constexpr int kDWARFRsp = 7;
 
 // Name of a DWARF register number, for diagnostics ("rbp", "r12", "ra").
-const char* DWARFRegName(int reg);
+std::string_view DWARFRegName(int reg);
 
 // How the CFI says the CFA is computed at some PC.
 struct CFARule {
