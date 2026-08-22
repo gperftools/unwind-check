@@ -577,30 +577,12 @@ std::function<bool(uint64_t)> FDEChecker::JumpTargetCompatiblePredicate(uint64_t
   };
 }
 
-// A function entered by `call` has rsp at CFA-8 on its first instruction,
-// with the return address in the word it points at. Anything else is worth
-// a look -- but it is a review and not an accusation, because we cannot
-// prove the FDE is entered by a call. glibc's _dl_runtime_resolve_fxsave
-// carries a real function symbol and legitimately starts at rsp+24: the PLT
-// jumps to it with two words already pushed.
 void FDEChecker::CheckEntryRow(const CFIRow& first_row) {
-  if (!at_function_entry_) {
-    return;
-  }
-  // TODO: use first_row->IsCanonicalEntry I think
-  static constexpr std::string_view kEnteredByJump =
-      " (either the CFI is wrong, or this is entered by a jump rather than a call, the way a PLT trampoline is)";
-  if (first_row.cfa.kind != CFARule::Kind::kRegOffset || first_row.cfa.reg != kDWARFRsp || first_row.cfa.offset != 8) {
-    sink_.Add(Finding::Severity::kReview, cfi_.pc_begin,
-              absl::StrFormat("a function symbol starts here, so the CFA should be rsp+8, but the CFI says %v%s",
-                              first_row.cfa, kEnteredByJump));
-  }
-  const RegRule& ra = first_row.regs[kDWARFRip];
-  if (ra.kind != RegRule::Kind::kAtCFAOffset || ra.offset != -8) {
-    sink_.Add(Finding::Severity::kReview, cfi_.pc_begin,
-              absl::StrFormat("a function symbol starts here, so the return address should be at [CFA-8], but "
-                              "the CFI says %v%s",
-                              ra, kEnteredByJump));
+  // For FDE we think are real functions we flag REVIEW if the entry isn't canonical (CFI as RSP-8 and RIP at *RSP)
+  if (at_function_entry_ && !is_canonical_entry_) {
+    sink_.Add(
+        Finding::Severity::kReview, cfi_.pc_begin,
+        absl::StrFormat("a function symbol starts here and we expect canonical entry CFI but we got: %v", first_row));
   }
 }
 

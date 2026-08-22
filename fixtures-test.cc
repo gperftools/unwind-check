@@ -197,7 +197,7 @@ TEST_F(FixturesTest, LatePushCFIIsCaughtAtTheInstructionInBetween) {
 
 TEST_F(FixturesTest, UnusualEntryRowIsFlaggedButNotCalledABug) {
   EXPECT_THAT(Get("review_unusual_entry_row").messages,
-              Contains(HasSubstr("a function symbol starts here, so the CFA should be rsp+8")));
+              Contains(HasSubstr("a function symbol starts here and we expect canonical entry CFI but we got")));
 }
 
 TEST_F(FixturesTest, SlotHoldingTheWrongRegisterIsCaught) {
