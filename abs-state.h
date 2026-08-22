@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "absl/container/btree_map.h"
+#include "absl/strings/str_format.h"
 #include "cfi-table.h"
 
 namespace unwind_analysis {

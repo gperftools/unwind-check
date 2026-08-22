@@ -7,13 +7,16 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <string>
+#include <string_view>
+#include <vector>
 
 #include "absl/algorithm/container.h"
 #include "absl/cleanup/cleanup.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_split.h"
-#include "absl/strings/strip.h"
 #include "subprocess.h"
 
 namespace unwind_analysis {

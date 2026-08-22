@@ -1,6 +1,7 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
 #include "insn-semantics.h"
 
+#include <algorithm>
 #include <optional>
 
 #include "absl/log/log.h"

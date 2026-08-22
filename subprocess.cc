@@ -1,6 +1,7 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
 #include "subprocess.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <spawn.h>
 #include <string.h>

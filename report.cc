@@ -1,8 +1,6 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
 #include "report.h"
 
-#include <stdio.h>
-
 #include <string>
 #include <vector>
 

@@ -1,6 +1,10 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
 #include "abs-state.h"
 
+#include <optional>
+#include <vector>
+
+#include "absl/strings/str_cat.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 

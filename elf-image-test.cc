@@ -1,7 +1,10 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
 #include "elf-image.h"
 
-#include <string.h>
+#include <algorithm>
+#include <memory>
+#include <span>
+#include <vector>
 
 #include "absl/algorithm/container.h"
 #include "gmock/gmock.h"

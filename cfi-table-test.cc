@@ -9,8 +9,11 @@
 
 #include "cfi-table.h"
 
+#include <ios>
 #include <map>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "absl/strings/str_cat.h"
 #include "eh-frame-reader.h"

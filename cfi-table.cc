@@ -3,6 +3,9 @@
 
 #include <algorithm>
 #include <map>
+#include <span>
+#include <string>
+#include <string_view>
 
 #include "absl/algorithm/container.h"
 #include "absl/strings/str_format.h"

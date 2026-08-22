@@ -3,6 +3,9 @@
 
 #include <string.h>
 
+#include <span>
+#include <vector>
+
 #include "absl/algorithm/container.h"
 #include "absl/strings/str_format.h"
 #include "dwarf-constants.h"

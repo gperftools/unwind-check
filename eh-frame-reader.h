@@ -17,7 +17,6 @@
 
 #include "absl/base/optimization.h"
 #include "absl/functional/function_ref.h"
-#include "absl/strings/str_format.h"
 #include "dwarf-constants.h"
 
 // Decoding half of the .eh_frame/.eh_frame_hdr machinery: finding the
