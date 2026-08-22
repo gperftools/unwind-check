@@ -44,8 +44,8 @@ std::vector<ListedInsn> ListInstructions(const ELFImage& image, Disassembler* di
 int FindListedInsn(const std::vector<ListedInsn>& listing, uint64_t pc);
 
 struct DiagnosticsOptions {
-  int context_before = 3;
-  int context_after = 2;
+  int context_before = 6;
+  int context_after = 4;
 };
 
 // Appends a context window -- a few real instructions around f.pc, each
