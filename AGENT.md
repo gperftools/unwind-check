@@ -630,8 +630,7 @@ correctness question called out below rather than left silent.
   not work, because a table's own targets (and exception landing pads) can
   reveal code relevant to *other*, not-yet-resolved dispatches' bounds.
 * **Guessing recovery for unbounded jump tables** (`fde-checker.{h,cc}`:
-  `CheckWithGuessing`, `ProbeJumpTable`,
-  `JumpTargetCompatiblePredicate`, `RowMatchesCleanly`). The bullet above
+  `CheckWithGuessing`, `ProbeJumpTable`, `RowMatchesCleanly`). The bullet above
   covers a table whose `cmp $imm,%r; ja default` guard was found; this one
   is for an indirect jump whose `kJumpTarget` shape is otherwise fully
   resolved (table base, index register, entry width) but which never had a
@@ -650,8 +649,7 @@ correctness question called out below rather than left silent.
   the same jump and, instead of giving up, calls `ProbeJumpTable`: index 0
   is always worth trying (a known-good table base's first entry), and each
   subsequent index is trusted only as long as it keeps decoding to a real
-  instruction landing inside some FDE *and* passes
-  `JumpTargetCompatiblePredicate` — the actual declared CFI row at that
+  instruction landing inside some FDE *and* the actual declared CFI row at that
   target (this FDE's own row if the target lands inside it, otherwise
   whichever FDE covers it, exactly the in-FDE/cross-FDE split §4.6 already
   uses for a real resolved table) checked against the state the jump

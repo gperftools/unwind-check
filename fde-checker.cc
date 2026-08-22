@@ -4,7 +4,6 @@
 #include <string.h>
 
 #include <algorithm>
-#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -370,11 +369,9 @@ class FDEChecker {
   FDEResult Run();
 
  private:
-  std::optional<std::vector<uint64_t>> ResolveJumpTable(uint64_t table_addr, uint64_t entries) const;
+  std::vector<uint64_t> ResolveJumpTable(uint64_t table_addr, uint64_t entries) const;
   std::optional<uint64_t> ResolveTableEntry(uint64_t table_addr, uint64_t index) const;
-  std::optional<std::vector<uint64_t>> ProbeJumpTable(
-      uint64_t table_addr, const std::function<bool(uint64_t target)>& target_is_compatible) const;
-  std::function<bool(uint64_t target)> JumpTargetCompatiblePredicate(uint64_t jmp_pc, const AbsState& state) const;
+  std::vector<uint64_t> ProbeJumpTable(uint64_t table_addr, uint64_t jmp_pc, const AbsState& state) const;
   bool LandsInsideSomeFDE(uint64_t addr) const;
   const CFI* CFIContaining(uint64_t pc) const;
 
@@ -498,18 +495,18 @@ std::optional<uint64_t> FDEChecker::ResolveTableEntry(uint64_t table_addr, uint6
   return target;
 }
 
-std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table_addr, uint64_t entries) const {
+std::vector<uint64_t> FDEChecker::ResolveJumpTable(uint64_t table_addr, uint64_t entries) const {
   VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%x, %u entries)", table_addr, entries);
   if (entries == 0 || entries > kMaxJumpTableEntries) {
     VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%x): entries=%u out of [1,%u], rejecting", table_addr, entries,
                                kMaxJumpTableEntries);
-    return std::nullopt;
+    return {};
   }
   uint64_t size = entries * 4;
   if (!image_.IsFileBackedNonExecutable(table_addr, size)) {
     VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%x): not file-backed & non-executable for %u bytes, rejecting",
                                table_addr, size);
-    return std::nullopt;
+    return {};
   }
   std::vector<uint64_t> targets;
   targets.reserve(entries);
@@ -517,7 +514,7 @@ std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table
     std::optional<uint64_t> target = ResolveTableEntry(table_addr, i);
     if (!target.has_value()) {
       VLOG(1) << absl::StrFormat("ResolveJumpTable(0x%x): entry %u invalid, rejecting whole table", table_addr, i);
-      return std::nullopt;
+      return {};
     }
     targets.push_back(*target);
   }
@@ -525,8 +522,14 @@ std::optional<std::vector<uint64_t>> FDEChecker::ResolveJumpTable(uint64_t table
   return targets;
 }
 
-std::optional<std::vector<uint64_t>> FDEChecker::ProbeJumpTable(
-    uint64_t table_addr, const std::function<bool(uint64_t target)>& target_is_compatible) const {
+// `jmp_pc`/`state` are the indirect jump being probed: each candidate
+// target's own declared CFI row is checked against the state that jump
+// carries (this FDE's own row if the target lands inside it, otherwise
+// whichever FDE covers it, the same in-FDE/cross-FDE split §4.6 uses for a
+// real resolved table), via RowMatchesCleanly -- a dry run into a scratch
+// sink, so a candidate that will not check out cleanly never pollutes the
+// real report before the guess decides to stop trusting it.
+std::vector<uint64_t> FDEChecker::ProbeJumpTable(uint64_t table_addr, uint64_t jmp_pc, const AbsState& state) const {
   std::vector<uint64_t> targets;
   while (targets.size() < kMaxJumpTableEntries) {
     std::optional<uint64_t> target = ResolveTableEntry(table_addr, targets.size());
@@ -535,7 +538,28 @@ std::optional<std::vector<uint64_t>> FDEChecker::ProbeJumpTable(
                                  table_addr, targets.size());
       break;
     }
-    if (!target_is_compatible(*target)) {
+    bool compatible;
+    if (*target >= cfi_.pc_begin && *target < cfi_.pc_end) {
+      const CFIRow* row = cfi_.RowAt(*target);
+      compatible = row != nullptr && RowMatchesCleanly(options_, jmp_pc, *row, state,
+                                                       /*force_callee_saved_same_value=*/false);
+    } else {
+      const CFI* target_cfi = CFIContaining(*target);
+      const CFIRow* target_row = target_cfi != nullptr ? target_cfi->RowAt(*target) : nullptr;
+      // Same rule CheckCrossFDEEdge (§4.6) applies to a confirmed, bounded
+      // table -- kept identical here rather than relaxed, since a guessed
+      // table should be the more conservative of the two, not the looser
+      // one. Forcing callee-saved-same-value can only make this reject a
+      // target it would otherwise accept, never the reverse, so a wrong
+      // guess about "is this really a call-like entry" costs at worst an
+      // early stop (this FDE stays REVIEW instead of REVIEW-LIGHT), never a
+      // false BLESSED.
+      bool target_is_canonical_entry =
+          target_row != nullptr && *target == target_cfi->pc_begin && target_row->IsCanonicalEntry();
+      compatible =
+          target_row != nullptr && RowMatchesCleanly(options_, jmp_pc, *target_row, state, target_is_canonical_entry);
+    }
+    if (!compatible) {
       VLOG(1) << absl::StrFormat(
           "ProbeJumpTable(0x%x): entry %u -> 0x%x decodes fine but its declared CFI row doesn't match the state at "
           "the jump, stopping the guess here",
@@ -546,35 +570,10 @@ std::optional<std::vector<uint64_t>> FDEChecker::ProbeJumpTable(
   }
   if (targets.empty()) {
     VLOG(1) << absl::StrFormat("ProbeJumpTable(0x%x): index 0 already invalid, nothing to guess", table_addr);
-    return std::nullopt;
+  } else {
+    VLOG(1) << absl::StrFormat("ProbeJumpTable(0x%x): guessed %u entries", table_addr, targets.size());
   }
-  VLOG(1) << absl::StrFormat("ProbeJumpTable(0x%x): guessed %u entries", table_addr, targets.size());
   return targets;
-}
-
-std::function<bool(uint64_t)> FDEChecker::JumpTargetCompatiblePredicate(uint64_t jmp_pc, const AbsState& state) const {
-  return [this, jmp_pc, state](uint64_t target) {
-    if (target >= cfi_.pc_begin && target < cfi_.pc_end) {
-      const CFIRow* row = cfi_.RowAt(target);
-      if (row == nullptr) {
-        return false;
-      }
-      return RowMatchesCleanly(options_, jmp_pc, *row, state, /*force_callee_saved_same_value=*/false);
-    }
-    const CFI* target_cfi = CFIContaining(target);
-    if (target_cfi == nullptr) {
-      return false;
-    }
-    const CFIRow* target_row = target_cfi->RowAt(target);
-    if (target_row == nullptr) {
-      return false;
-    }
-    // TODO: I am not sure we really need is canonical logic here. And
-    // if this is right. Even if entry CFI row is canonical, this
-    // quite ~likely .cold fragment and so expecting called saved being same value looks excessive.
-    bool target_is_canonical_entry = target == target_cfi->pc_begin && target_row->IsCanonicalEntry();
-    return RowMatchesCleanly(options_, jmp_pc, *target_row, state, target_is_canonical_entry);
-  };
 }
 
 void FDEChecker::CheckEntryRow(const CFIRow& first_row) {
@@ -776,31 +775,25 @@ void FDEChecker::Drain() {
       }
     }
     if (outcome.has_jump_table) {
-      std::optional<std::vector<uint64_t>> targets =
-          ResolveJumpTable(outcome.jump_table_addr, outcome.jump_table_entries);
-      if (targets.has_value()) {
-        for (uint64_t target : *targets) {
-          if (target >= cfi_.pc_begin && target < cfi_.pc_end) {
-            Propagate(target, state);
-          }
-          // A target outside our own FDE is cross-FDE dispatch (§6); that
-          // FDE gets its own walk, and pass 2 below notes it without
-          // trying to follow.
+      std::vector<uint64_t> targets = ResolveJumpTable(outcome.jump_table_addr, outcome.jump_table_entries);
+      for (uint64_t target : targets) {
+        if (target >= cfi_.pc_begin && target < cfi_.pc_end) {
+          Propagate(target, state);
         }
+        // A target outside our own FDE is cross-FDE dispatch (§6); that
+        // FDE gets its own walk, and pass 2 below notes it without
+        // trying to follow.
       }
     } else if (guessing_enabled_ && outcome.has_unbounded_jump_target) {
       // Same shape as has_jump_table above, except the entry count comes
       // from ProbeJumpTable's guess instead of a declared bound -- see
       // the free CheckWithGuessing() function.
-      std::optional<std::vector<uint64_t>> targets =
-          ProbeJumpTable(outcome.unbounded_jump_table_addr, JumpTargetCompatiblePredicate(pc, state));
-      if (targets.has_value()) {
-        for (uint64_t target : *targets) {
-          if (target >= cfi_.pc_begin && target < cfi_.pc_end) {
-            Propagate(target, state);
-          } else {
-            VLOG(2) << absl::StrFormat("possible target 0x%x outside of current FDE", target);
-          }
+      std::vector<uint64_t> targets = ProbeJumpTable(outcome.unbounded_jump_table_addr, pc, state);
+      for (uint64_t target : targets) {
+        if (target >= cfi_.pc_begin && target < cfi_.pc_end) {
+          Propagate(target, state);
+        } else {
+          VLOG(2) << absl::StrFormat("possible target 0x%x outside of current FDE", target);
         }
       }
     }
@@ -910,12 +903,11 @@ void FDEChecker::VerifyPass() {
       sink_.Add(Finding::Severity::kReview, pc, outcome.review_reason);
     }
     if (outcome.has_jump_table) {
-      std::optional<std::vector<uint64_t>> targets =
-          ResolveJumpTable(outcome.jump_table_addr, outcome.jump_table_entries);
-      if (!targets.has_value()) {
+      std::vector<uint64_t> targets = ResolveJumpTable(outcome.jump_table_addr, outcome.jump_table_entries);
+      if (targets.empty()) {
         sink_.Add(Finding::Severity::kReview, pc, kUnresolvedIndirectJumpMsg);
       } else {
-        for (uint64_t target : *targets) {
+        for (uint64_t target : targets) {
           if (target < cfi_.pc_begin || target >= cfi_.pc_end) {
             if (!CheckCrossFDEEdge(pc, target, state)) {
               sink_.Add(Finding::Severity::kReview, pc,
@@ -938,12 +930,11 @@ void FDEChecker::VerifyPass() {
       unbounded_jump_pc_ = pc;
       bool guessed = false;
       if (guessing_enabled_) {
-        std::optional<std::vector<uint64_t>> targets =
-            ProbeJumpTable(outcome.unbounded_jump_table_addr, JumpTargetCompatiblePredicate(pc, state));
-        if (targets.has_value()) {
+        std::vector<uint64_t> targets = ProbeJumpTable(outcome.unbounded_jump_table_addr, pc, state);
+        if (!targets.empty()) {
           guessed = true;
-          result_.guessed_jump_tables.push_back(GuessedJumpTable{pc, outcome.unbounded_jump_table_addr, *targets});
-          for (uint64_t target : *targets) {
+          result_.guessed_jump_tables.push_back(GuessedJumpTable{pc, outcome.unbounded_jump_table_addr, targets});
+          for (uint64_t target : targets) {
             if (target < cfi_.pc_begin || target >= cfi_.pc_end) {
               if (!CheckCrossFDEEdge(pc, target, state)) {
                 sink_.Add(Finding::Severity::kReview, pc,
