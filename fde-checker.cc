@@ -616,12 +616,10 @@ void FDEChecker::CheckEntryRow(const CFIRow& first_row) {
   }
   const RegRule& ra = first_row.regs[kDWARFRip];
   if (ra.kind != RegRule::Kind::kAtCFAOffset || ra.offset != -8) {
-    if (ra.kind != RegRule::Kind::kUndefined) {
-      sink_.Add(Finding::Severity::kReview, cfi_.pc_begin,
-                absl::StrFormat("a function symbol starts here, so the return address should be at [CFA-8], but "
-                                "the CFI says %v%s",
-                                ra, kEnteredByJump));
-    }
+    sink_.Add(Finding::Severity::kReview, cfi_.pc_begin,
+              absl::StrFormat("a function symbol starts here, so the return address should be at [CFA-8], but "
+                              "the CFI says %v%s",
+                              ra, kEnteredByJump));
   }
 }
 
