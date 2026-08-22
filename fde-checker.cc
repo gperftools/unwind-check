@@ -842,7 +842,6 @@ void FDEChecker::SeedUnreachedLandingPads() {
 
 // Pass 2: Verify settled states against declared CFI rows in deterministic (sorted PC) order.
 void FDEChecker::VerifyPass() {
-  // TODO: some sort of hash-keys util?
   std::vector<uint64_t> reached_pcs;
   reached_pcs.reserve(in_states_.size());
   for (const auto& [pc, _] : in_states_) {
@@ -853,7 +852,6 @@ void FDEChecker::VerifyPass() {
   for (uint64_t pc : reached_pcs) {
     const AbsState& state = in_states_[pc];
     if (trace_out_ != nullptr) {
-      // TODO: emplace
       trace_out_->push_back(InsnTrace{pc, state});
     }
 
