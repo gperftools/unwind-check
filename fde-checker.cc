@@ -1140,6 +1140,15 @@ FDEResult FDEChecker::Run() {
     result_.verdict = Verdict::kReview;
     return result_;
   }
+
+  if (first_row->regs[kDWARFRip].kind == RegRule::Kind::kUndefined) {
+    // Special case. _start and some thread start routines do this to
+    // signal "no unwind from here". Since rest of CFI doesn't matter,
+    // lets not check those.
+    result_.verdict = Verdict::kBlessed;
+    return result_;
+  }
+
   // Seeded on is_canonical_entry_, not at_function_entry_: symbol tables
   // are frequently absent (a stripped binary has one for maybe a third of
   // its FDEs), but a callee-saved register cannot be clobbered without
