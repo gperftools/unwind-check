@@ -126,7 +126,7 @@ recognize, is a hard error naming what went wrong.
 | `report.{h,cc}`, `unwind-check.cc` | flags, structural checks, output |
 | `diagnostics.{h,cc}`, `inspect.rb` | `--inspect`: gathers CFI rows/findings/state as JSON, pipes into `inspect.rb`, which interleaves them into `objdump --visualize-jumps`'s output |
 | `testdata/fixtures.S` | hand-written CFI whose right answer is fixed by the fixture |
-| `robustness-sweep.sh` | the non-hermetic counterpart to `bazel test`: does it survive real binaries |
+| `robustness-sweep.rb` | the non-hermetic counterpart to `bazel test`: does it survive real binaries |
 
 ## 4. How it works
 
@@ -545,7 +545,7 @@ not exact digits, applies here too.
 
 The Capstone-to-Zydis migration was validated by A/B-diffing both decoders'
 output, on the same machine, over this table's binaries plus the 400-binary
-`robustness-sweep.sh` sample: identical verdict counts everywhere except one
+`robustness-sweep.rb` sample: identical verdict counts everywhere except one
 FDE in `libstdc++.so.6` (`std::from_chars`'s internals), which moved from
 blessed to review. Traced by hand: a local scratch buffer's stack slot
 genuinely overlaps a callee-saved spill slot the CFI still declares live at
@@ -553,7 +553,7 @@ that PC, on one code path — Zydis's decode is not in question, the finding
 is real, and REVIEW (not MISMATCH) is the correct, conservative verdict for
 it. Whether Capstone missed this from a decode gap or some other imprecision
 was not tracked down. `libaom.so.3`, the one binary in the sweep sample over
-robustness-sweep.sh's 5-second slow-flag threshold, is very slightly faster
+robustness-sweep.rb's 5-second slow-flag threshold, is very slightly faster
 under Zydis (~5.7s vs ~6.6s under Capstone) rather than slower.
 
 Review counts here are much lower than earlier versions of this tool. Two
@@ -582,7 +582,7 @@ cannot prove unreachable. It is flagged, which is what the contract asks for.
 Precision at scale: over a 400-binary sample of `/usr/bin` and
 `/usr/lib/x86_64-linux-gnu` — 41,872 FDEs, 40,932 blessed — there were **zero**
 crashes, hangs or runs over five seconds, and exactly **one** mismatch, which
-was `_start` again. Reproduce with `./robustness-sweep.sh`;
+was `_start` again. Reproduce with `./robustness-sweep.rb`;
 anything it prints as ABNORMAL is a bug in this tool.
 
 Remaining reviews are dominated by indirect jumps that don't resolve to a
