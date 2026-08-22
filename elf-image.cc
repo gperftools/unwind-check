@@ -15,6 +15,7 @@
 #include <string_view>
 
 #include "absl/algorithm/container.h"
+#include "absl/cleanup/cleanup.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_format.h"
 #include "dwarf-constants.h"
@@ -38,20 +39,6 @@ uint64_t RoundUp(uint64_t v, uint64_t align) {
 bool FitsIn(uint64_t off, uint64_t len, uint64_t size) {
   return off <= size && len <= size - off;
 }
-
-class Closer {
- public:
-  explicit Closer(int fd) : fd_(fd) {
-  }
-  ~Closer() {
-    if (fd_ >= 0) {
-      close(fd_);
-    }
-  }
-
- private:
-  int fd_;
-};
 
 // Decodes one DW_EH_PE-encoded pointer out of the eh_frame_hdr. Only the
 // handful of encodings that show up there are supported; anything else
@@ -183,7 +170,7 @@ absl::StatusOr<std::unique_ptr<ELFImage>> ELFImage::Open(const std::string& path
   if (fd < 0) {
     return absl::NotFoundError(absl::StrFormat("cannot open %s: %s", path, strerror(errno)));
   }
-  Closer closer{fd};
+  absl::Cleanup closer = [fd] { close(fd); };
 
   struct stat st;
   if (fstat(fd, &st) != 0) {

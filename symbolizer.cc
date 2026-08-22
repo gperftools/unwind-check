@@ -9,6 +9,7 @@
 #include <algorithm>
 
 #include "absl/algorithm/container.h"
+#include "absl/cleanup/cleanup.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_split.h"
@@ -61,13 +62,11 @@ std::string PickToolPath(Symbolizer::Addr2LineMode mode, std::string tool_path) 
 std::string Demangle(const std::string& name) {
   int status = 0;
   char* out = abi::__cxa_demangle(name.c_str(), nullptr, nullptr, &status);
+  absl::Cleanup free_out = [out] { free(out); };
   if (status != 0 || out == nullptr) {
-    free(out);
     return name;
   }
-  std::string result{out};
-  free(out);
-  return result;
+  return std::string{out};
 }
 
 Symbolizer::Symbolizer(const ELFImage& image, Addr2LineMode mode, std::string tool_path)

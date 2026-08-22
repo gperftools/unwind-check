@@ -7,6 +7,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 
@@ -41,11 +42,17 @@ absl::StatusOr<Subprocess> SpawnProcess(const std::vector<std::string>& argv, co
   // side of the pipe needs to survive into the child.
   int stdin_pipe[2] = {-1, -1};
   int stdout_pipe[2] = {-1, -1};
+  // Cancelled once each end has found its final owner (the child, via
+  // exec, or the returned Subprocess); until then it closes whatever is
+  // still open on every return path, success or not.
+  absl::Cleanup pipe_closer = [&] {
+    ClosePipe(stdin_pipe);
+    ClosePipe(stdout_pipe);
+  };
   if (options.pipe_stdin && pipe2(stdin_pipe, O_CLOEXEC) != 0) {
     return absl::InternalError(absl::StrCat("pipe(): ", strerror(errno)));
   }
   if (options.pipe_stdout && pipe2(stdout_pipe, O_CLOEXEC) != 0) {
-    ClosePipe(stdin_pipe);
     return absl::InternalError(absl::StrCat("pipe(): ", strerror(errno)));
   }
 
@@ -72,21 +79,18 @@ absl::StatusOr<Subprocess> SpawnProcess(const std::vector<std::string>& argv, co
   int rc = posix_spawnp(&pid, argv[0].c_str(), &actions, nullptr, cargv.data(), environ);
   posix_spawn_file_actions_destroy(&actions);
 
-  // The parent never touches the ends the child owns.
+  // The parent never touches the ends the child owns, whether or not the
+  // spawn actually succeeded.
   if (options.pipe_stdin) {
     close(stdin_pipe[0]);
+    stdin_pipe[0] = -1;
   }
   if (options.pipe_stdout) {
     close(stdout_pipe[1]);
+    stdout_pipe[1] = -1;
   }
 
   if (rc != 0) {
-    if (options.pipe_stdin) {
-      close(stdin_pipe[1]);
-    }
-    if (options.pipe_stdout) {
-      close(stdout_pipe[0]);
-    }
     return absl::InternalError(absl::StrCat("posix_spawnp(", argv[0], "): ", strerror(rc)));
   }
 
@@ -94,6 +98,7 @@ absl::StatusOr<Subprocess> SpawnProcess(const std::vector<std::string>& argv, co
   sp.pid = pid;
   sp.stdin_fd = options.pipe_stdin ? stdin_pipe[1] : -1;
   sp.stdout_fd = options.pipe_stdout ? stdout_pipe[0] : -1;
+  std::move(pipe_closer).Cancel();
   return sp;
 }
 

@@ -26,6 +26,7 @@ cc_library(
     hdrs = ["subprocess.h"],
     copts = DEFAULT_COPTS,
     deps = [
+        "@abseil-cpp//absl/cleanup",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
@@ -59,6 +60,7 @@ cc_library(
     deps = [
         ":dwarf-constants",
         "@abseil-cpp//absl/algorithm:container",
+        "@abseil-cpp//absl/cleanup",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings:str_format",
@@ -158,6 +160,7 @@ cc_library(
         ":elf-image",
         ":subprocess",
         "@abseil-cpp//absl/algorithm:container",
+        "@abseil-cpp//absl/cleanup",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status:statusor",
