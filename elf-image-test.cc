@@ -3,8 +3,7 @@
 
 #include <string.h>
 
-#include <algorithm>
-
+#include "absl/algorithm/container.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
@@ -59,7 +58,7 @@ TEST_F(ELFImageTest, MapsCodeBytesThatMatchTheFile) {
   ASSERT_EQ(bytes.size(), 8u);
   // good_leaf starts with `mov %edi, %eax`; whichever symbol sorts first,
   // executable code is never all zeroes.
-  EXPECT_NE(std::count(bytes.begin(), bytes.end(), 0), 8);
+  EXPECT_NE(absl::c_count(bytes, 0), 8);
 }
 
 TEST_F(ELFImageTest, KnowsWhichAddressesAreExecutable) {

@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/algorithm/container.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
@@ -88,8 +89,7 @@ std::vector<ListedInsn> ListInstructions(const ELFImage& image, Disassembler* di
 }
 
 int FindListedInsn(const std::vector<ListedInsn>& listing, uint64_t pc) {
-  auto it =
-      std::lower_bound(listing.begin(), listing.end(), pc, [](const ListedInsn& li, uint64_t p) { return li.pc < p; });
+  auto it = absl::c_lower_bound(listing, pc, [](const ListedInsn& li, uint64_t p) { return li.pc < p; });
   if (it == listing.end() || it->pc != pc) {
     return -1;
   }

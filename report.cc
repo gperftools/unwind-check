@@ -3,10 +3,10 @@
 
 #include <stdio.h>
 
-#include <algorithm>
 #include <string>
 #include <vector>
 
+#include "absl/algorithm/container.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "diagnostics.h"
@@ -121,7 +121,7 @@ void PrintReport(const std::vector<FDEResult>& results, Symbolizer* symbolizer, 
       }
       ordered.push_back(&r);
     }
-    std::stable_sort(ordered.begin(), ordered.end(), [](const FDEResult* a, const FDEResult* b) {
+    absl::c_stable_sort(ordered, [](const FDEResult* a, const FDEResult* b) {
       return static_cast<int>(a->verdict) > static_cast<int>(b->verdict);
     });
     for (const FDEResult* r : ordered) {

@@ -3,8 +3,7 @@
 
 #include <string.h>
 
-#include <algorithm>
-
+#include "absl/algorithm/container.h"
 #include "absl/strings/str_format.h"
 #include "dwarf-constants.h"
 #include "eh-frame-reader.h"  // EHFrameError
@@ -144,8 +143,7 @@ std::vector<LSDACallSite> ReadLSDACallSites(const ELFImage& image, uint64_t lsda
     }
   }
 
-  std::sort(call_sites.begin(), call_sites.end(),
-            [](const LSDACallSite& a, const LSDACallSite& b) { return a.start < b.start; });
+  absl::c_sort(call_sites, [](const LSDACallSite& a, const LSDACallSite& b) { return a.start < b.start; });
   return call_sites;
 }
 

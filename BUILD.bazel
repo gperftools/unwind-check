@@ -58,6 +58,7 @@ cc_library(
     copts = DEFAULT_COPTS,
     deps = [
         ":dwarf-constants",
+        "@abseil-cpp//absl/algorithm:container",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings:str_format",
@@ -71,6 +72,7 @@ cc_library(
     copts = DEFAULT_COPTS,
     deps = [
         ":eh-frame-reader",
+        "@abseil-cpp//absl/algorithm:container",
         "@abseil-cpp//absl/strings:str_format",
     ],
 )
@@ -84,6 +86,7 @@ cc_library(
         ":dwarf-constants",
         ":eh-frame-reader",
         ":elf-image",
+        "@abseil-cpp//absl/algorithm:container",
         "@abseil-cpp//absl/strings:str_format",
     ],
 )
@@ -139,6 +142,7 @@ cc_library(
         ":elf-image",
         ":insn-semantics",
         ":lsda-reader",
+        "@abseil-cpp//absl/algorithm:container",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/strings:str_format",
@@ -153,6 +157,7 @@ cc_library(
     deps = [
         ":elf-image",
         ":subprocess",
+        "@abseil-cpp//absl/algorithm:container",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/status:statusor",
@@ -172,6 +177,7 @@ cc_library(
         ":elf-image",
         ":fde-checker",
         ":subprocess",
+        "@abseil-cpp//absl/algorithm:container",
         "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
@@ -189,6 +195,7 @@ cc_library(
         ":diagnostics",
         ":fde-checker",
         ":symbolizer",
+        "@abseil-cpp//absl/algorithm:container",
         "@abseil-cpp//absl/strings:str_format",
     ],
 )
@@ -212,6 +219,7 @@ cc_binary(
         ":fde-checker",
         ":report",
         ":symbolizer",
+        "@abseil-cpp//absl/algorithm:container",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/flags:flag",
@@ -261,6 +269,7 @@ cc_test(
         ":elf-image",
         ":fde-checker",
         ":symbolizer",
+        "@abseil-cpp//absl/algorithm:container",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
         "@googletest//:gtest_main",
@@ -307,6 +316,7 @@ cc_test(
     ],
     deps = [
         ":elf-image",
+        "@abseil-cpp//absl/algorithm:container",
         "@googletest//:gtest_main",
     ],
 )

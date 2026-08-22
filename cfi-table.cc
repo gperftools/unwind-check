@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <map>
 
+#include "absl/algorithm/container.h"
 #include "absl/strings/str_format.h"
 #include "eh-frame-reader.h"
 
@@ -207,8 +208,7 @@ const CFIRow* CFI::RowAt(uint64_t pc) const {
     return nullptr;
   }
   // Last row whose pc_start <= pc.
-  auto it =
-      std::upper_bound(rows.begin(), rows.end(), pc, [](uint64_t v, const CFIRow& row) { return v < row.pc_start; });
+  auto it = absl::c_upper_bound(rows, pc, [](uint64_t v, const CFIRow& row) { return v < row.pc_start; });
   if (it == rows.begin()) {
     return nullptr;
   }

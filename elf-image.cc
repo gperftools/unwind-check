@@ -14,6 +14,7 @@
 #include <optional>
 #include <string_view>
 
+#include "absl/algorithm/container.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_format.h"
 #include "dwarf-constants.h"
@@ -250,8 +251,7 @@ absl::StatusOr<std::unique_ptr<ELFImage>> ELFImage::Open(const std::string& path
   if (img->segments_.empty()) {
     return absl::InvalidArgumentError(absl::StrFormat("%s has no PT_LOAD segments", path));
   }
-  std::sort(img->segments_.begin(), img->segments_.end(),
-            [](const LoadSegment& a, const LoadSegment& b) { return a.vaddr < b.vaddr; });
+  absl::c_sort(img->segments_, [](const LoadSegment& a, const LoadSegment& b) { return a.vaddr < b.vaddr; });
 
   // The fake load. One PROT_NONE reservation covering every PT_LOAD's vaddr
   // range, with each segment mapped into place via MAP_FIXED, so that the
@@ -369,8 +369,7 @@ absl::StatusOr<std::unique_ptr<ELFImage>> ELFImage::Open(const std::string& path
         }
       }
     }
-    std::sort(img->func_symbols_.begin(), img->func_symbols_.end(),
-              [](const FuncSymbol& a, const FuncSymbol& b) { return a.vaddr < b.vaddr; });
+    absl::c_sort(img->func_symbols_, [](const FuncSymbol& a, const FuncSymbol& b) { return a.vaddr < b.vaddr; });
   }
 
   img->eh_frame_hdr_ = eh_frame_hdr_vaddr;

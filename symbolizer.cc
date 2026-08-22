@@ -8,6 +8,7 @@
 
 #include <algorithm>
 
+#include "absl/algorithm/container.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_split.h"
@@ -90,8 +91,7 @@ std::string Symbolizer::Name(uint64_t vaddr) const {
   if (syms.empty()) {
     return DebugName(vaddr);
   }
-  auto it =
-      std::upper_bound(syms.begin(), syms.end(), vaddr, [](uint64_t v, const FuncSymbol& s) { return v < s.vaddr; });
+  auto it = absl::c_upper_bound(syms, vaddr, [](uint64_t v, const FuncSymbol& s) { return v < s.vaddr; });
   if (it == syms.begin()) {
     return DebugName(vaddr);
   }
@@ -118,7 +118,7 @@ void Symbolizer::Prepare(const std::vector<uint64_t>& addresses) {
       pending.push_back(a);
     }
   }
-  std::sort(pending.begin(), pending.end());
+  absl::c_sort(pending);
   pending.erase(std::unique(pending.begin(), pending.end()), pending.end());
 
   for (size_t start = 0; start < pending.size(); start += kBatchSize) {

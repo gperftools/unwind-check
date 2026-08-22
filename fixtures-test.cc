@@ -4,13 +4,13 @@
 // is hand-written so that the right answer is fixed by the fixture and
 // not by whatever compiler happened to build it.
 
-#include <algorithm>
 #include <map>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
@@ -67,7 +67,7 @@ class FixturesTest : public testing::Test {
     for (const CFI& cfi : all_cfis) {
       cfi_index.emplace_back(std::make_pair(cfi.pc_begin, cfi.pc_end), &cfi);
     }
-    std::sort(cfi_index.begin(), cfi_index.end());
+    absl::c_sort(cfi_index);
 
     FDECheckerOptions options;
     options.image = image_;

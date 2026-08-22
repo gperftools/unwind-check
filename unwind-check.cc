@@ -11,6 +11,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/flags/flag.h"
@@ -166,8 +167,7 @@ void RunStructuralChecks(const ELFImage& image, const std::vector<RawFDE>& fdes,
     checkable->push_back(&cfi);
   }
 
-  std::sort(sorted.begin(), sorted.end(),
-            [](const RawFDE* a, const RawFDE* b) { return a->cfi->pc_begin < b->cfi->pc_begin; });
+  absl::c_sort(sorted, [](const RawFDE* a, const RawFDE* b) { return a->cfi->pc_begin < b->cfi->pc_begin; });
   for (size_t i = 1; i < sorted.size(); i++) {
     const CFI& prev = *sorted[i - 1]->cfi;
     const CFI& cur = *sorted[i]->cfi;
@@ -267,7 +267,7 @@ int Run(const std::string& path, const std::string& ruby_script_path) {
   for (const CFI* cfi : checkable) {
     cfi_index.emplace_back(std::make_pair(cfi->pc_begin, cfi->pc_end), cfi);
   }
-  std::sort(cfi_index.begin(), cfi_index.end());
+  absl::c_sort(cfi_index);
 
   FDECheckerOptions options;
   options.image = &image;

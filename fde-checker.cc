@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
@@ -29,7 +30,7 @@ constexpr char kUnresolvedIndirectJumpMsg[] =
     "unchecked";
 
 bool IsCalleeSaved(int reg) {
-  return std::find(std::begin(kCalleeSaved), std::end(kCalleeSaved), reg) != std::end(kCalleeSaved);
+  return absl::c_linear_search(kCalleeSaved, reg);
 }
 
 // Switch-table bound tracking: the guard (`cmp $imm,%r; ja/jae default`) is
@@ -459,8 +460,8 @@ bool FDEChecker::LandsInsideSomeFDE(uint64_t addr) const {
 }
 
 const CFI* FDEChecker::CFIContaining(uint64_t pc) const {
-  auto it = std::upper_bound(
-      cfi_index_.begin(), cfi_index_.end(), pc,
+  auto it = absl::c_upper_bound(
+      cfi_index_, pc,
       [](uint64_t a, const std::pair<std::pair<uint64_t, uint64_t>, const CFI*>& e) { return a < e.first.first; });
   if (it == cfi_index_.begin()) {
     return nullptr;
@@ -605,19 +606,17 @@ void FDEChecker::SetupCallSites() {
   }
   // Remove landing pads not in our FDE, those removed pads we cannot
   // verify.
-  call_sites_.erase(std::remove_if(call_sites_.begin(), call_sites_.end(),
-                                   [&](const LSDACallSite& cs) {
-                                     return cs.landing_pad < cfi_.pc_begin || cs.landing_pad >= cfi_.pc_end;
-                                   }),
-                    call_sites_.end());
+  std::erase_if(call_sites_, [&](const LSDACallSite& cs) {
+    return cs.landing_pad < cfi_.pc_begin || cs.landing_pad >= cfi_.pc_end;
+  });
 }
 
 // We model possible control transfers from call sites to landing pads
 // based on range defined in LSDA entry. Entries are non-overlapped
 // and sorted.
 std::optional<uint64_t> FDEChecker::LandingPadForCall(uint64_t call_pc) const {
-  auto it = std::upper_bound(call_sites_.begin(), call_sites_.end(), call_pc,
-                             [](uint64_t pc, const LSDACallSite& cs) { return pc < cs.start; });
+  auto it =
+      absl::c_upper_bound(call_sites_, call_pc, [](uint64_t pc, const LSDACallSite& cs) { return pc < cs.start; });
   if (it == call_sites_.begin()) {
     return std::nullopt;
   }
@@ -817,7 +816,7 @@ void FDEChecker::SeedUnreachedLandingPads() {
   for (const LSDACallSite& cs : call_sites_) {
     distinct_landing_pads.push_back(cs.landing_pad);
   }
-  std::sort(distinct_landing_pads.begin(), distinct_landing_pads.end());
+  absl::c_sort(distinct_landing_pads);
   distinct_landing_pads.erase(std::unique(distinct_landing_pads.begin(), distinct_landing_pads.end()),
                               distinct_landing_pads.end());
   bool seeded_any = false;
@@ -847,7 +846,7 @@ void FDEChecker::VerifyPass() {
   for (const auto& [pc, _] : in_states_) {
     reached_pcs.push_back(pc);
   }
-  std::sort(reached_pcs.begin(), reached_pcs.end());
+  absl::c_sort(reached_pcs);
 
   for (uint64_t pc : reached_pcs) {
     const AbsState& state = in_states_[pc];
