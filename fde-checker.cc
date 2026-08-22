@@ -150,15 +150,6 @@ class RowChecker {
     }
   }
 
-  // Reads a register out of the state, or nullopt for RA, which is not a
-  // GPR and so has no tracked value of its own.
-  static std::optional<AbsVal> RegValue(const AbsState& state, int reg) {
-    if (reg < 0 || reg >= kNumGPRs) {
-      return std::nullopt;
-    }
-    return state.reg(reg);
-  }
-
   void CheckReg(int r, const RegRule& rule, const AbsState& state) {
     switch (rule.kind) {
       case RegRule::Kind::kUnset:
@@ -191,37 +182,29 @@ class RowChecker {
       }
 
       case RegRule::Kind::kValOffset: {
-        std::optional<AbsVal> v = RegValue(state, r);
-        if (!v.has_value()) {
-          return;
-        }
-        if (v->is_unknown()) {
+        AbsVal v = state.reg(r);
+        if (v.is_unknown()) {
           Review(absl::StrFormat("CFI says %s is CFA%+d, but we are not tracking it here", DWARFRegName(r),
                                  static_cast<int>(rule.offset)));
           return;
         }
-        if (!v->IsCFARel(rule.offset)) {
+        if (!v.IsCFARel(rule.offset)) {
           Mismatch(absl::StrFormat("CFI says %s is CFA%+d, but it holds %v", DWARFRegName(r),
-                                   static_cast<int>(rule.offset), *v));
+                                   static_cast<int>(rule.offset), v));
         }
         return;
       }
 
       case RegRule::Kind::kInRegister: {
-        std::optional<AbsVal> v = RegValue(state, rule.reg);
-        if (!v.has_value()) {
-          Review(absl::StrFormat("CFI says %s was moved into DWARF register %d, which we do not track", DWARFRegName(r),
-                                 rule.reg));
-          return;
-        }
-        if (v->is_unknown()) {
+        AbsVal v = state.reg(rule.reg);
+        if (v.is_unknown()) {
           Review(absl::StrFormat("CFI says %s was moved into %s, but we are not tracking %s here", DWARFRegName(r),
                                  DWARFRegName(rule.reg), DWARFRegName(rule.reg)));
           return;
         }
-        if (!v->IsOrigReg(r)) {
+        if (!v.IsOrigReg(r)) {
           Mismatch(absl::StrFormat("CFI says %s was moved into %s, but %s holds %v", DWARFRegName(r),
-                                   DWARFRegName(rule.reg), DWARFRegName(rule.reg), *v));
+                                   DWARFRegName(rule.reg), DWARFRegName(rule.reg), v));
         }
         return;
       }
@@ -235,16 +218,14 @@ class RowChecker {
   }
 
   void CheckSameValue(int r, const AbsState& state) {
-    std::optional<AbsVal> v = RegValue(state, r);
-    if (!v.has_value() || v->is_unknown()) {
-      if (v.has_value()) {
-        Review(absl::StrFormat("CFI says %s still holds its entry value, but we are not tracking it here",
-                               DWARFRegName(r)));
-      }
+    AbsVal v = state.reg(r);
+    if (v.is_unknown()) {
+      Review(
+          absl::StrFormat("CFI says %s still holds its entry value, but we are not tracking it here", DWARFRegName(r)));
       return;
     }
-    if (!v->IsOrigReg(r)) {
-      Mismatch(absl::StrFormat("CFI says %s still holds its entry value, but it holds %v", DWARFRegName(r), *v));
+    if (!v.IsOrigReg(r)) {
+      Mismatch(absl::StrFormat("CFI says %s still holds its entry value, but it holds %v", DWARFRegName(r), v));
     }
   }
 
