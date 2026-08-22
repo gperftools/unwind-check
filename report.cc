@@ -43,7 +43,7 @@ void PrintOne(const FDEResult& r, Symbolizer* sym, const ReportContext* ctx) {
   }
 
   for (const Finding& f : r.findings) {
-    if (f.pc == 0 && f.insn_text.empty()) {
+    if (f.pc == 0) {
       absl::PrintF("  %s\n", f.message);
       continue;
     }
@@ -52,8 +52,6 @@ void PrintOne(const FDEResult& r, Symbolizer* sym, const ReportContext* ctx) {
     std::string window;
     if (!listing.empty() && AppendFindingContext(listing, f, DiagnosticsOptions{}, &window)) {
       absl::PrintF("%s", window);
-    } else if (!f.insn_text.empty()) {
-      absl::PrintF("      at: %s\n", f.insn_text);
     }
   }
 

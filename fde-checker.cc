@@ -45,8 +45,8 @@ class FindingSink {
   explicit FindingSink(size_t cap) : cap_(cap) {
   }
 
-  void Add(Finding::Severity severity, uint64_t pc, std::string_view message, std::string_view insn_text) {
-    VLOG(2) << absl::StrFormat("Sink->Add(%d, 0x%x, \"%s\", \"%s\")", severity, pc, message, insn_text);
+  void Add(Finding::Severity severity, uint64_t pc, std::string_view message) {
+    VLOG(2) << absl::StrFormat("Sink->Add(%d, 0x%x, \"%s\")", severity, pc, message);
     auto it = index_.find(message);
     if (it != index_.end()) {
       findings_[it->second].repeats++;
@@ -57,13 +57,13 @@ class FindingSink {
       return;
     }
     index_.emplace(message, findings_.size());
-    findings_.emplace_back(severity, pc, std::string{message}, std::string(insn_text), 0);
+    findings_.emplace_back(severity, pc, std::string{message}, 0);
   }
 
   std::vector<Finding> Take() {
     if (truncated_ > 0) {
       findings_.emplace_back(Finding::Severity::kReview, 0,
-                             absl::StrFormat("%d further distinct findings not shown", truncated_), "", 0);
+                             absl::StrFormat("%d further distinct findings not shown", truncated_), 0);
     }
     return std::move(findings_);
   }
@@ -98,9 +98,8 @@ class RowChecker {
   // this, a tail call that clobbers a callee-saved register without
   // restoring it would go unnoticed whenever the target FDE's own body
   // never bothered to say so explicitly (which is the common case).
-  void Check(uint64_t pc, const CFIRow& row, const AbsState& state, std::string_view insn_text,
-             std::string_view edge_context = "", bool force_callee_saved_same_value = false) {
-    insn_text_ = insn_text;
+  void Check(uint64_t pc, const CFIRow& row, const AbsState& state, std::string_view edge_context = "",
+             bool force_callee_saved_same_value = false) {
     pc_ = pc;
     edge_context_ = edge_context;
     force_callee_saved_same_value_ = force_callee_saved_same_value;
@@ -113,16 +112,16 @@ class RowChecker {
  private:
   void Review(std::string_view msg) {
     if (edge_context_.empty()) {
-      sink_->Add(Finding::Severity::kReview, pc_, msg, insn_text_);
+      sink_->Add(Finding::Severity::kReview, pc_, msg);
     } else {
-      sink_->Add(Finding::Severity::kReview, pc_, absl::StrCat(edge_context_, msg), insn_text_);
+      sink_->Add(Finding::Severity::kReview, pc_, absl::StrCat(edge_context_, msg));
     }
   }
   void Mismatch(std::string_view msg) {
     if (edge_context_.empty()) {
-      sink_->Add(Finding::Severity::kMismatch, pc_, msg, insn_text_);
+      sink_->Add(Finding::Severity::kMismatch, pc_, msg);
     } else {
-      sink_->Add(Finding::Severity::kMismatch, pc_, absl::StrCat(edge_context_, msg), insn_text_);
+      sink_->Add(Finding::Severity::kMismatch, pc_, absl::StrCat(edge_context_, msg));
     }
   }
 
@@ -255,7 +254,6 @@ class RowChecker {
 
   const FDECheckerOptions& options_;
   FindingSink* sink_;
-  std::string_view insn_text_;
   uint64_t pc_ = 0;
   std::string_view edge_context_;
   bool force_callee_saved_same_value_ = false;
@@ -274,7 +272,7 @@ bool RowMatchesCleanly(const FDECheckerOptions& options, uint64_t pc, const CFIR
                        bool force_callee_saved_same_value) {
   FindingSink scratch{1};
   RowChecker checker{options, &scratch};
-  checker.Check(pc, row, state, /*insn_text=*/"", /*edge_context=*/"", force_callee_saved_same_value);
+  checker.Check(pc, row, state, /*edge_context=*/"", force_callee_saved_same_value);
   return scratch.Take().empty();
 }
 
@@ -407,12 +405,11 @@ class FDEChecker {
   void SetupCallSites();
   std::optional<uint64_t> LandingPadForCall(uint64_t call_pc) const;
   void Propagate(uint64_t pc, const AbsState& state);
-  bool CheckCrossFDEEdge(uint64_t edge_pc, uint64_t target, const AbsState& edge_state,
-                         const std::string& edge_insn_text);
+  bool CheckCrossFDEEdge(uint64_t edge_pc, uint64_t target, const AbsState& edge_state);
   void Drain();
   void SeedUnreachedLandingPads();
   void VerifyPass();
-  void CheckExitState(uint64_t pc, const AbsState& state, const std::string& insn_text, bool is_tail_call);
+  void CheckExitState(uint64_t pc, const AbsState& state, bool is_tail_call);
   void ReportCoverageGaps();
 
   const ELFImage& image_;
@@ -615,8 +612,7 @@ void FDEChecker::CheckEntryRow(const CFIRow& first_row) {
   if (first_row.cfa.kind != CFARule::Kind::kRegOffset || first_row.cfa.reg != kDWARFRsp || first_row.cfa.offset != 8) {
     sink_.Add(Finding::Severity::kReview, cfi_.pc_begin,
               absl::StrFormat("a function symbol starts here, so the CFA should be rsp+8, but the CFI says %v%s",
-                              first_row.cfa, kEnteredByJump),
-              "");
+                              first_row.cfa, kEnteredByJump));
   }
   const RegRule& ra = first_row.regs[kDWARFRip];
   if (ra.kind != RegRule::Kind::kAtCFAOffset || ra.offset != -8) {
@@ -624,8 +620,7 @@ void FDEChecker::CheckEntryRow(const CFIRow& first_row) {
       sink_.Add(Finding::Severity::kReview, cfi_.pc_begin,
                 absl::StrFormat("a function symbol starts here, so the return address should be at [CFA-8], but "
                                 "the CFI says %v%s",
-                                ra, kEnteredByJump),
-                "");
+                                ra, kEnteredByJump));
     }
   }
 }
@@ -652,10 +647,9 @@ void FDEChecker::SetupCallSites() {
   try {
     call_sites_ = ReadLSDACallSites(image_, cfi_.lsda_addr, cfi_.pc_begin);
   } catch (const EHFrameError& e) {
-    sink_.Add(
-        Finding::Severity::kReview, cfi_.pc_begin,
-        absl::StrFormat("failed to parse this FDE's LSDA (.gcc_except_table) at 0x%016x: %s", cfi_.lsda_addr, e.what()),
-        "");
+    sink_.Add(Finding::Severity::kReview, cfi_.pc_begin,
+              absl::StrFormat("failed to parse this FDE's LSDA (.gcc_except_table) at 0x%016x: %s", cfi_.lsda_addr,
+                              e.what()));
     call_sites_.clear();
     return;
   }
@@ -724,8 +718,7 @@ void FDEChecker::Propagate(uint64_t pc, const AbsState& state) {
 // `target` (a PLT stub is exactly this case, since RunStructuralChecks
 // excludes PLT-covered FDEs from what the caller hands us), so the caller
 // can fall back to the ABI-based check.
-bool FDEChecker::CheckCrossFDEEdge(uint64_t edge_pc, uint64_t target, const AbsState& edge_state,
-                                   const std::string& edge_insn_text) {
+bool FDEChecker::CheckCrossFDEEdge(uint64_t edge_pc, uint64_t target, const AbsState& edge_state) {
   const CFI* target_cfi = CFIContaining(target);
   if (target_cfi == nullptr) {
     return false;
@@ -742,7 +735,7 @@ bool FDEChecker::CheckCrossFDEEdge(uint64_t edge_pc, uint64_t target, const AbsS
   // clobber unnoticed because the target's body never bothered to spell
   // out what a genuine entry implies for free.
   bool target_is_canonical_entry = target == target_cfi->pc_begin && target_row->IsCanonicalEntry();
-  row_checker_.Check(edge_pc, *target_row, edge_state, edge_insn_text,
+  row_checker_.Check(edge_pc, *target_row, edge_state,
                      absl::StrFormat("jump to 0x%x (FDE at 0x%x): ", target, target_cfi->fde_addr),
                      target_is_canonical_entry);
   return true;
@@ -884,8 +877,7 @@ void FDEChecker::SeedUnreachedLandingPads() {
     }
     sink_.Add(Finding::Severity::kReview, lp,
               "this landing pad's incoming state could not be derived from any call site actually walked, so it is "
-              "trusted from its own declared CFI row instead of independently checked",
-              "");
+              "trusted from its own declared CFI row instead of independently checked");
     Propagate(lp, AbsState::SeedFromRow(*row, /*at_function_entry=*/false));
     seeded_any = true;
   }
@@ -912,13 +904,11 @@ void FDEChecker::VerifyPass() {
     std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi_.pc_end - pc));
     Instruction insn;
     if (bytes.empty() || !disasm_->Decode(bytes.data(), bytes.size(), pc, &insn)) {
-      sink_.Add(Finding::Severity::kReview, pc, "cannot decode the instruction at this address", "");
+      sink_.Add(Finding::Severity::kReview, pc, "cannot decode the instruction at this address");
       continue;
     }
-    std::string insn_text =
-        Disassembler::Text(insn).value_or(absl::StrFormat("<cannot format instruction at 0x%x>", pc));
     if (pc + insn.size > cfi_.pc_end) {
-      sink_.Add(Finding::Severity::kReview, pc, "instruction runs past the end of the FDE's PC range", insn_text);
+      sink_.Add(Finding::Severity::kReview, pc, "instruction runs past the end of the FDE's PC range");
       continue;
     }
     result_.instructions_checked++;
@@ -927,9 +917,9 @@ void FDEChecker::VerifyPass() {
     // before applying the instruction, not after.
     const CFIRow* row = cfi_.RowAt(pc);
     if (row == nullptr) {
-      sink_.Add(Finding::Severity::kReview, pc, "no CFI row covers this address", insn_text);
+      sink_.Add(Finding::Severity::kReview, pc, "no CFI row covers this address");
     } else {
-      row_checker_.Check(pc, *row, state, insn_text);
+      row_checker_.Check(pc, *row, state);
     }
 
     auto it_conflicts = join_conflicts_.find(pc);
@@ -947,30 +937,28 @@ void FDEChecker::VerifyPass() {
         sink_.Add(Finding::Severity::kReview, pc,
                   absl::StrFormat("paths into this address disagree: %s -- one of them must contradict the single CFI "
                                   "row here, unless one of them is not really reachable",
-                                  c.Describe()),
-                  "");
+                                  c.Describe()));
       }
     }
 
     AbsState state_copy = state;
     TransferOutcome outcome = semantics_.Transfer(insn, &state_copy);
     if (!outcome.review_reason.empty()) {
-      sink_.Add(Finding::Severity::kReview, pc, outcome.review_reason, insn_text);
+      sink_.Add(Finding::Severity::kReview, pc, outcome.review_reason);
     }
     if (outcome.has_jump_table) {
       std::optional<std::vector<uint64_t>> targets =
           ResolveJumpTable(outcome.jump_table_addr, outcome.jump_table_entries);
       if (!targets.has_value()) {
-        sink_.Add(Finding::Severity::kReview, pc, kUnresolvedIndirectJumpMsg, insn_text);
+        sink_.Add(Finding::Severity::kReview, pc, kUnresolvedIndirectJumpMsg);
       } else {
         for (uint64_t target : *targets) {
           if (target < cfi_.pc_begin || target >= cfi_.pc_end) {
-            if (!CheckCrossFDEEdge(pc, target, state, insn_text)) {
+            if (!CheckCrossFDEEdge(pc, target, state)) {
               sink_.Add(Finding::Severity::kReview, pc,
                         absl::StrFormat("resolved switch-table entry at 0x%x lands outside this FDE's range and no "
                                         "FDE covers it, so there is no declared row to check it against",
-                                        target),
-                        insn_text);
+                                        target));
             }
           }
         }
@@ -994,12 +982,11 @@ void FDEChecker::VerifyPass() {
           result_.guessed_jump_tables.push_back(GuessedJumpTable{pc, outcome.unbounded_jump_table_addr, *targets});
           for (uint64_t target : *targets) {
             if (target < cfi_.pc_begin || target >= cfi_.pc_end) {
-              if (!CheckCrossFDEEdge(pc, target, state, insn_text)) {
+              if (!CheckCrossFDEEdge(pc, target, state)) {
                 sink_.Add(Finding::Severity::kReview, pc,
                           absl::StrFormat("guessed switch-table entry at 0x%x lands outside this FDE's range and no "
                                           "FDE covers it, so there is no declared row to check it against",
-                                          target),
-                          insn_text);
+                                          target));
               }
             }
             // In-range targets were walked in pass 1 and are checked in
@@ -1008,21 +995,21 @@ void FDEChecker::VerifyPass() {
         }
       }
       if (!guessed) {
-        sink_.Add(Finding::Severity::kReview, pc, kUnresolvedIndirectJumpMsg, insn_text);
+        sink_.Add(Finding::Severity::kReview, pc, kUnresolvedIndirectJumpMsg);
       }
     } else if (outcome.is_return) {
-      CheckExitState(pc, state, insn_text, /*is_tail_call=*/false);
+      CheckExitState(pc, state, /*is_tail_call=*/false);
     } else if (!outcome.falls_through && outcome.has_direct_target &&
                (outcome.direct_target < cfi_.pc_begin || outcome.direct_target >= cfi_.pc_end)) {
-      if (!CheckCrossFDEEdge(pc, outcome.direct_target, state, insn_text)) {
-        CheckExitState(pc, state, insn_text, /*is_tail_call=*/true);
+      if (!CheckCrossFDEEdge(pc, outcome.direct_target, state)) {
+        CheckExitState(pc, state, /*is_tail_call=*/true);
       }
     } else if (outcome.indirect_branch) {
       if (is_canonical_entry_ && IsExitState(state)) {
         // Indirect tail call (e.g. virtual call or function pointer tail call)
         // with valid exit state -- blessed.
       } else {
-        sink_.Add(Finding::Severity::kReview, pc, kUnresolvedIndirectJumpMsg, insn_text);
+        sink_.Add(Finding::Severity::kReview, pc, kUnresolvedIndirectJumpMsg);
       }
     }
   }
@@ -1037,29 +1024,28 @@ void FDEChecker::VerifyPass() {
 // checkable FDE set even when one exists, so it always lands here) or
 // genuinely uncovered code, and there is nothing declared to compare
 // against, so this is what "looks like a tail call" has to mean instead.
-void FDEChecker::CheckExitState(uint64_t pc, const AbsState& state, const std::string& insn_text, bool is_tail_call) {
+void FDEChecker::CheckExitState(uint64_t pc, const AbsState& state, bool is_tail_call) {
   const std::string_view context = is_tail_call ? "tail call" : "return";
   if (!is_canonical_entry_) {
     sink_.Add(Finding::Severity::kReview, pc,
-              absl::StrFormat("%s in an FDE that did not start at a canonical function entry", context), insn_text);
+              absl::StrFormat("%s in an FDE that did not start at a canonical function entry", context));
     return;
   }
 
   // 1. Check stack pointer
   const AbsVal& rsp = state.reg(kDWARFRsp);
   if (rsp.is_unknown()) {
-    sink_.Add(Finding::Severity::kReview, pc, absl::StrFormat("%s with untracked rsp (%v)", context, rsp), insn_text);
+    sink_.Add(Finding::Severity::kReview, pc, absl::StrFormat("%s with untracked rsp (%v)", context, rsp));
   } else if (!rsp.IsCFARel(-8)) {
     if (is_tail_call) {
       sink_.Add(Finding::Severity::kReview, pc,
                 absl::StrFormat("unconditional jump out of FDE to an address with no covering FDE, with rsp at "
                                 "CFA%+d (should be CFA-8 for a tail call; could be a branch to a noreturn call, or "
                                 "into code with no CFI at all)",
-                                static_cast<int>(rsp.delta)),
-                insn_text);
+                                static_cast<int>(rsp.delta)));
     } else {
       sink_.Add(Finding::Severity::kMismatch, pc,
-                absl::StrFormat("return with rsp at CFA%+d (should be CFA-8)", rsp.delta), insn_text);
+                absl::StrFormat("return with rsp at CFA%+d (should be CFA-8)", rsp.delta));
     }
   }
 
@@ -1080,13 +1066,11 @@ void FDEChecker::CheckExitState(uint64_t pc, const AbsState& state, const std::s
       const AbsVal& v = state.reg(r);
       if (v.is_unknown()) {
         sink_.Add(Finding::Severity::kReview, pc,
-                  absl::StrFormat("%s with untracked callee-saved register %s (%v)", context, DWARFRegName(r), v),
-                  insn_text);
+                  absl::StrFormat("%s with untracked callee-saved register %s (%v)", context, DWARFRegName(r), v));
       } else if (!v.IsOrigReg(r)) {
         sink_.Add(Finding::Severity::kMismatch, pc,
                   absl::StrFormat("%s with callee-saved register %s holding %v (entry value was not restored)", context,
-                                  DWARFRegName(r), v),
-                  insn_text);
+                                  DWARFRegName(r), v));
       }
     }
   }
@@ -1096,11 +1080,10 @@ void FDEChecker::CheckExitState(uint64_t pc, const AbsState& state, const std::s
     AbsVal ra = state.Slot(-8);
     if (ra.is_unknown()) {
       sink_.Add(Finding::Severity::kReview, pc,
-                absl::StrFormat("%s with untracked return address slot at [CFA-8] (%v)", context, ra), insn_text);
+                absl::StrFormat("%s with untracked return address slot at [CFA-8] (%v)", context, ra));
     } else if (!ra.IsOrigReg(kDWARFRip)) {
       sink_.Add(Finding::Severity::kMismatch, pc,
-                absl::StrFormat("%s with return address slot at [CFA-8] holding %v (overwritten)", context, ra),
-                insn_text);
+                absl::StrFormat("%s with return address slot at [CFA-8] holding %v (overwritten)", context, ra));
     }
   }
 }
@@ -1139,8 +1122,7 @@ void FDEChecker::ReportCoverageGaps() {
       sink_.Add(Finding::Severity::kReview, gap_start,
                 absl::StrFormat("%d bytes from here were not reached by the control-flow walk, so their CFI went "
                                 "unchecked (exception landing pads and jump-table targets look like this)",
-                                pc - gap_start),
-                "");
+                                pc - gap_start));
     }
   }
 }
@@ -1153,7 +1135,7 @@ FDEResult FDEChecker::Run() {
 
   const CFIRow* first_row = cfi_.RowAt(cfi_.pc_begin);
   if (first_row == nullptr) {
-    sink_.Add(Finding::Severity::kReview, cfi_.pc_begin, "no CFI row covers the start of this FDE", "");
+    sink_.Add(Finding::Severity::kReview, cfi_.pc_begin, "no CFI row covers the start of this FDE");
     result_.findings = sink_.Take();
     result_.verdict = Verdict::kReview;
     return result_;
@@ -1187,7 +1169,7 @@ FDEResult FDEChecker::Run() {
 
   if (hit_cap_) {
     sink_.Add(Finding::Severity::kReview, cfi_.pc_begin,
-              absl::StrFormat("analysis gave up after %d dataflow steps", options_.max_iterations), "");
+              absl::StrFormat("analysis gave up after %d dataflow steps", options_.max_iterations));
   }
 
   VerifyPass();

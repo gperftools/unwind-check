@@ -78,7 +78,7 @@ FDEResult MakeStructuralResult(uint64_t fde_vaddr, uint64_t pc_begin, uint64_t p
   r.pc_begin = pc_begin;
   r.pc_end = pc_end;
   r.verdict = severity == Finding::Severity::kMismatch ? Verdict::kMismatch : Verdict::kReview;
-  r.findings.push_back(Finding{severity, pc_begin, std::move(message), "", 0});
+  r.findings.push_back(Finding{severity, pc_begin, std::move(message), 0});
   return r;
 }
 

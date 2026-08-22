@@ -48,7 +48,6 @@ struct Finding {
   Severity severity = Severity::kReview;
   uint64_t pc = 0;
   std::string message;
-  std::string insn_text;
   // How many further instructions produced this same message. Reports
   // would be unreadable otherwise: one unverifiable CFA rule easily
   // covers a hundred instructions.
