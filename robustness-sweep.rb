@@ -6,7 +6,11 @@
 # counterpart to `bazel test :all`: the fixtures prove the analysis is
 # right, this proves the parser survives real-world input.
 #
-#   ./robustness-sweep.rb [count] [-jN]     # default count 400, -j1
+#   ./robustness-sweep.rb [count] [-jN] [-v]     # default count 400, -j1
+#
+# -v prints one line per binary as its result comes in (path, time,
+# verdict counts), so you can find the ones worth digging into --
+# sort by mismatch/review count or by time -- without a separate run.
 #
 # Anything printed as ABNORMAL is a bug in this tool: the only exit codes
 # it may produce are 0 (all blessed), 1 (a mismatch), 2 (review) and
@@ -29,15 +33,17 @@ end
 def parse_args(argv)
   count = 400
   jobs = 1
+  verbose = false
   argv.each do |arg|
     case arg
     when /\A-j(\d+)\z/ then jobs = $1.to_i
+    when '-v' then verbose = true
     when /\A\d+\z/ then count = arg.to_i
     else die "unrecognized argument: #{arg}"
     end
   end
   die '-jN needs N >= 1' if jobs < 1
-  [count, jobs]
+  [count, jobs, verbose]
 end
 
 # Candidate binaries, deduped by realpath so the many .so.N -> .so.N.N.N
@@ -89,7 +95,7 @@ end
 # trick make's jobserver uses to bound concurrency across independent
 # workers without a shared counter -- and it keeps the thread count itself
 # down to `jobs` instead of one per binary.
-def run_sweep(binaries, jobs)
+def run_sweep(binaries, jobs, verbose: false)
   token_read, token_write = IO.pipe
   token_write.write("\0" * jobs)
 
@@ -99,9 +105,16 @@ def run_sweep(binaries, jobs)
     token = token_read.read(1)  # blocks here, in the main thread, until a slot frees up
     Thread.new do
       begin
-        results[i] = check_binary(path)
-        if results[i].abnormal
-          print_mutex.synchronize { puts "ABNORMAL rc=#{results[i].rc} #{path}" }
+        r = check_binary(path)
+        results[i] = r
+        if r.abnormal
+          print_mutex.synchronize { puts "ABNORMAL rc=#{r.rc} #{r.elapsed_ms}ms #{path}" }
+        elsif verbose
+          t = r.totals
+          print_mutex.synchronize do
+            puts "#{r.elapsed_ms}ms fdes=#{t.fdes} blessed=#{t.blessed} " \
+                 "review_light=#{t.review_light} review=#{t.review} mismatch=#{t.mismatch}  #{path}"
+          end
         end
       ensure
         token_write.write(token)
@@ -117,10 +130,10 @@ end
 def main
   die "no #{BIN}; run: bazel build -c opt :unwind-check" unless File.executable?(BIN)
 
-  count, jobs = parse_args(ARGV)
+  count, jobs, verbose = parse_args(ARGV)
   binaries = candidate_binaries.shuffle(random: Random.new(SEED)).first(count)
 
-  results = run_sweep(binaries, jobs)
+  results = run_sweep(binaries, jobs, verbose: verbose)
 
   abnormal = results.count(&:abnormal)
   totals = results.reject(&:abnormal).reduce(ZERO_TOTALS) { |acc, r| acc + r.totals }
