@@ -20,6 +20,7 @@
 #include "absl/log/initialize.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/match.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_format.h"
 #include "cfi-table.h"
 #include "diagnostics.h"
@@ -86,22 +87,6 @@ FDEResult MakeStructuralResult(uint64_t fde_vaddr, uint64_t pc_begin, uint64_t p
 // comment at its only caller.
 bool IsEntryPointName(std::string_view name) {
   return !absl::EndsWith(name, ".cold") && !absl::StrContains(name, ".cold.");
-}
-
-std::optional<uint64_t> ParseHex(const std::string& text) {
-  if (text.empty()) {
-    return std::nullopt;
-  }
-  const char* start = text.c_str();
-  if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
-    start += 2;
-  }
-  char* end = nullptr;
-  uint64_t value = strtoull(start, &end, 16);
-  if (end == start || *end != '\0') {
-    return std::nullopt;
-  }
-  return value;
 }
 
 Symbolizer::Addr2LineMode ParseAddr2LineMode(const std::string& value, std::string* tool_path) {
@@ -264,11 +249,12 @@ int Run(const std::string& path, const std::string& ruby_script_path) {
   std::optional<uint64_t> pc_filter;
   const std::string pc_flag = absl::GetFlag(FLAGS_pc);
   if (!pc_flag.empty()) {
-    pc_filter = ParseHex(pc_flag);
-    if (!pc_filter.has_value()) {
+    uint64_t value;
+    if (!absl::SimpleHexAtoi(pc_flag, &value)) {
       absl::FPrintF(stderr, "unwind-check: cannot parse --pc value '%s' as hex\n", pc_flag);
       return kExitFailure;
     }
+    pc_filter = value;
   }
 
   // Every structurally valid FDE, sorted by pc_begin, so the checker can
