@@ -136,10 +136,6 @@ class RowChecker {
       case CFARule::Kind::kRegOffset:
         break;
     }
-    if (cfa.reg >= kNumGPRs) {
-      Review(absl::StrFormat("CFA is based on DWARF register %d, which is not a general-purpose register", cfa.reg));
-      return;
-    }
     const AbsVal& v = state.reg(cfa.reg);
     if (v.kind != AbsVal::Kind::kCFARel) {
       Review(absl::StrFormat("CFA is declared as %v, but %s holds %v here, so the rule cannot be verified", cfa,

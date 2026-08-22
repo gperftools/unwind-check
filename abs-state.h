@@ -74,7 +74,7 @@ struct AbsVal {
   static AbsVal Top() {
     return {};
   }
-  static AbsVal Bottom() {
+  static constexpr AbsVal Bottom() {
     return AbsVal{Kind::kBottom, 0, 0, 0, std::nullopt};
   }
   static AbsVal CFARel(int64_t delta) {
@@ -272,15 +272,21 @@ struct AbsState {
   static AbsState SeedFromRow(const CFIRow& row, bool at_function_entry);
 
   const AbsVal& reg(int r) const {
+    static constinit auto kInvalid = AbsVal::Bottom();
+    if (r < 0 || r >= kNumGPRs) {
+      return kInvalid;
+    }
     return gpr[r];
   }
   void SetReg(int r, const AbsVal& v) {
+    assert(0 <= r && r < kNumGPRs);
     gpr[r] = v;
     if (r == kDWARFRsp && v.kind == AbsVal::Kind::kCFARel) {
       DropDeadSlots(v.delta);
     }
   }
   void ClobberReg(int r) {
+    assert(0 <= r && r < kNumGPRs);
     gpr[r] = AbsVal::Top();
   }
 
