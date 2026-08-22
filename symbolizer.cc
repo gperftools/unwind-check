@@ -78,6 +78,8 @@ Symbolizer::Symbolizer(const ELFImage& image, Addr2LineMode mode, std::string to
     case Addr2LineMode::kOff:
       return;
     case Addr2LineMode::kAuto:
+      // TODO: drop this check. Just run addr2line, regardless of what
+      // we think about debug info availability.
       if (!image_.has_debug_info()) {
         return;  // silently: there is simply nothing to look up
       }
