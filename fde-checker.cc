@@ -592,6 +592,9 @@ std::function<bool(uint64_t)> FDEChecker::JumpTargetCompatiblePredicate(uint64_t
     if (target_row == nullptr) {
       return false;
     }
+    // TODO: I am not sure we really need is canonical logic here. And
+    // if this is right. Even if entry CFI row is canonical, this
+    // quite ~likely .cold fragment and so expecting called saved being same value looks excessive.
     bool target_is_canonical_entry = target == target_cfi->pc_begin && target_row->IsCanonicalEntry();
     return RowMatchesCleanly(options_, jmp_pc, *target_row, state, target_is_canonical_entry);
   };
@@ -607,6 +610,7 @@ void FDEChecker::CheckEntryRow(const CFIRow& first_row) {
   if (!at_function_entry_) {
     return;
   }
+  // TODO: use first_row->IsCanonicalEntry I think
   static constexpr std::string_view kEnteredByJump =
       " (either the CFI is wrong, or this is entered by a jump rather than a call, the way a PLT trampoline is)";
   if (first_row.cfa.kind != CFARule::Kind::kRegOffset || first_row.cfa.reg != kDWARFRsp || first_row.cfa.offset != 8) {
@@ -623,21 +627,12 @@ void FDEChecker::CheckEntryRow(const CFIRow& first_row) {
   }
 }
 
-// Exception landing pads are reachable only through the unwinder, via
-// the LSDA -- nothing in the function body branches to one directly, so
-// the ordinary control-flow walk below would never find them on its
-// own. The LSDA's call-site table says exactly which `call` instructions
-// can throw into which landing pad; SetupCallSites loads it into
-// call_sites_ so Drain can wire each one in as a real CFG edge, carrying
-// the abstract state computed right after the call (callee-saved and CFA
-// preserved, caller-saved clobbered -- the same transfer function already
-// used for the call's own fall-through edge, since that is exactly what
-// the unwinder would restore before jumping to the pad). This is strictly
-// more precise than trusting the pad's own declared row: the state is
-// derived from code actually walked, so it both fixes the coverage gap and
-// doubles as a real check that the row agrees with it -- a stale CFI on the
-// exceptional edge now shows up as a mismatch instead of being
-// definitionally unobservable.
+// Function FDEs sometimes contain exception landing pads. Those
+// landing pads are sometimes otherwise unaccessible .The mapping is
+// defined by LSDA. With "control" transferred by _Unwind facility in
+// libgcc. So lets read them and filter out landing pads outside of
+// current FDA (this is possible when catch/cleanup path is in .cold
+// sibling FDA).
 void FDEChecker::SetupCallSites() {
   if (cfi_.lsda_addr == 0) {
     return;
@@ -648,10 +643,10 @@ void FDEChecker::SetupCallSites() {
     sink_.Add(Finding::Severity::kReview, cfi_.pc_begin,
               absl::StrFormat("failed to parse this FDE's LSDA (.gcc_except_table) at 0x%016x: %s", cfi_.lsda_addr,
                               e.what()));
-    call_sites_.clear();
     return;
   }
-  // A malformed LSDA shouldn't be able to walk us outside the FDE.
+  // Remove landing pads not in our FDE, those removed pads we cannot
+  // verify.
   call_sites_.erase(std::remove_if(call_sites_.begin(), call_sites_.end(),
                                    [&](const LSDACallSite& cs) {
                                      return cs.landing_pad < cfi_.pc_begin || cs.landing_pad >= cfi_.pc_end;
@@ -659,9 +654,9 @@ void FDEChecker::SetupCallSites() {
                     call_sites_.end());
 }
 
-// call_sites_ is sorted by start (ReadLSDACallSites) and, per the
-// Itanium ABI, partitions the FDE without overlap, so the entry
-// covering call_pc (if any) is the last one whose start is <= call_pc.
+// We model possible control transfers from call sites to landing pads
+// based on range defined in LSDA entry. Entries are non-overlapped
+// and sorted.
 std::optional<uint64_t> FDEChecker::LandingPadForCall(uint64_t call_pc) const {
   auto it = std::upper_bound(call_sites_.begin(), call_sites_.end(), call_pc,
                              [](uint64_t pc, const LSDACallSite& cs) { return pc < cs.start; });
@@ -675,6 +670,10 @@ std::optional<uint64_t> FDEChecker::LandingPadForCall(uint64_t call_pc) const {
   return std::nullopt;
 }
 
+// Consider adding PC to worklist and in_states_ map. If this
+// instruction already has some state, we Join new state with old. And
+// if Join produced new state, then queue PC to be re-visited for
+// another step of abstract interpretation.
 void FDEChecker::Propagate(uint64_t pc, const AbsState& state) {
   propagate_calls_++;
   auto it = in_states_.find(pc);
@@ -754,18 +753,17 @@ void FDEChecker::Drain() {
 
     std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi_.pc_end - pc));
     Instruction insn;
+    // TODO: empty check necessary? Let disasm fail isntead?
     if (bytes.empty() || !disasm_->Decode(bytes.data(), bytes.size(), pc, &insn) || pc + insn.size > cfi_.pc_end) {
       continue;
     }
-    size_t insn_size = insn.size;
-    insn_sizes_[pc] = insn_size;
-    bool is_ja_or_jae = insn.id == ZYDIS_MNEMONIC_JNBE || insn.id == ZYDIS_MNEMONIC_JNB;
-    bool is_jae = insn.id == ZYDIS_MNEMONIC_JNB;
 
     const CFIRow* row = cfi_.RowAt(pc);
     AbsVal before[kNumGPRs];
     std::copy(std::begin(state.gpr), std::end(state.gpr), std::begin(before));
     TransferOutcome outcome = semantics_.Transfer(insn, &state);
+
+    insn_sizes_[pc] = insn.size;
 
     if (outcome.is_call) {
       std::optional<uint64_t> lp = LandingPadForCall(pc);
@@ -776,8 +774,11 @@ void FDEChecker::Drain() {
     }
 
     if (outcome.falls_through) {
-      uint64_t next = pc + insn_size;
+      uint64_t next = pc + insn.size;
       if (next < cfi_.pc_end && FallThroughIsReal(cfi_, row, next, before, state)) {
+        const bool is_jae = insn.id == ZYDIS_MNEMONIC_JNB;
+        const bool is_ja_or_jae = insn.id == ZYDIS_MNEMONIC_JNBE || is_jae;
+
         AbsState fallthrough_state = state;
         // `state` here is the already-transferred state for this
         // ja/jae itself, which doesn't write EFLAGS -- so if a `cmp
@@ -794,7 +795,10 @@ void FDEChecker::Drain() {
           // and `jae` means reg < imm.
           if (!is_jae || imm != 0) {
             uint64_t ubound = is_jae ? imm - 1 : imm;
+            // TODO: why? not needed I think
             fallthrough_state.last_cmp->imm = ubound;
+            // TODO: check why >= 32
+            // TODO: this fallthrough state, why we're manually creating it. Consider insn-semantics instead?
             if (width >= 32) {
               VLOG(1) << absl::StrFormat("0x%x: %s taken-edge guard sets bound[%d]=%u on fall-through to 0x%x", pc,
                                          is_jae ? "jae" : "ja", reg, ubound, next);
@@ -856,6 +860,7 @@ void FDEChecker::Drain() {
 // pre-existing behavior, so it is flagged as a review rather than
 // treated as equivalent to a state actually checked against.
 void FDEChecker::SeedUnreachedLandingPads() {
+  // TODO: maybe drop? check if this is really useful at all
   std::vector<uint64_t> distinct_landing_pads;
   distinct_landing_pads.reserve(call_sites_.size());
   for (const LSDACallSite& cs : call_sites_) {
@@ -886,6 +891,7 @@ void FDEChecker::SeedUnreachedLandingPads() {
 
 // Pass 2: Verify settled states against declared CFI rows in deterministic (sorted PC) order.
 void FDEChecker::VerifyPass() {
+  // TODO: some sort of hash-keys util?
   std::vector<uint64_t> reached_pcs;
   reached_pcs.reserve(in_states_.size());
   for (const auto& [pc, _] : in_states_) {
@@ -896,6 +902,7 @@ void FDEChecker::VerifyPass() {
   for (uint64_t pc : reached_pcs) {
     const AbsState& state = in_states_[pc];
     if (trace_out_ != nullptr) {
+      // TODO: emplace
       trace_out_->push_back(InsnTrace{pc, state});
     }
 
@@ -912,7 +919,7 @@ void FDEChecker::VerifyPass() {
     result_.instructions_checked++;
 
     // The row at pc describes the state when RIP == pc, so compare
-    // before applying the instruction, not after.
+    // before applying the instruction, not after. TODO: bogus comment?
     const CFIRow* row = cfi_.RowAt(pc);
     if (row == nullptr) {
       sink_.Add(Finding::Severity::kReview, pc, "no CFI row covers this address");
@@ -1025,6 +1032,7 @@ void FDEChecker::VerifyPass() {
 void FDEChecker::CheckExitState(uint64_t pc, const AbsState& state, bool is_tail_call) {
   const std::string_view context = is_tail_call ? "tail call" : "return";
   if (!is_canonical_entry_) {
+    // TODO: so we just flag any return in FDE with non-canonical entry ? look wrong.
     sink_.Add(Finding::Severity::kReview, pc,
               absl::StrFormat("%s in an FDE that did not start at a canonical function entry", context));
     return;
@@ -1056,6 +1064,7 @@ void FDEChecker::CheckExitState(uint64_t pc, const AbsState& state, bool is_tail
   // `.cold` fragment with an FDE of its own no longer reaches this
   // function at all -- it is checked against that FDE's declared row by
   // CheckCrossFDEEdge instead.)
+  // TOOD: invert to is_normal_return or something. i.e. rsl.IsCFARel(-8) || !is_tail_call
   bool ambiguous_tail_call = is_tail_call && !rsp.IsCFARel(-8);
 
   // 2. Check callee-saved registers
@@ -1125,6 +1134,7 @@ void FDEChecker::ReportCoverageGaps() {
   }
 }
 
+// TODO: Run always returns result_. So no need perhaps as we have it in member field.
 FDEResult FDEChecker::Run() {
   result_.fde_addr = cfi_.fde_addr;
   result_.pc_begin = cfi_.pc_begin;
