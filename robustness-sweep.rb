@@ -6,7 +6,7 @@
 # counterpart to `bazel test :all`: the fixtures prove the analysis is
 # right, this proves the parser survives real-world input.
 #
-#   ./robustness-sweep.rb [count] [-jN] [-v]     # default count 400, -j1
+#   ./robustness-sweep.rb [count] [-jN] [-v]     # default count 400, -j = nproc
 #
 # -v prints one line per binary as its result comes in (path, time,
 # verdict counts), so you can find the ones worth digging into --
@@ -16,6 +16,7 @@
 # it may produce are 0 (all blessed), 1 (a mismatch), 2 (review) and
 # 3 (the run failed cleanly).
 
+require 'etc'
 require 'open3'
 
 BIN = ENV['BIN'] || './bazel-bin/unwind-check'
@@ -32,7 +33,7 @@ end
 
 def parse_args(argv)
   count = 400
-  jobs = 1
+  jobs = Etc.nprocessors
   verbose = false
   argv.each do |arg|
     case arg
