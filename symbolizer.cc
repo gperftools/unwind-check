@@ -41,6 +41,21 @@ bool ToolExists(const std::string& tool) {
   return false;
 }
 
+// `tool_path` is only ever empty in kAuto mode (kExplicit always carries a
+// user-given path from --addr2line). llvm-addr2line is much faster on
+// larger binaries, so it is preferred when available; addr2line is a
+// perfectly good fallback for an environment (a minimal container image,
+// say) that has binutils but not LLVM.
+std::string PickToolPath(Symbolizer::Addr2LineMode mode, std::string tool_path) {
+  if (!tool_path.empty()) {
+    return tool_path;
+  }
+  if (mode == Symbolizer::Addr2LineMode::kAuto && !ToolExists("llvm-addr2line") && ToolExists("addr2line")) {
+    return "addr2line";
+  }
+  return "llvm-addr2line";
+}
+
 }  // namespace
 
 std::string Demangle(const std::string& name) {
@@ -56,8 +71,7 @@ std::string Demangle(const std::string& name) {
 }
 
 Symbolizer::Symbolizer(const ELFImage& image, Addr2LineMode mode, std::string tool_path)
-    : image_(image), tool_path_(tool_path.empty() ? "llvm-addr2line" : std::move(tool_path)) {
-  // NOTE: llvm-addr2line is much faster on larger binaries. TODO: try llvm-addr2line and addr2line in order.
+    : image_(image), tool_path_(PickToolPath(mode, std::move(tool_path))) {
   switch (mode) {
     case Addr2LineMode::kOff:
       return;
