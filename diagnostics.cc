@@ -24,14 +24,7 @@ std::string FormatRowCompact(const CFIRow* row) {
   if (row == nullptr) {
     return "<no CFI row>";
   }
-  std::string s = absl::StrFormat("cfa=%v", row->cfa);
-  for (int r = 0; r < kNumDWARFRegs; r++) {
-    if (row->regs[r].kind == RegRule::Kind::kUnset) {
-      continue;
-    }
-    absl::StrAppendFormat(&s, " %s=%v", DWARFRegName(r), row->regs[r]);
-  }
-  return s;
+  return absl::StrCat(*row);
 }
 
 // Compact rendering of one converged AbsState, for --inspect_deep: only

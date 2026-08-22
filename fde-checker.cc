@@ -731,7 +731,7 @@ void FDEChecker::Drain() {
     std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi_.pc_end - pc));
     Instruction insn;
     if (!disasm_->Decode(bytes.data(), bytes.size(), pc, &insn)) {
-      continue; // NOTE: we report any decoding errors in second pass
+      continue;  // NOTE: we report any decoding errors in second pass
     }
 
     const CFIRow* row = cfi_.RowAt(pc);

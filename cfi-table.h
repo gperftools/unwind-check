@@ -125,6 +125,17 @@ struct CFIRow {
   bool IsCanonicalEntry() const;
 };
 
+template <typename Sink>
+void AbslStringify(Sink& sink, const CFIRow& row) {
+  absl::Format(&sink, "cfa=%v", row.cfa);
+  for (int r = 0; r < kNumDWARFRegs; r++) {
+    if (row.regs[r].kind == RegRule::Kind::kUnset) {
+      continue;
+    }
+    absl::Format(&sink, " %s=%v", DWARFRegName(r), row.regs[r]);
+  }
+}
+
 // One decoded FDE.
 struct CFI {
   uint64_t fde_addr = 0;  // vaddr of the FDE record itself, for diagnostics
