@@ -15,9 +15,6 @@ absl::StatusOr<std::unique_ptr<Disassembler>> Disassembler::Create() {
 }
 
 bool Disassembler::Decode(const uint8_t* code, size_t size, uint64_t address, Instruction* out) {
-  if (size == 0 || out == nullptr) {
-    return false;
-  }
   if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder_, code, size, &out->insn, out->operands))) {
     return false;
   }

@@ -492,7 +492,7 @@ std::optional<uint64_t> FDEChecker::ResolveTableEntry(uint64_t table_addr, uint6
   }
   std::span<const uint8_t> tbytes = image_.BytesAt(target, 16);
   Instruction tinsn;
-  if (tbytes.empty() || !disasm_->Decode(tbytes.data(), tbytes.size(), target, &tinsn)) {
+  if (!disasm_->Decode(tbytes.data(), tbytes.size(), target, &tinsn)) {
     return std::nullopt;
   }
   return target;
@@ -730,9 +730,8 @@ void FDEChecker::Drain() {
 
     std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi_.pc_end - pc));
     Instruction insn;
-    // TODO: empty check necessary? Let disasm fail isntead?
-    if (bytes.empty() || !disasm_->Decode(bytes.data(), bytes.size(), pc, &insn) || pc + insn.size > cfi_.pc_end) {
-      continue;
+    if (!disasm_->Decode(bytes.data(), bytes.size(), pc, &insn)) {
+      continue; // NOTE: we report any decoding errors in second pass
     }
 
     const CFIRow* row = cfi_.RowAt(pc);
@@ -885,7 +884,7 @@ void FDEChecker::VerifyPass() {
 
     std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi_.pc_end - pc));
     Instruction insn;
-    if (bytes.empty() || !disasm_->Decode(bytes.data(), bytes.size(), pc, &insn)) {
+    if (!disasm_->Decode(bytes.data(), bytes.size(), pc, &insn)) {
       sink_.Add(Finding::Severity::kReview, pc, "cannot decode the instruction at this address");
       continue;
     }
@@ -1092,7 +1091,7 @@ void FDEChecker::ReportCoverageGaps() {
     while (pc < cfi_.pc_end && insn_sizes_.find(pc) == insn_sizes_.end()) {
       std::span<const uint8_t> bytes = image_.BytesAt(pc, std::min<uint64_t>(16, cfi_.pc_end - pc));
       Instruction insn;
-      if (bytes.empty() || !disasm_->Decode(bytes.data(), bytes.size(), pc, &insn)) {
+      if (!disasm_->Decode(bytes.data(), bytes.size(), pc, &insn)) {
         all_padding = false;
         pc++;
         continue;
