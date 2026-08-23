@@ -285,8 +285,9 @@ struct AbsState {
   // any later EFLAGS write drops it, since the flags no longer answer for
   // this cmp. That is handled once up front in InsnSemantics::Transfer.
   //
-  // After a branch has selected the in-range edge (in fde-checker's
-  // ApplyInRangeGuard, and only on that edge) it is a fact about a value:
+  // After a branch has selected the in-range edge (in
+  // InsnSemantics::TransferEdge, and only on that edge) it is a fact about
+  // a value:
   // the low `width_bits` bits of `reg` are at most `proven_bound`. Flags no
   // longer matter to it, so an EFLAGS write no longer clears it -- and it
   // has to survive them, because the instructions between the branch and

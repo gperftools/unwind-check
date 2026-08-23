@@ -301,9 +301,21 @@ flags and establishes nothing whatsoever; `InsnSemantics::Transfer`'s
 bound at the `cmp` — which an earlier version did, to rescue narrow
 compares — invents one on the default edge of a switch, or with no branch
 at all. The single place a comparison becomes a fact is
-`ApplyInRangeGuard` in `fde-checker.cc`, on the one branch edge where the
-value is in range: the fall-through for `ja`/`jae`, which branch *away*
-from the table, and the taken edge for `jbe`/`jb`, which branch *into* it.
+`InsnSemantics::TransferEdge`, on the one branch edge where the value is in
+range: the fall-through for `ja`/`jae`, which branch *away* from the table,
+and the taken edge for `jbe`/`jb`, which branch *into* it.
+
+`TransferEdge` is a second entry point alongside `Transfer`, and the split
+is the point: `Transfer` says what an instruction does on *every* path out
+of it, `TransferEdge` what one particular successor additionally proves. A
+conditional branch produces two different successor states and
+`TransferOutcome` has no way to express that, so the walker makes its own
+per-edge copy and calls `TransferEdge` on it. It must not be folded into
+`Transfer`, which runs before the walk knows which successor it is
+building. Keeping it here rather than in the walker is what leaves
+`fde-checker.cc` with exactly one Zydis mnemonic reference (padding
+detection); deciding *which edge means what* is instruction semantics,
+while deciding *which edges exist and where they go* is the walk.
 
 `last_cmp` is invalidated by two independent things, and both are needed:
 any later EFLAGS write, handled once up front in `Transfer`; and any later
@@ -354,8 +366,8 @@ on the visit that promoted and another on the visit that could not would
 lose it entirely at the join, since `Join` never lets an absent `last_cmp`
 adopt a present one. `libstdc++`'s `basic_stringstream` dispatch is exactly
 this case and regressed to `REVIEW` until the guard was kept on both paths.
-Re-application is prevented by `ApplyInRangeGuard` acting only on a guard
-that has no `proven_bound` yet, not by retiring it.
+Re-application is prevented by `TransferEdge` acting only on a guard that
+has no `proven_bound` yet, not by retiring it.
 
 The switch-table guard used to be found by a 64-hop backward byte-walk on
 demand (`FindGuardBound`, since deleted), independent of the joined lattice

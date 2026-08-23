@@ -36,6 +36,17 @@ class SemanticsTest : public testing::Test {
     return semantics.Transfer(insn, &state_);
   }
 
+  // Runs a branch encoding and then refines the state along one of its two
+  // edges, the way FDEChecker::Drain does on its per-edge copy.
+  void RunEdge(std::initializer_list<uint8_t> bytes, BranchEdge edge) {
+    std::vector<uint8_t> code{bytes};
+    Instruction insn;
+    ASSERT_TRUE(disasm_->Decode(code.data(), code.size(), kBase, &insn));
+    InsnSemantics semantics;
+    semantics.Transfer(insn, &state_);
+    semantics.TransferEdge(insn, edge, &state_);
+  }
+
   std::unique_ptr<Disassembler> disasm_;
   AbsState state_;
 };
@@ -369,10 +380,109 @@ TEST_F(SemanticsTest, MovsxFromMemoryProvesOnlyTheDestinationWidth) {
   EXPECT_EQ(state_.reg(kDWARFRax).value_bound, 0xffffffffu);
 }
 
+// --- guard branches: which edge proves what --------------------------------
+//
+// Four unsigned spellings, two splitting at `reg <= imm` and two at
+// `reg < imm`, and two branching away from the in-range case while two
+// branch into it. Getting any arm's edge backwards would apply the bound on
+// the *out-of-range* path, where it is false -- and would only show up in
+// the sweep as a slightly tighter table, which reads like normal caution.
+
+TEST_F(SemanticsTest, JaProvesOnTheFallThroughEdge) {
+  Run({0x83, 0xf8, 0x09});                          // cmp $9,%eax
+  RunEdge({0x77, 0x10}, BranchEdge::kFallThrough);  // ja +0x10
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  EXPECT_EQ(state_.last_cmp->proven_bound, 9u) << "ja: in range means reg <= imm";
+}
+
+TEST_F(SemanticsTest, JaProvesNothingOnTheTakenEdge) {
+  Run({0x83, 0xf8, 0x09});                    // cmp $9,%eax
+  RunEdge({0x77, 0x10}, BranchEdge::kTaken);  // ja +0x10 -- this is the default label
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  EXPECT_FALSE(state_.last_cmp->proven());
+  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, kBoundTop);
+}
+
+TEST_F(SemanticsTest, JaeProvesTheStrictBoundOnTheFallThroughEdge) {
+  Run({0x83, 0xf8, 0x09});                          // cmp $9,%eax
+  RunEdge({0x73, 0x10}, BranchEdge::kFallThrough);  // jae +0x10
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  EXPECT_EQ(state_.last_cmp->proven_bound, 8u) << "jae: in range means reg < imm";
+}
+
+TEST_F(SemanticsTest, JbeProvesOnTheTakenEdge) {
+  Run({0x83, 0xf8, 0x09});                    // cmp $9,%eax
+  RunEdge({0x76, 0x10}, BranchEdge::kTaken);  // jbe +0x10 -- jumps *into* the dispatch
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  EXPECT_EQ(state_.last_cmp->proven_bound, 9u);
+}
+
+TEST_F(SemanticsTest, JbeProvesNothingOnTheFallThroughEdge) {
+  Run({0x83, 0xf8, 0x09});                          // cmp $9,%eax
+  RunEdge({0x76, 0x10}, BranchEdge::kFallThrough);  // jbe +0x10
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  EXPECT_FALSE(state_.last_cmp->proven());
+}
+
+TEST_F(SemanticsTest, JbProvesTheStrictBoundOnTheTakenEdge) {
+  Run({0x83, 0xf8, 0x09});                    // cmp $9,%eax
+  RunEdge({0x72, 0x10}, BranchEdge::kTaken);  // jb +0x10
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  EXPECT_EQ(state_.last_cmp->proven_bound, 8u);
+}
+
+TEST_F(SemanticsTest, JbAgainstZeroProvesNothing) {
+  // `reg < 0` is unsatisfiable for an unsigned compare, and imm - 1 would
+  // wrap to kBoundTop.
+  Run({0x83, 0xf8, 0x00});                    // cmp $0,%eax
+  RunEdge({0x72, 0x10}, BranchEdge::kTaken);  // jb +0x10
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  EXPECT_FALSE(state_.last_cmp->proven());
+}
+
+TEST_F(SemanticsTest, ASignedBranchIsNotAGuard) {
+  // `jle` splits on the signed comparison, which says nothing about the
+  // unsigned bound a table index needs.
+  Run({0x83, 0xf8, 0x09});                          // cmp $9,%eax
+  RunEdge({0x7e, 0x10}, BranchEdge::kFallThrough);  // jle +0x10
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  EXPECT_FALSE(state_.last_cmp->proven());
+}
+
+TEST_F(SemanticsTest, AGuardOnAFullWidthCompareIsPromotedImmediately) {
+  // Nothing to defer: a 64-bit compare already bounds the whole register,
+  // so the bound lands on the register itself and not only in the guard.
+  Run({0x48, 0x83, 0xf8, 0x09});                    // cmp $9,%rax
+  RunEdge({0x77, 0x10}, BranchEdge::kFallThrough);  // ja +0x10
+  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, 9u);
+  EXPECT_EQ(state_.reg(kDWARFRax).table_bound, 9u);
+}
+
+TEST_F(SemanticsTest, AGuardOnASubRegisterIsNotPromotedButIsCarried) {
+  // %eax's upper half is unproven here, so the bound cannot be a fact about
+  // rax -- but the guard still holds over the 32 bits it compared.
+  Run({0x83, 0xf8, 0x09});                          // cmp $9,%eax
+  RunEdge({0x77, 0x10}, BranchEdge::kFallThrough);  // ja +0x10
+  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, kBoundTop) << "rax's upper bits are unknown";
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  EXPECT_EQ(state_.last_cmp->proven_bound, 9u);
+  EXPECT_EQ(state_.last_cmp->width_bits, 32u);
+}
+
+TEST_F(SemanticsTest, AnAlreadyProvenGuardIsNotReappliedByALaterBranch) {
+  // A proven guard outlives the flags that produced it, so a second branch
+  // -- testing whatever wrote EFLAGS since -- must not re-apply it.
+  Run({0x83, 0xf8, 0x09});                          // cmp $9,%eax
+  RunEdge({0x73, 0x10}, BranchEdge::kFallThrough);  // jae +0x10 -> proves <= 8
+  ASSERT_EQ(state_.last_cmp->proven_bound, 8u);
+  RunEdge({0x73, 0x10}, BranchEdge::kFallThrough);  // a second jae must change nothing
+  EXPECT_EQ(state_.last_cmp->proven_bound, 8u) << "re-applying would ratchet the bound down to 7";
+}
+
 // --- proven guards --------------------------------------------------------
 //
 // A guard becomes "proven" on the one branch edge where the compared value
-// is in range (fde-checker.cc's ApplyInRangeGuard). These tests set that up
+// is in range (TransferEdge, above). These tests set that up
 // by hand; what they cover is the consumption side.
 
 TEST_F(SemanticsTest, AProvenGuardIsCashedInByAWiden) {

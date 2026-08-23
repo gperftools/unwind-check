@@ -37,8 +37,9 @@ bool IsCalleeSaved(int reg) {
 // tracked forward as part of AbsState (AbsState::last_cmp, joined like any
 // other lattice field), so there is no backward byte-walk or parallel
 // bound-clearing pass to maintain here any more. Turning it into a bound
-// happens on the in-range branch edge in Drain(), and nowhere else -- see
-// AbsVal::table_bound and InsnSemantics::Transfer's CMP case.
+// happens in InsnSemantics::TransferEdge, on the in-range branch edge and
+// nowhere else -- see AbsVal::table_bound and Transfer's CMP case. All this
+// file decides is which edges exist and where they go.
 
 // Collects findings, folding repeats of the same message into one entry.
 class FindingSink {
@@ -697,92 +698,6 @@ bool FDEChecker::CheckCrossFDEEdge(uint64_t edge_pc, uint64_t target, const AbsS
 }
 
 // Pass 1: Forward dataflow until the abstract state settles across all reached instructions.
-namespace {
-
-// Which comparison, if any, one edge of `id` puts the value on the in-range
-// side of. The four unsigned spellings of a switch-table guard split two
-// ways: `ja`/`jbe` at `reg <= imm`, `jae`/`jb` at `reg < imm` -- and two
-// ways again in which edge is the in-range one, since `ja`/`jae` branch
-// away from the table while `jbe`/`jb` branch into it.
-enum class GuardEdge { kNone, kAtMostImm, kBelowImm };
-
-GuardEdge InRangeEdgeOf(ZydisMnemonic id, bool taken) {
-  switch (id) {
-    case ZYDIS_MNEMONIC_JNBE:  // ja: out of range is the taken edge
-      return taken ? GuardEdge::kNone : GuardEdge::kAtMostImm;
-    case ZYDIS_MNEMONIC_JNB:  // jae
-      return taken ? GuardEdge::kNone : GuardEdge::kBelowImm;
-    case ZYDIS_MNEMONIC_JBE:  // jbe: in range is the taken edge
-      return taken ? GuardEdge::kAtMostImm : GuardEdge::kNone;
-    case ZYDIS_MNEMONIC_JB:  // jb
-      return taken ? GuardEdge::kBelowImm : GuardEdge::kNone;
-    default:
-      return GuardEdge::kNone;
-  }
-}
-
-// Turns the `cmp $imm,%reg` in `state.last_cmp` into a proven fact on the
-// one edge of the branch that tests it where the value is in range. This is
-// the only place in the analysis where a comparison becomes a bound: a cmp
-// on its own sets flags and establishes nothing, and it is the branch that
-// picks a side.
-//
-// `state` is the already-transferred state for the branch itself, which
-// writes no flags, so a guard dominating this point is sitting right in
-// `state.last_cmp` -- no backward search. A bypassing predecessor that never
-// ran the cmp will have cleared it in Join, and an instruction that
-// overwrote the compared register in between will have cleared it in SetReg.
-//
-// Acting only on a not-yet-proven guard matters: once one has been cashed
-// into a proven fact it outlives the flags that produced it, so a later
-// branch -- testing whatever wrote EFLAGS since -- must not re-apply it.
-void ApplyInRangeGuard(AbsState* edge_state, const AbsState& state, GuardEdge edge, uint64_t pc, uint64_t target) {
-  if (edge == GuardEdge::kNone || !state.last_cmp.has_value() || state.last_cmp->proven()) {
-    return;
-  }
-  const int reg = state.last_cmp->reg;
-  const uint8_t width = state.last_cmp->width_bits;
-  const uint64_t imm = state.last_cmp->imm;
-  if (edge == GuardEdge::kBelowImm && imm == 0) {
-    return;  // "reg < 0" is unsatisfiable, and imm - 1 would wrap
-  }
-  const uint64_t ubound = edge == GuardEdge::kBelowImm ? imm - 1 : imm;
-
-  // Always carry the guard forward as a proven, width-qualified fact --
-  // "the low `width` bits of reg are at most ubound" -- for the widen that
-  // reads exactly those bits to cash in. This happens whether or not the
-  // promotion below also fires, and that matters: promotion is a decision
-  // about the *state*, and the state can weaken between visits as more
-  // predecessors arrive. Retiring the guard on the visits that promoted
-  // would leave the fact recorded in one place on one visit and in another
-  // on the next, and Join -- which never lets an absent last_cmp adopt a
-  // present one -- would then drop it entirely. Leaving it behind is safe
-  // because of the already-proven check above.
-  edge_state->last_cmp->proven_bound = ubound;
-
-  // The comparison bounds the low `width` bits. Promoting that to a fact
-  // about the whole 64-bit register -- which is what a table load indexes
-  // with -- needs proof that there is nothing in the upper bits, and
-  // value_bound is exactly that proof: a register already known to be below
-  // 2^width *is* its own low half. A 64-bit compare needs no proof.
-  if (width >= 64 || state.reg(reg).value_bound <= WidthBound(width)) {
-    VLOG(1) << absl::StrFormat("0x%x: cmp $%u on %u bits + branch proves %s <= %u on the edge to 0x%x", pc, imm, width,
-                               DWARFRegName(reg), ubound, target);
-    edge_state->ApplyGuardBound(reg, ubound);
-  } else {
-    // Nothing proves the upper bits empty -- typically an argument
-    // register, whose high half the ABI leaves undefined. The
-    // width-qualified fact carried above is all there is until a widen
-    // collects it. See AbsState::FlagsGuard.
-    VLOG(1) << absl::StrFormat(
-        "0x%x: cmp $%u on %u bits + branch proves low %u bits of %s <= %u; carried to the widen that reads them "
-        "(edge to 0x%x)",
-        pc, imm, width, width, DWARFRegName(reg), ubound, target);
-  }
-}
-
-}  // namespace
-
 void FDEChecker::Drain() {
   while (!worklist_.empty()) {
     if (++iterations_ > options_.max_iterations) {
@@ -819,10 +734,12 @@ void FDEChecker::Drain() {
     if (outcome.falls_through) {
       uint64_t next = pc + insn.size;
       if (next < cfi_.pc_end && FallThroughIsReal(cfi_, row, next, before, state)) {
-        // `ja`/`jae` sends the out-of-range case to the default label, so
-        // their fall-through is the in-range edge.
+        // A guard branch proves something about the value it compared on
+        // exactly one of its two edges, and which one depends on the
+        // branch; InsnSemantics owns that question. For everything else
+        // this is a no-op.
         AbsState fallthrough_state = state;
-        ApplyInRangeGuard(&fallthrough_state, state, InRangeEdgeOf(insn.id, /*taken=*/false), pc, next);
+        semantics_.TransferEdge(insn, BranchEdge::kFallThrough, &fallthrough_state);
         Propagate(next, fallthrough_state);
       }
     }
@@ -831,11 +748,8 @@ void FDEChecker::Drain() {
       // A branch out of the FDE is a tail call, which is normal and not
       // ours to follow.
       if (target >= cfi_.pc_begin && target < cfi_.pc_end) {
-        // The mirror image of the fall-through above: `jbe`/`jb` jump *to*
-        // the in-range code rather than away from it, so for those the
-        // taken edge is the one that learns the bound.
         AbsState taken_state = state;
-        ApplyInRangeGuard(&taken_state, state, InRangeEdgeOf(insn.id, /*taken=*/true), pc, target);
+        semantics_.TransferEdge(insn, BranchEdge::kTaken, &taken_state);
         Propagate(target, taken_state);
       }
     }

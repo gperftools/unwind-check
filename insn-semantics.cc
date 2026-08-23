@@ -225,6 +225,29 @@ void ApplySignExtendedFrom(AbsVal* dst, const AbsVal& src, unsigned src_bits, ui
   dst->table_bound = std::min(src.table_bound, guard_bound);
 }
 
+// Which comparison, if any, one edge of `id` puts the compared value on the
+// in-range side of. The four unsigned spellings of a switch-table guard
+// split two ways: `ja`/`jbe` at `reg <= imm`, `jae`/`jb` at `reg < imm` --
+// and two ways again in which edge is the in-range one, since `ja`/`jae`
+// branch away from the table while `jbe`/`jb` branch into it.
+enum class GuardEdge { kNone, kAtMostImm, kBelowImm };
+
+GuardEdge InRangeEdgeOf(ZydisMnemonic id, BranchEdge edge) {
+  const bool taken = edge == BranchEdge::kTaken;
+  switch (id) {
+    case ZYDIS_MNEMONIC_JNBE:  // ja: out of range is the taken edge
+      return taken ? GuardEdge::kNone : GuardEdge::kAtMostImm;
+    case ZYDIS_MNEMONIC_JNB:  // jae
+      return taken ? GuardEdge::kNone : GuardEdge::kBelowImm;
+    case ZYDIS_MNEMONIC_JBE:  // jbe: in range is the taken edge
+      return taken ? GuardEdge::kAtMostImm : GuardEdge::kNone;
+    case ZYDIS_MNEMONIC_JB:  // jb
+      return taken ? GuardEdge::kBelowImm : GuardEdge::kNone;
+    default:
+      return GuardEdge::kNone;
+  }
+}
+
 }  // namespace
 
 int InsnSemantics::DWARFRegOf(ZydisRegister reg) {
@@ -270,6 +293,61 @@ void InsnSemantics::ClobberWrites(const Instruction& insn, AbsState* state) cons
         HandleUnplacedMemWrite(state);
       }
     }
+  }
+}
+
+void InsnSemantics::TransferEdge(const Instruction& insn, BranchEdge edge, AbsState* state) const {
+  const GuardEdge guard_edge = InRangeEdgeOf(insn.id, edge);
+  // A guard dominating this point is sitting right in state->last_cmp --
+  // no backward search. A bypassing predecessor that never ran the cmp will
+  // have cleared it in Join, and an instruction that overwrote the compared
+  // register in between will have cleared it in SetReg.
+  //
+  // Acting only on a not-yet-proven guard matters: once one has been cashed
+  // into a proven fact it outlives the flags that produced it, so a later
+  // branch -- testing whatever wrote EFLAGS since -- must not re-apply it.
+  if (guard_edge == GuardEdge::kNone || !state->last_cmp.has_value() || state->last_cmp->proven()) {
+    return;
+  }
+  const int reg = state->last_cmp->reg;
+  const uint8_t width = state->last_cmp->width_bits;
+  const uint64_t imm = state->last_cmp->imm;
+  if (guard_edge == GuardEdge::kBelowImm && imm == 0) {
+    return;  // "reg < 0" is unsatisfiable, and imm - 1 would wrap
+  }
+  const uint64_t ubound = guard_edge == GuardEdge::kBelowImm ? imm - 1 : imm;
+
+  // Always carry the guard forward as a proven, width-qualified fact --
+  // "the low `width` bits of reg are at most ubound" -- for the widen that
+  // reads exactly those bits to cash in. This happens whether or not the
+  // promotion below also fires, and that matters: promotion is a decision
+  // about the *state*, and the state can weaken between visits as more
+  // predecessors arrive. Retiring the guard on the visits that promoted
+  // would leave the fact recorded in one place on one visit and in another
+  // on the next, and Join -- which never lets an absent last_cmp adopt a
+  // present one -- would then drop it entirely. Leaving it behind is safe
+  // because of the already-proven check above.
+  state->last_cmp->proven_bound = ubound;
+
+  // The comparison bounds the low `width` bits. Promoting that to a fact
+  // about the whole 64-bit register -- which is what a table load indexes
+  // with -- needs proof that there is nothing in the upper bits, and
+  // value_bound is exactly that proof: a register already known to be below
+  // 2^width *is* its own low half. A 64-bit compare needs no proof.
+  const char* edge_name = edge == BranchEdge::kTaken ? "taken" : "fall-through";
+  if (width >= 64 || state->reg(reg).value_bound <= WidthBound(width)) {
+    VLOG(1) << absl::StrFormat("0x%x: cmp $%u on %u bits + branch proves %s <= %u on the %s edge", insn.address, imm,
+                               width, DWARFRegName(reg), ubound, edge_name);
+    state->ApplyGuardBound(reg, ubound);
+  } else {
+    // Nothing proves the upper bits empty -- typically an argument
+    // register, whose high half the ABI leaves undefined. The
+    // width-qualified fact carried above is all there is until a widen
+    // collects it. See AbsState::FlagsGuard.
+    VLOG(1) << absl::StrFormat(
+        "0x%x: cmp $%u on %u bits + branch proves low %u bits of %s <= %u on the %s edge; carried to the widen that "
+        "reads them",
+        insn.address, imm, width, width, DWARFRegName(reg), ubound, edge_name);
   }
 }
 

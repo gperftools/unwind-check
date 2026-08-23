@@ -48,6 +48,15 @@ struct TransferOutcome {
   std::string review_reason;
 };
 
+// Which successor of a branch a state is being propagated along.
+//
+// Transfer() describes what an instruction does on every path out of it.
+// TransferEdge() adds what one *particular* successor additionally proves,
+// which for a guard branch is the entire point of the branch: `ja` sends
+// the out-of-range case away, so its fall-through is where the compared
+// value is known to be in range.
+enum class BranchEdge { kFallThrough, kTaken };
+
 // The stack-effect semantics table.
 //
 // Only the instructions that touch rsp/rbp and the callee-saved spill
@@ -65,6 +74,24 @@ class InsnSemantics {
   InsnSemantics() = default;
 
   TransferOutcome Transfer(const Instruction& insn, AbsState* state) const;
+
+  // Refines `state` with what leaving `insn` along `edge` proves, on top of
+  // what Transfer() already applied to it.
+  //
+  // A no-op for everything except the four unsigned guard branches
+  // (`ja`/`jae`/`jbe`/`jb`), and then only on the edge where the compared
+  // value is in range, where it turns `AbsState::last_cmp` into a proven
+  // bound. This is the only place in the analysis where a comparison
+  // becomes a bound -- a cmp on its own sets flags and establishes nothing;
+  // it is the branch that picks a side. See AbsState::FlagsGuard.
+  //
+  // Call it *after* Transfer(), on the caller's own per-edge copy of the
+  // post-Transfer state. It is deliberately not folded into Transfer(),
+  // which runs before the walk knows which successor it is building; a
+  // branch writes neither registers nor flags, so the pre- and
+  // post-Transfer states are identical here and the split costs nothing,
+  // but the order has to hold.
+  void TransferEdge(const Instruction& insn, BranchEdge edge, AbsState* state) const;
 
   // DWARF register number for an x86 register, or -1 if it is not one of
   // the 16 GPRs. Sub-registers map to their 64-bit parent, which is what
