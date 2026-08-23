@@ -33,7 +33,12 @@ void PrintOne(const FDEResult& r, Symbolizer* sym, const ReportContext* ctx) {
   // more diagnostic than the single "at:" line below -- if the caller
   // gave us enough to build one for this FDE.
   std::vector<ListedInsn> listing;
-  if (ctx != nullptr && ctx->cfi_by_pc_begin != nullptr) {
+  // An empty-range FDE (pc_begin == pc_end, e.g. one of the zero-length
+  // FDEs recent clang emits) has no instructions of its own to list --
+  // and cfi_by_pc_begin is keyed by address alone, so looking it up here
+  // would find the real, unrelated FDE that happens to start at the same
+  // address and show its disassembly as if it belonged to this finding.
+  if (ctx != nullptr && ctx->cfi_by_pc_begin != nullptr && r.pc_begin != r.pc_end) {
     auto it = ctx->cfi_by_pc_begin->find(r.pc_begin);
     if (it != ctx->cfi_by_pc_begin->end()) {
       listing = ListInstructions(*ctx->image, ctx->disasm, *it->second);

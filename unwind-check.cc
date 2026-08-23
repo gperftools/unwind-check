@@ -145,9 +145,21 @@ void RunStructuralChecks(const ELFImage& image, const std::vector<RawFDE>& fdes,
       continue;
     }
     const CFI& cfi = *raw.cfi;
-    if (cfi.pc_end <= cfi.pc_begin) {
+    if (cfi.pc_end == cfi.pc_begin) {
+      // Recent clang emits a handful of these per binary: a zero-length
+      // FDE (pc_begin == pc_end, no rows) immediately preceding the real
+      // FDE for the same code, apparently a side effect of ICF folding
+      // multiple original symbols onto one function body. There is
+      // nothing to check -- no PC range, no rows -- so we just note it
+      // happened and flag it, rather than running it through (or letting
+      // it pollute) the rest of the pipeline.
       results->push_back(MakeStructuralResult(raw.vaddr, cfi.pc_begin, cfi.pc_end, Finding::Severity::kMismatch,
-                                              "FDE covers an empty or backwards PC range"));
+                                              "FDE covers an empty PC range (pc_begin == pc_end); noted and skipped"));
+      continue;
+    }
+    if (cfi.pc_end < cfi.pc_begin) {
+      results->push_back(MakeStructuralResult(raw.vaddr, cfi.pc_begin, cfi.pc_end, Finding::Severity::kMismatch,
+                                              "FDE covers a backwards PC range"));
       continue;
     }
     if (!image.IsExecutable(cfi.pc_begin, cfi.pc_end - cfi.pc_begin)) {
