@@ -199,30 +199,30 @@ TEST_F(SemanticsTest, RipRelativeLeaProducesAConstant) {
   // lea 0x10(%rip),%rcx -- the table-base load. The target is relative
   // to the end of this instruction, not its start.
   Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});
-  ASSERT_TRUE(state_.reg(kDWARFRcx).IsConst());
-  EXPECT_EQ(state_.reg(kDWARFRcx).ConstValue(), static_cast<int64_t>(kBase + 7 + 0x10));
+  ASSERT_TRUE(state_.table(kDWARFRcx).IsConst());
+  EXPECT_EQ(state_.table(kDWARFRcx).ConstValue(), static_cast<int64_t>(kBase + 7 + 0x10));
 }
 
 TEST_F(SemanticsTest, MovslqWithScale4FromAConstantBaseProducesATableEntry) {
   // lea 0x10(%rip),%rcx ; movslq (%rcx,%rax,4),%rdx
   Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});
-  int64_t table = state_.reg(kDWARFRcx).ConstValue();
+  int64_t table = state_.table(kDWARFRcx).ConstValue();
   Run({0x48, 0x63, 0x14, 0x81});
-  ASSERT_TRUE(state_.reg(kDWARFRdx).IsTableEntry());
-  EXPECT_EQ(state_.reg(kDWARFRdx).TableAddr(), static_cast<uint64_t>(table));
-  EXPECT_EQ(state_.reg(kDWARFRdx).IndexReg(), kDWARFRax);
-  EXPECT_EQ(state_.reg(kDWARFRdx).TableBaseConst(), static_cast<uint64_t>(table));
+  ASSERT_TRUE(state_.table(kDWARFRdx).IsTableEntry());
+  EXPECT_EQ(state_.table(kDWARFRdx).TableAddr(), static_cast<uint64_t>(table));
+  EXPECT_EQ(state_.table(kDWARFRdx).IndexReg(), kDWARFRax);
+  EXPECT_EQ(state_.table(kDWARFRdx).TableBaseConst(), static_cast<uint64_t>(table));
 }
 
 TEST_F(SemanticsTest, AddResolvesATableEntryToAJumpTargetRegardlessOfOperandOrder) {
   // lea 0x10(%rip),%rcx ; movslq (%rcx,%rax,4),%rdx ; add %rcx,%rdx
   Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});
-  int64_t table = state_.reg(kDWARFRcx).ConstValue();
+  int64_t table = state_.table(kDWARFRcx).ConstValue();
   Run({0x48, 0x63, 0x14, 0x81});
   Run({0x48, 0x01, 0xca});  // add %rcx,%rdx
-  ASSERT_TRUE(state_.reg(kDWARFRdx).IsJumpTarget());
-  EXPECT_EQ(state_.reg(kDWARFRdx).TableAddr(), static_cast<uint64_t>(table));
-  EXPECT_EQ(state_.reg(kDWARFRdx).IndexReg(), kDWARFRax);
+  ASSERT_TRUE(state_.table(kDWARFRdx).IsJumpTarget());
+  EXPECT_EQ(state_.table(kDWARFRdx).TableAddr(), static_cast<uint64_t>(table));
+  EXPECT_EQ(state_.table(kDWARFRdx).IndexReg(), kDWARFRax);
 }
 
 TEST_F(SemanticsTest, AddDoesNotResolveWhenTheConstantDoesNotMatchTheTablesBase) {
@@ -233,7 +233,7 @@ TEST_F(SemanticsTest, AddDoesNotResolveWhenTheConstantDoesNotMatchTheTablesBase)
   Run({0x48, 0x63, 0x14, 0x81});                    // rdx = table_entry(table, index=rax)
   Run({0x48, 0xc7, 0xc3, 0x00, 0x10, 0x00, 0x00});  // mov $0x1000,%rbx -- unrelated constant
   Run({0x48, 0x01, 0xda});                          // add %rbx,%rdx
-  EXPECT_FALSE(state_.reg(kDWARFRdx).IsJumpTarget());
+  EXPECT_FALSE(state_.table(kDWARFRdx).IsJumpTarget());
 }
 
 TEST_F(SemanticsTest, IndirectJumpThroughAJumpTargetResolvesOnlyWithAKnownBound) {
@@ -253,7 +253,7 @@ TEST_F(SemanticsTest, IndirectJumpResolvesOnceTheIndexRegisterHasAKnownBound) {
   // test used to do, is no longer picked up, on purpose: the whole point is to
   // stop the resolver from re-reading the index's bound live at the `jmp`.
   Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});  // rcx = const(table)
-  int64_t table = state_.reg(kDWARFRcx).ConstValue();
+  int64_t table = state_.table(kDWARFRcx).ConstValue();
   state_.ApplyGuardBound(kDWARFRax, 4);
   Run({0x48, 0x63, 0x14, 0x81});            // rdx = table_entry(table, index=rax), captures bound(rax)=4
   Run({0x48, 0x01, 0xca});                  // rdx = jump_target(table, index=rax), carries the captured bound
@@ -270,8 +270,8 @@ TEST_F(SemanticsTest, IndirectJumpDoesNotResolveFromAWidthFactAlone) {
   // happens to follow the real one. Only a guard may size a table.
   Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});  // rcx = const(table)
   Run({0x0f, 0xb6, 0xc0});                          // movzbl %al,%eax -- rax <= 255, no guard
-  ASSERT_EQ(state_.reg(kDWARFRax).value_bound, 255u);
-  ASSERT_FALSE(state_.reg(kDWARFRax).HasTableBound());
+  ASSERT_EQ(state_.table(kDWARFRax).value_bound, 255u);
+  ASSERT_FALSE(state_.table(kDWARFRax).HasTableBound());
   Run({0x48, 0x63, 0x14, 0x81});            // rdx = table_entry(table, index=rax)
   Run({0x48, 0x01, 0xca});                  // rdx = jump_target(table, index=rax)
   TransferOutcome out = Run({0xff, 0xe2});  // jmp *%rdx
@@ -305,8 +305,8 @@ TEST_F(SemanticsTest, CmpOnItsOwnEstablishesNoBound) {
   // a side and turns it into a fact -- deriving one here would invent a
   // bound on the taken edge, or with no branch at all.
   Run({0x83, 0xf8, 0x09});  // cmp $9,%eax
-  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, kBoundTop);
-  EXPECT_FALSE(state_.reg(kDWARFRax).HasTableBound());
+  EXPECT_EQ(state_.table(kDWARFRax).value_bound, kBoundTop);
+  EXPECT_FALSE(state_.table(kDWARFRax).HasTableBound());
 }
 
 TEST_F(SemanticsTest, LastCmpIsClearedByALaterFlagsWritingInstruction) {
@@ -340,13 +340,13 @@ TEST_F(SemanticsTest, AnyWriteToA32BitRegisterProvesTheFullRegisterIsZeroExtende
   // destination write, so the mere occurrence of one bounds the register.
   // This is what later lets a `cmp $imm,%eax` guard bound *rax*.
   Run({0x01, 0xc8});  // add %ecx,%eax
-  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, 0xffffffffu);
-  EXPECT_FALSE(state_.reg(kDWARFRax).HasTableBound()) << "a width fact is never a table size";
+  EXPECT_EQ(state_.table(kDWARFRax).value_bound, 0xffffffffu);
+  EXPECT_FALSE(state_.table(kDWARFRax).HasTableBound()) << "a width fact is never a table size";
 }
 
 TEST_F(SemanticsTest, AWriteToA64BitRegisterProvesNoWidthFact) {
   Run({0x48, 0x01, 0xc8});  // add %rcx,%rax
-  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, kBoundTop);
+  EXPECT_EQ(state_.table(kDWARFRax).value_bound, kBoundTop);
 }
 
 TEST_F(SemanticsTest, AWriteToAnEightBitRegisterProvesNothingAboutTheParent) {
@@ -354,8 +354,8 @@ TEST_F(SemanticsTest, AWriteToAnEightBitRegisterProvesNothingAboutTheParent) {
   // bounded %sil was, rax is not bounded at all.
   state_.ApplyGuardBound(kDWARFRsi, 9);
   Run({0x40, 0x88, 0xf0});  // mov %sil,%al
-  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, kBoundTop);
-  EXPECT_FALSE(state_.reg(kDWARFRax).HasTableBound());
+  EXPECT_EQ(state_.table(kDWARFRax).value_bound, kBoundTop);
+  EXPECT_FALSE(state_.table(kDWARFRax).HasTableBound());
 }
 
 TEST_F(SemanticsTest, MovzxIntoASixteenBitRegisterProvesNothingAboutTheParent) {
@@ -363,21 +363,21 @@ TEST_F(SemanticsTest, MovzxIntoASixteenBitRegisterProvesNothingAboutTheParent) {
   // upper half the way a 32-bit one does.
   state_.ApplyGuardBound(kDWARFRax, 9);
   Run({0x66, 0x0f, 0xb6, 0xc8});  // movzbw %al,%cx
-  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, kBoundTop);
+  EXPECT_EQ(state_.table(kDWARFRcx).value_bound, kBoundTop);
 }
 
 TEST_F(SemanticsTest, MovzxFromMemoryProvesTheLoadWidth) {
   // Where a byte-wide index usually comes from, and the fact that makes a
   // later `cmp $imm,%al` guard able to say anything about rax at all.
   Run({0x0f, 0xb6, 0x07});  // movzbl (%rdi),%eax
-  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, 255u);
+  EXPECT_EQ(state_.table(kDWARFRax).value_bound, 255u);
 }
 
 TEST_F(SemanticsTest, MovsxFromMemoryProvesOnlyTheDestinationWidth) {
   // Sign extension of unknown memory can produce a huge unsigned value,
   // so only the 32-bit destination write itself proves anything.
   Run({0x0f, 0xbe, 0x07});  // movsbl (%rdi),%eax
-  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, 0xffffffffu);
+  EXPECT_EQ(state_.table(kDWARFRax).value_bound, 0xffffffffu);
 }
 
 // --- guard branches: which edge proves what --------------------------------
@@ -400,7 +400,7 @@ TEST_F(SemanticsTest, JaProvesNothingOnTheTakenEdge) {
   RunEdge({0x77, 0x10}, BranchEdge::kTaken);  // ja +0x10 -- this is the default label
   ASSERT_TRUE(state_.last_cmp.has_value());
   EXPECT_FALSE(state_.last_cmp->proven());
-  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, kBoundTop);
+  EXPECT_EQ(state_.table(kDWARFRax).value_bound, kBoundTop);
 }
 
 TEST_F(SemanticsTest, JaeProvesTheStrictBoundOnTheFallThroughEdge) {
@@ -454,8 +454,8 @@ TEST_F(SemanticsTest, AGuardOnAFullWidthCompareIsPromotedImmediately) {
   // so the bound lands on the register itself and not only in the guard.
   Run({0x48, 0x83, 0xf8, 0x09});                    // cmp $9,%rax
   RunEdge({0x77, 0x10}, BranchEdge::kFallThrough);  // ja +0x10
-  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, 9u);
-  EXPECT_EQ(state_.reg(kDWARFRax).table_bound, 9u);
+  EXPECT_EQ(state_.table(kDWARFRax).value_bound, 9u);
+  EXPECT_EQ(state_.table(kDWARFRax).table_bound, 9u);
 }
 
 TEST_F(SemanticsTest, AGuardOnASubRegisterIsNotPromotedButIsCarried) {
@@ -463,7 +463,7 @@ TEST_F(SemanticsTest, AGuardOnASubRegisterIsNotPromotedButIsCarried) {
   // rax -- but the guard still holds over the 32 bits it compared.
   Run({0x83, 0xf8, 0x09});                          // cmp $9,%eax
   RunEdge({0x77, 0x10}, BranchEdge::kFallThrough);  // ja +0x10
-  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, kBoundTop) << "rax's upper bits are unknown";
+  EXPECT_EQ(state_.table(kDWARFRax).value_bound, kBoundTop) << "rax's upper bits are unknown";
   ASSERT_TRUE(state_.last_cmp.has_value());
   EXPECT_EQ(state_.last_cmp->proven_bound, 9u);
   EXPECT_EQ(state_.last_cmp->width_bits, 32u);
@@ -491,8 +491,8 @@ TEST_F(SemanticsTest, AProvenGuardIsCashedInByAWiden) {
   // turns that into a bound on all of rcx.
   state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, /*imm=*/9, /*proven_bound=*/9};
   Run({0x0f, 0xb6, 0xc8});  // movzbl %al,%ecx
-  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, 9u);
-  EXPECT_EQ(state_.reg(kDWARFRcx).table_bound, 9u) << "a guard is compiler-declared, so it may size a table";
+  EXPECT_EQ(state_.table(kDWARFRcx).value_bound, 9u);
+  EXPECT_EQ(state_.table(kDWARFRcx).table_bound, 9u) << "a guard is compiler-declared, so it may size a table";
 }
 
 TEST_F(SemanticsTest, AProvenGuardIsCashedInWhenSourceAndDestinationAreTheSameRegister) {
@@ -501,7 +501,7 @@ TEST_F(SemanticsTest, AProvenGuardIsCashedInWhenSourceAndDestinationAreTheSameRe
   // read before the destination is clobbered.
   state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, /*imm=*/9, /*proven_bound=*/9};
   Run({0x0f, 0xb6, 0xc0});  // movzbl %al,%eax
-  EXPECT_EQ(state_.reg(kDWARFRax).table_bound, 9u);
+  EXPECT_EQ(state_.table(kDWARFRax).table_bound, 9u);
   EXPECT_FALSE(state_.last_cmp.has_value()) << "the write to rax retires the guard once it has been collected";
 }
 
@@ -510,8 +510,8 @@ TEST_F(SemanticsTest, AnUnprovenGuardIsNotCashedIn) {
   // fabrication the old fallback committed.
   state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, /*imm=*/9, /*proven_bound=*/kBoundTop};
   Run({0x0f, 0xb6, 0xc8});  // movzbl %al,%ecx
-  EXPECT_FALSE(state_.reg(kDWARFRcx).HasTableBound());
-  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, 255u) << "only the load width itself survives";
+  EXPECT_FALSE(state_.table(kDWARFRcx).HasTableBound());
+  EXPECT_EQ(state_.table(kDWARFRcx).value_bound, 255u) << "only the load width itself survives";
 }
 
 TEST_F(SemanticsTest, AProvenGuardIsNotCashedInByAWiderRead) {
@@ -519,7 +519,7 @@ TEST_F(SemanticsTest, AProvenGuardIsNotCashedInByAWiderRead) {
   // read reaches past what was compared.
   state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, /*imm=*/9, /*proven_bound=*/9};
   Run({0x48, 0x63, 0xc8});  // movsxd %eax,%rcx
-  EXPECT_FALSE(state_.reg(kDWARFRcx).HasTableBound());
+  EXPECT_FALSE(state_.table(kDWARFRcx).HasTableBound());
 }
 
 TEST_F(SemanticsTest, AProvenGuardSurvivesAFlagsWritingInstruction) {
@@ -544,9 +544,9 @@ TEST_F(SemanticsTest, MovzxCarriesTheSourcesBoundsAcrossATruncatingWiden) {
   state_.ApplyGuardBound(kDWARFRax, 9);
   Run({0x0f, 0xb6, 0xc8});  // movzbl %al,%ecx
   EXPECT_TRUE(state_.reg(kDWARFRcx).is_top()) << "the widened value's own identity does not survive the truncation";
-  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, 9u);
-  EXPECT_EQ(state_.reg(kDWARFRcx).table_bound, 9u) << "a guard's bound stays usable as a table size across a widen";
-  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, 9u) << "the source's own bounds are untouched by a read";
+  EXPECT_EQ(state_.table(kDWARFRcx).value_bound, 9u);
+  EXPECT_EQ(state_.table(kDWARFRcx).table_bound, 9u) << "a guard's bound stays usable as a table size across a widen";
+  EXPECT_EQ(state_.table(kDWARFRax).value_bound, 9u) << "the source's own bounds are untouched by a read";
 }
 
 TEST_F(SemanticsTest, NarrowMovCarriesBoundsWhenTheDestinationIs32Bit) {
@@ -554,35 +554,35 @@ TEST_F(SemanticsTest, NarrowMovCarriesBoundsWhenTheDestinationIs32Bit) {
   // load reads; a plain `mov %esi,%eax` is one of the spellings it uses.
   state_.ApplyGuardBound(kDWARFRsi, 9);
   Run({0x89, 0xf0});  // mov %esi,%eax
-  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, 9u);
-  EXPECT_EQ(state_.reg(kDWARFRax).table_bound, 9u);
+  EXPECT_EQ(state_.table(kDWARFRax).value_bound, 9u);
+  EXPECT_EQ(state_.table(kDWARFRax).table_bound, 9u);
 }
 
 TEST_F(SemanticsTest, MovsxCarriesBoundsWhenTheSignBitIsProvenClear) {
   state_.ApplyGuardBound(kDWARFRax, 9);
   Run({0x0f, 0xbe, 0xc8});  // movsbl %al,%ecx
-  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, 9u);
-  EXPECT_EQ(state_.reg(kDWARFRcx).table_bound, 9u);
+  EXPECT_EQ(state_.table(kDWARFRcx).value_bound, 9u);
+  EXPECT_EQ(state_.table(kDWARFRcx).table_bound, 9u);
 }
 
 TEST_F(SemanticsTest, MovsxRejectsBoundsWhenTheSignBitCanBeOne) {
   state_.ApplyGuardBound(kDWARFRax, 200);
   Run({0x0f, 0xbe, 0xc8});  // movsbl %al,%ecx -- 200 is a negative signed byte
-  EXPECT_FALSE(state_.reg(kDWARFRcx).HasTableBound());
-  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, 0xffffffffu) << "only the 32-bit destination write itself survives";
+  EXPECT_FALSE(state_.table(kDWARFRcx).HasTableBound());
+  EXPECT_EQ(state_.table(kDWARFRcx).value_bound, 0xffffffffu) << "only the 32-bit destination write itself survives";
 }
 
 TEST_F(SemanticsTest, MovsxdCarriesBoundsFrom32BitRegWhenNonNegative) {
   state_.ApplyGuardBound(kDWARFRax, 9);
   Run({0x48, 0x63, 0xc8});  // movsxd %eax,%rcx
-  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, 9u);
-  EXPECT_EQ(state_.reg(kDWARFRcx).table_bound, 9u);
+  EXPECT_EQ(state_.table(kDWARFRcx).value_bound, 9u);
+  EXPECT_EQ(state_.table(kDWARFRcx).table_bound, 9u);
 }
 
 TEST_F(SemanticsTest, MovsxdRejectsBoundsWhenTheSignBitCanBeOne) {
   state_.ApplyValueBound(kDWARFRax, 0xffffffffu);
   Run({0x48, 0x63, 0xc8});  // movsxd %eax,%rcx
-  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, kBoundTop) << "a 64-bit destination proves no width fact of its own";
+  EXPECT_EQ(state_.table(kDWARFRcx).value_bound, kBoundTop) << "a 64-bit destination proves no width fact of its own";
 }
 
 TEST_F(SemanticsTest, LeaOnRspDropsDeadSlotsWhenMovingUp) {
@@ -602,8 +602,8 @@ TEST_F(SemanticsTest, StoresThroughAnUntrackedPointerDoNotWipeTheFrame) {
 
 TEST_F(SemanticsTest, SyscallClobbersCallerSavedRegistersAndRedZone) {
   state_.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));
-  state_.SetReg(kDWARFRax, AbsVal::Const(1));
-  state_.SetReg(kDWARFRbx, AbsVal::Const(2));
+  state_.SetTableReg(kDWARFRax, TableVal::Const(1));
+  state_.SetTableReg(kDWARFRbx, TableVal::Const(2));
   state_.SetReg(kDWARFRbp, AbsVal::CFARel(-8));
 
   TransferOutcome out = Run({0x0f, 0x05});  // syscall
@@ -611,9 +611,10 @@ TEST_F(SemanticsTest, SyscallClobbersCallerSavedRegistersAndRedZone) {
   EXPECT_TRUE(out.falls_through);
   EXPECT_TRUE(state_.reg(kDWARFRsp).IsCFARel(-8)) << "rsp is preserved across syscall";
   EXPECT_TRUE(state_.reg(kDWARFRbp).IsCFARel(-8)) << "rbp is callee-saved across syscall";
-  EXPECT_TRUE(state_.reg(kDWARFRbx).IsConst()) << "rbx is callee-saved across syscall";
-  EXPECT_EQ(state_.reg(kDWARFRbx).ConstValue(), 2);
+  EXPECT_TRUE(state_.table(kDWARFRbx).IsConst()) << "rbx is callee-saved across syscall";
+  EXPECT_EQ(state_.table(kDWARFRbx).ConstValue(), 2);
   EXPECT_TRUE(state_.reg(kDWARFRax).is_top()) << "rax is caller-saved / clobbered by syscall";
+  EXPECT_EQ(state_.table(kDWARFRax).kind, TableVal::Kind::kNone) << "and its table half goes with it";
   EXPECT_TRUE(state_.reg(kDWARFRcx).is_top()) << "rcx is clobbered by syscall";
   EXPECT_TRUE(state_.reg(kDWARFRdi).is_top()) << "rdi is caller-saved / clobbered by syscall";
   EXPECT_TRUE(state_.Slot(-16).is_top()) << "red zone slots do not survive syscall";
@@ -621,14 +622,14 @@ TEST_F(SemanticsTest, SyscallClobbersCallerSavedRegistersAndRedZone) {
 
 TEST_F(SemanticsTest, Int80ClobbersCallerSavedRegistersAndRedZone) {
   state_.SetSlot(-16, AbsVal::OrigReg(kDWARFRbx));
-  state_.SetReg(kDWARFRax, AbsVal::Const(1));
-  state_.SetReg(kDWARFRbx, AbsVal::Const(2));
+  state_.SetTableReg(kDWARFRax, TableVal::Const(1));
+  state_.SetTableReg(kDWARFRbx, TableVal::Const(2));
 
   TransferOutcome out = Run({0xcd, 0x80});  // int $0x80
   EXPECT_FALSE(out.is_call);
   EXPECT_TRUE(out.falls_through);
   EXPECT_TRUE(state_.reg(kDWARFRsp).IsCFARel(-8));
-  EXPECT_TRUE(state_.reg(kDWARFRbx).IsConst());
+  EXPECT_TRUE(state_.table(kDWARFRbx).IsConst());
   EXPECT_TRUE(state_.reg(kDWARFRax).is_top());
   EXPECT_TRUE(state_.Slot(-16).is_top());
 }

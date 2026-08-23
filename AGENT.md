@@ -117,7 +117,7 @@ recognize, is a hard error naming what went wrong.
 | `dwarf-constants.h` | copied verbatim from backtrace-test |
 | `cfi-table.{h,cc}` | the *declared* side: a visitor turning one FDE into a row table |
 | `disasm.{h,cc}` | thin wrapper over a Zydis decoder and AT&T-style formatter |
-| `abs-state.{h,cc}` | the lattice and its join (§4.3) |
+| `abs-state.{h,cc}` | the two lattices (CFI and switch-table) and their joins (§4.3) |
 | `insn-semantics.{h,cc}` | the *computed* side: what each instruction does to the stack (§4.4) |
 | `lsda-reader.{h,cc}` | parses `.gcc_except_table`'s call-site table for exception landing pads (§4.5) |
 | `fde-checker.{h,cc}` | CFG walk, worklist dataflow, and the comparison (§4.5) |
@@ -246,53 +246,90 @@ jump from `foo`. Nothing structural separates them — the linker merges
 use, a convention rather than a guarantee. It matters: a statically linked
 binary has dozens, and each was being accused of an impossible entry row.
 
-**Auxiliary, CFI-irrelevant facts are joined separately from identity.**
-Three values ride alongside the core CFA-relevant lattice above, existing
-only to resolve PIC switch-table dispatches (§6). No CFI row ever asserts
-anything about any of them, so a disagreement between two paths about them
-is lost precision, not the compiler-bug signal `Join` otherwise exists to
-report.
+**There are two lattices, and they are separate types.** `AbsVal` is the
+CFI lattice: the thing a declared unwind rule is checked against, and the
+only thing `Join` reports disagreements about. `TableVal` is everything
+that exists solely to resolve PIC switch-table dispatches. They used to be
+one struct with seven kinds and two auxiliary bound fields, three of the
+kinds being invisible to every CFI rule; splitting them is what let a pile
+of special cases be deleted rather than relocated.
 
-* `AbsVal::value_bound` — an inclusive upper bound on the **full 64-bit**
-  value, from any source. Mostly width facts: every write to a 32-bit GPR
-  destination zero-extends on x86-64, so the bare occurrence of one proves
-  the register is at most `0xffffffff`, and `movzbl` proves 255. Its job is
-  proving widths, not sizing tables.
-* `AbsVal::table_bound` — the subset of that established by a
-  `cmp $imm,%r; ja default` guard and nothing else: a bound the *compiler*
-  declared. Only this one may size a switch table. The split is
-  load-bearing rather than tidy: a width fact is honest but useless as a
-  table size (`movzbl` proving an index is at most 255 would resolve a
-  256-entry table out of whatever `.rodata` follows the real one), and a
-  wrong table size sends the walk to wrong targets. Keeping them apart is
-  also what keeps "no compiler-declared bound" a meaningful predicate, and
-  that predicate is what routes an unbounded dispatch to guessing recovery
-  (§6) instead of silently resolving it.
-* `AbsState::last_cmp` — the guard itself, tracked forward as one optional
-  fact (there is exactly one EFLAGS).
+`AbsVal` is `kTop`, `kBottom`, `kCFARel(delta)`, `kOrigReg(r)`, `kOther`.
+`TableVal` is `kNone`, `kConflict`, `kConst`, `kTableEntry`, `kJumpTarget`,
+plus the two bounds. Both have the same top/bottom shape, and for the same
+reasons — the identity element must adopt, the give-up state must absorb —
+but they are joined by different rules and consulted by different code.
 
-Both bounds are folded into `AbsVal` rather than kept in a side array, so
-`ClobberReg`/`SetReg` clear or carry them for free just by being
-whole-value operations. Both are inclusive, with `~0` (`kBoundTop`) as the
-lattice's top and `0` — "this value is 0" — as its bottom, and **both join
-by `max`**, which is the only thing an upper bound can join by: two paths
-proving `<= 4` and `<= 7` leave `<= 7` standing, and `kBoundTop` being
-max's identity is exactly what makes an unbounded path wipe out the other
-path's bound with no special case. `JoinValue` settles the identity first
-(`AbsVal::SameIdentity`, which deliberately ignores both bounds) and
-applies `max` afterwards regardless of which identity branch ran, so an
-adopted `kTop` or an adopted concrete value cannot smuggle in a bound the
-other path never proved. The same applies to a stack slot only one side
-names: its identity survives, its bounds do not.
+**`kOther` is a third state of knowledge, not a synonym for `kTop`.** It
+means "I know what is in this register, and it is definitely not
+CFA-relative and not any register's entry value" — a rip-relative `lea`
+result, typically. Every `RowChecker` test is `is_unknown() -> review, else
+-> mismatch`, so the difference is exactly the difference between *could
+not verify* and *verified false*: `lea .LC0(%rip),%rbx` where the CFI says
+rbx is untouched is a real CFI bug, while an unmodelled `add %rax,%rbx` is
+just us giving up. Before the split this state was carried, accidentally,
+by the table kinds themselves — they happened to make `is_unknown()` false.
+Moving those out without naming what they were doing would have silently
+downgraded that whole class of mismatch to review. `bad_lea_into_callee_saved`
+in the fixtures is there to catch exactly that, and it is the only check in
+the suite that does.
 
-`Join` still resolves a genuine identity disagreement between two
-table-resolution kinds to `kBottom` rather than `kTop`, even though nothing
-is reported. `kTop` is `Join`'s identity element, so if a real conflict
-degraded to it, a *third* predecessor arriving later at the same merge
-point would be silently adopted, resurrecting a concrete value after two
-paths already disagreed — a real, order-dependent "undo" of a conflict
-already found, traced and confirmed in this codebase, not hypothetical.
-`kBottom` is absorbing, so once poisoned it stays poisoned.
+**The join carve-out is gone, not moved.** `Join` used to need a rule
+saying "two switch-table kinds disagreeing is not a reportable conflict",
+because two unrelated `.rodata` pointers meeting at a merge arrived as two
+different `kConst`s. They now arrive as two `kOther`s, which compare
+*equal*, so there is nothing to report and nothing to suppress. What is
+left is one rule with no exceptions: two CFI values that each name
+something, and name different things, go to `kBottom` and get reported.
+
+`TableVal`'s join reports nothing at all, because nothing in it is a CFI
+claim. Identity is adopt-from-`kNone`, keep-if-equal, else `kConflict`.
+Both bounds join by `max`, which is the only thing an upper bound can join
+by: two paths proving `<= 4` and `<= 7` leave `<= 7` standing, and
+`kBoundTop` being max's identity is what makes an unbounded path wipe out
+the other path's bound with no special case. Identity and bounds are
+settled separately so that giving up on one cannot silently keep the other.
+
+Keeping `kNone` and `kConflict` apart is load-bearing in both directions,
+and getting it wrong is easy: collapsing them into one "nothing here" state
+makes a predecessor that knows nothing *destroy* a resolved dispatch
+instead of being absorbed by it, which loses real switch tables (`/bin/ls`'s
+main dispatch, immediately). Collapsing the other way — letting a
+disagreement land on the identity element — lets a third predecessor
+resurrect a concrete answer after two paths already disagreed.
+
+**The bounds live on `TableVal`.** `value_bound` is everything provable
+about the number, from any source: a zero-extending widen (`movzbl %al,%ecx`
+proves at most 255), the bare fact that an instruction wrote a 32-bit
+register (every such write zero-extends on x86-64), or a guard. Its job is
+proving widths. `table_bound` is the subset established by a
+`cmp $imm,%r; ja default` guard and nothing else — a bound the *compiler*
+declared — and only it may size a switch table. A width fact is honest but
+useless as a table size (`movzbl` proving an index is at most 255 would
+resolve a 256-entry table out of whatever `.rodata` follows the real one),
+and a wrong table size sends the walk to wrong targets. The split also
+keeps `table_bound == kBoundTop` a meaningful "no compiler-declared bound"
+predicate, which is what routes an unbounded dispatch to guessing recovery
+(§6) rather than silently resolving it.
+
+**Both halves of a register always move together.** `AbsState::SetReg`
+clears the table half rather than leaving it alone, so a register that just
+got a new value can never keep a stale table identity or a bound describing
+what used to be there — the mistake this split would otherwise make easy to
+write by accident. `SetTableReg` sets a table value and stamps `kOther` on
+the CFI side, since a `.rodata` pointer is precisely "definitely not an
+entry value". `CopyReg` carries both, for the one case that must: a
+full-width register-to-register move, where a value keeps its identity
+*and* its bounds.
+
+**Slots hold CFI values only.** A table base or index that gets spilled and
+reloaded loses its table identity. This is deliberate, not an oversight:
+the 400-binary sweep shows it costs nothing measurable, and it spares a
+second slot map and a second join. It also dissolves a bug the old design
+had to handle explicitly — a spilled switch scratch value used to produce a
+spurious conflict, which is why the carve-out had to be generalised from
+registers to slots; two spilled table values are now both `kOther`, so they
+simply agree.
 
 **A comparison is not a bound; a branch is.** This is the part that was
 wrong for a long time and is worth stating flatly. `cmp $imm,%reg` sets
@@ -393,7 +430,8 @@ Ninja's stack tracker each special-case; nobody lifts all of x86-64 for this
 question.
 
 A destination's *identity* survives only a full-width move, but its numeric
-bounds (§4.3) survive any write that covers the whole 64-bit register --
+bounds (§4.3, on the TableVal half) survive any write that covers the whole
+64-bit register --
 64-bit explicitly, or 32-bit because x86-64 zero-extends those. That is
 `mov %esi,%eax`, `movzbl %al,%ecx`, `movsbl`, `movslq`: GCC routinely
 widens a guarded switch index into whatever register the table load
@@ -665,8 +703,8 @@ some path — either a genuine inaccuracy or an artefact of a path this version
 cannot prove unreachable. It is flagged, which is what the contract asks for.
 
 Precision at scale: over a 400-binary sample of `/usr/bin` and
-`/usr/lib/x86_64-linux-gnu` — 669,554 FDEs, 653,986 blessed — there were
-**zero** crashes and zero abnormal exits. Reproduce with
+`/usr/lib/x86_64-linux-gnu` — 741,775 FDEs, 710,014 blessed, 424 mismatches
+— there were **zero** crashes and zero abnormal exits. Reproduce with
 `./robustness-sweep.rb`; anything it prints as ABNORMAL is a bug in this
 tool. A handful of large binaries (`libLLVM-17.so.1`,
 `libwebkit2gtk-4.1.so.0.21.10`) take 30-40s, which the sweep reports

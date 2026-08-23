@@ -31,6 +31,15 @@
 
 * AbsState slots should be btree not std::map
 
+* now that AbsVal has kOther, decide deliberately which instructions
+  produce it. Today `lea .LC0(%rip),%rbx` does (via the table half) but
+  `mov $0x10,%rbx` does not -- it clobbers to kTop -- even though both
+  equally prove rbx no longer holds its entry value. That asymmetry is
+  inherited, not chosen: kConst existed for table bases and the immediate
+  case never needed one. Making `mov $imm` produce kOther would turn some
+  reviews into mismatches; the check_unmentioned_callee_saved fixtures
+  depend on the current answer.
+
 * various reg args, e.g. ReadRead, DWARFRegOf should perhaps be of relevant zydis type: ZydisRegister. It is nice dense type btw with ZYDIS_REGISTER_MAX_VALUE available
 
 * DWARFRegOf should not be linear scan
@@ -101,9 +110,9 @@
 * double check if say storing {x,y,z}mm field over set of slots is
   clobbring them. Probably not.
 
-* AbsState::SetSlot erases any is_top() value, which drops the bounds a
-  kTop-with-bounds carries -- so spilling a movzbl result and reloading it
-  loses the width fact and any proven guard folded into it. Pre-existing,
-  and the 400-binary sweep says it currently costs nothing measurable, but
-  it is a silent precision cliff if compilers start spilling switch indices
-  more.
+* Slots hold CFI values only, so spilling a table base or a bounded index
+  and reloading it loses the table identity and both bounds. Deliberate --
+  the 400-binary sweep says it costs nothing measurable, and it spares a
+  second slot map and join -- but it is a silent precision cliff if
+  compilers start spilling switch indices more. The fix if it ever shows up
+  is a TableVal slot map, not a rethink of the split.

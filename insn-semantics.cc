@@ -163,7 +163,7 @@ uint64_t WrittenRegBound(ZydisRegister reg) {
 // zero-extension fact survives being unable to model the value.
 void ClobberWrittenReg(AbsState* state, ZydisRegister reg, int dwarf_reg) {
   state->ClobberReg(dwarf_reg);
-  state->gpr[dwarf_reg].value_bound = WrittenRegBound(reg);
+  state->tbl[dwarf_reg].value_bound = WrittenRegBound(reg);
 }
 
 // What a *proven* guard contributes to a zero-extending read of the low
@@ -203,7 +203,7 @@ uint64_t ProvenGuardBound(const AbsState& state, int reg, unsigned read_bits) {
 // `table_bound` is carried across unchanged rather than tightened to the
 // width: tightening it would manufacture a compiler-declared bound out of
 // an instruction width, which is exactly what table_bound exists not to be.
-void ApplyZeroExtendedFrom(AbsVal* dst, const AbsVal& src, unsigned src_bits, uint64_t guard_bound) {
+void ApplyZeroExtendedFrom(TableVal* dst, const TableVal& src, unsigned src_bits, uint64_t guard_bound) {
   dst->value_bound = std::min({WidthBound(src_bits), src.value_bound, guard_bound});
   // A guard is compiler-declared, so unlike the width term above it may
   // size a table -- that is the whole point of collecting it here.
@@ -215,7 +215,7 @@ void ApplyZeroExtendedFrom(AbsVal* dst, const AbsVal& src, unsigned src_bits, ui
 // bit, since otherwise the result is a huge unsigned number rather than a
 // small one -- and `value_bound` is precisely the fact that proves it.
 // When it cannot be proven, nothing survives.
-void ApplySignExtendedFrom(AbsVal* dst, const AbsVal& src, unsigned src_bits, uint64_t guard_bound) {
+void ApplySignExtendedFrom(TableVal* dst, const TableVal& src, unsigned src_bits, uint64_t guard_bound) {
   const uint64_t low = std::min({WidthBound(src_bits), src.value_bound, guard_bound});
   if (src_bits >= 64 || low >= (uint64_t{1} << (src_bits - 1))) {
     dst->ClearBounds();
@@ -335,7 +335,7 @@ void InsnSemantics::TransferEdge(const Instruction& insn, BranchEdge edge, AbsSt
   // value_bound is exactly that proof: a register already known to be below
   // 2^width *is* its own low half. A 64-bit compare needs no proof.
   const char* edge_name = edge == BranchEdge::kTaken ? "taken" : "fall-through";
-  if (width >= 64 || state->reg(reg).value_bound <= WidthBound(width)) {
+  if (width >= 64 || state->table(reg).value_bound <= WidthBound(width)) {
     VLOG(1) << absl::StrFormat("0x%x: cmp $%u on %u bits + branch proves %s <= %u on the %s edge", insn.address, imm,
                                width, DWARFRegName(reg), ubound, edge_name);
     state->ApplyGuardBound(reg, ubound);
@@ -392,7 +392,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
     }
     if (insn.op_count >= 1 && insn.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER) {
       int r = DWARFRegOf(insn.operands[0].reg.value);
-      const AbsVal v = r >= 0 ? state->reg(r) : AbsVal::Top();
+      const TableVal v = state->table(r);
       VLOG(1) << absl::StrFormat("0x%x: indirect jmp via reg %d, value=%v", insn.address, r, v);
       if (v.IsJumpTarget()) {
         // The index's bound was captured once at movslq-time and carried
@@ -534,8 +534,11 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
     }
 
     case ZYDIS_MNEMONIC_LEAVE: {
-      // leave == mov %rbp,%rsp ; pop %rbp
-      state->SetReg(kDWARFRsp, state->reg(kDWARFRbp));
+      // leave == mov %rbp,%rsp ; pop %rbp. The first half is a full-width
+      // register move like any other, so it carries both halves -- rsp's
+      // table half is meaningless, but keeping the rule uniform is cheaper
+      // than justifying an exception.
+      state->CopyReg(kDWARFRsp, kDWARFRbp);
       const AbsVal rsp = state->reg(kDWARFRsp);
       if (rsp.kind == AbsVal::Kind::kCFARel) {
         state->SetReg(kDWARFRbp, state->Slot(rsp.delta));
@@ -568,7 +571,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
         uint64_t target = 0;
         if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn.insn, &insn.operands[1], insn.address, &target))) {
           VLOG(1) << absl::StrFormat("0x%x: lea rip-relative -> reg %d = kConst(0x%x)", insn.address, d, target);
-          state->SetReg(d, AbsVal::Const(static_cast<int64_t>(target)));
+          state->SetTableReg(d, TableVal::Const(static_cast<int64_t>(target)));
           return out;
         }
       }
@@ -607,16 +610,24 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
           // refuses to give for a sub-register.
           const bool widening = RegWidthBits(dst.reg.value) == 32;
           const int sr = (widening && src.type == ZYDIS_OPERAND_TYPE_REGISTER) ? DWARFRegOf(src.reg.value) : -1;
-          const AbsVal src_val = sr >= 0 ? state->reg(sr) : AbsVal::Top();
+          const TableVal src_val = state->table(sr);
           const uint64_t guard = sr >= 0 ? ProvenGuardBound(*state, sr, src.size) : kBoundTop;
           ClobberWrittenReg(state, dst.reg.value, d);
           if (sr >= 0) {
-            ApplyZeroExtendedFrom(&state->gpr[d], src_val, src.size, guard);
+            ApplyZeroExtendedFrom(&state->tbl[d], src_val, src.size, guard);
           }
           return out;
         }
         if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-          state->SetReg(d, ReadReg(*state, src.reg.value));
+          // A full-width move keeps the source's identity *and* its bounds,
+          // so both halves travel: this is the one place a table value or a
+          // proven width fact legitimately changes register.
+          const int sr = DWARFRegOf(src.reg.value);
+          if (sr >= 0 && IsFull64(src.reg.value)) {
+            state->CopyReg(d, sr);
+          } else {
+            state->SetReg(d, AbsVal::Top());
+          }
         } else if (src.type == ZYDIS_OPERAND_TYPE_MEMORY) {
           std::optional<int64_t> slot = MemSlot(*state, insn, src.mem);
           state->SetReg(d, (slot.has_value() && src.size == 64) ? state->Slot(*slot) : AbsVal::Top());
@@ -665,11 +676,11 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
         const unsigned src_bits = insn.operands[1].size;
         // Snapshot before the clobber -- `movsxd %eax,%rax` reads and writes
         // the same register.
-        const AbsVal src_val = sr >= 0 ? state->reg(sr) : AbsVal::Top();
+        const TableVal src_val = state->table(sr);
         const uint64_t guard = sr >= 0 ? ProvenGuardBound(*state, sr, src_bits) : kBoundTop;
         state->ClobberReg(d);
         if (sr >= 0) {
-          ApplySignExtendedFrom(&state->gpr[d], src_val, src_bits, guard);
+          ApplySignExtendedFrom(&state->tbl[d], src_val, src_bits, guard);
         }
         return out;
       }
@@ -692,7 +703,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       if (idx_reg < 0 || base_reg < 0 || !IsFull64(mem.base)) {
         break;
       }
-      const AbsVal& base_val = state->reg(base_reg);
+      const TableVal& base_val = state->table(base_reg);
       if (!base_val.IsConst()) {
         VLOG(1) << absl::StrFormat(
             "0x%x: movslq disp(%%B,%%I,4),%%T base reg %d is not a known constant (value=%v) -- not a table load",
@@ -705,12 +716,12 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       // eventual `jmp` -- an intervening instruction reusing the same
       // register number for an unrelated guard would otherwise be able to
       // hand the resolver the wrong bound.
-      uint64_t index_bound = state->reg(idx_reg).table_bound;
+      uint64_t index_bound = state->table(idx_reg).table_bound;
       VLOG(1) << absl::StrFormat("0x%x: movslq -> reg %d = kTableEntry(table=0x%x, index_reg=%d, captured_bound=%s)",
                                  insn.address, d, table, idx_reg,
                                  index_bound != kBoundTop ? absl::StrFormat("%u", index_bound) : std::string("<none>"));
-      state->SetReg(d, AbsVal::TableEntry(table, static_cast<uint8_t>(idx_reg),
-                                          static_cast<uint64_t>(base_val.ConstValue()), index_bound));
+      state->SetTableReg(d, TableVal::TableEntry(table, static_cast<uint8_t>(idx_reg),
+                                                 static_cast<uint64_t>(base_val.ConstValue()), index_bound));
       return out;
     }
 
@@ -726,24 +737,25 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
         int d0 = DWARFRegOf(insn.operands[0].reg.value);
         int d1 = DWARFRegOf(insn.operands[1].reg.value);
         if (d0 >= 0 && d1 >= 0 && IsFull64(insn.operands[0].reg.value) && IsFull64(insn.operands[1].reg.value)) {
-          const AbsVal op0 = state->reg(d0);
-          const AbsVal op1 = state->reg(d1);
-          auto resolve = [](const AbsVal& base_candidate, const AbsVal& entry_candidate) -> std::optional<AbsVal> {
+          const TableVal op0 = state->table(d0);
+          const TableVal op1 = state->table(d1);
+          auto resolve = [](const TableVal& base_candidate,
+                            const TableVal& entry_candidate) -> std::optional<TableVal> {
             if (base_candidate.IsConst() && entry_candidate.IsTableEntry() &&
                 entry_candidate.TableBaseConst() == static_cast<uint64_t>(base_candidate.ConstValue())) {
-              return AbsVal::JumpTarget(entry_candidate.TableAddr(), static_cast<uint8_t>(entry_candidate.IndexReg()),
-                                        entry_candidate.table_bound);
+              return TableVal::JumpTarget(entry_candidate.TableAddr(), static_cast<uint8_t>(entry_candidate.IndexReg()),
+                                          entry_candidate.table_bound);
             }
             return std::nullopt;
           };
-          std::optional<AbsVal> resolved = resolve(op0, op1);
+          std::optional<TableVal> resolved = resolve(op0, op1);
           if (!resolved.has_value()) {
             resolved = resolve(op1, op0);
           }
           if (resolved.has_value()) {
             VLOG(1) << absl::StrFormat("0x%x: %s -> reg %d = kJumpTarget(%v)", insn.address,
                                        insn.id == ZYDIS_MNEMONIC_ADD ? "add" : "sub", d0, *resolved);
-            state->SetReg(d0, *resolved);
+            state->SetTableReg(d0, *resolved);
             return out;
           }
         }
@@ -830,19 +842,19 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       // proving rax <= 255 is what later lets `cmp $imm,%al` bound rax at
       // all. There is no source AbsVal in that case, only the load width.
       const int sr = src.type == ZYDIS_OPERAND_TYPE_REGISTER ? DWARFRegOf(src.reg.value) : -1;
-      const AbsVal src_val = sr >= 0 ? state->reg(sr) : AbsVal::Top();
+      const TableVal src_val = state->table(sr);
       const uint64_t guard = sr >= 0 ? ProvenGuardBound(*state, sr, src.size) : kBoundTop;
       ClobberWrittenReg(state, insn.operands[0].reg.value, d);
       if (RegWidthBits(insn.operands[0].reg.value) < 32) {
         return out;  // an 8/16-bit destination proves nothing about the parent
       }
       if (insn.id == ZYDIS_MNEMONIC_MOVZX) {
-        ApplyZeroExtendedFrom(&state->gpr[d], src_val, src.size, guard);
+        ApplyZeroExtendedFrom(&state->tbl[d], src_val, src.size, guard);
       } else {
-        ApplySignExtendedFrom(&state->gpr[d], src_val, src.size, guard);
+        ApplySignExtendedFrom(&state->tbl[d], src_val, src.size, guard);
       }
       // Whatever the widen proved, the destination's own width still caps it.
-      state->gpr[d].value_bound = std::min(state->gpr[d].value_bound, WrittenRegBound(insn.operands[0].reg.value));
+      state->tbl[d].value_bound = std::min(state->tbl[d].value_bound, WrittenRegBound(insn.operands[0].reg.value));
       return out;
     }
 

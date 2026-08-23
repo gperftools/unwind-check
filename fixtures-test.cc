@@ -141,6 +141,7 @@ TEST_F(FixturesTest, EveryFixtureIsPresent) {
                            "review_ret_callee_saved_untracked",
                            "review_indirect_jump",
                            "review_cfa_expression",
+                           "bad_lea_into_callee_saved",
                            "good_switch_table",
                            "good_switch_table_jbe",
                            "good_switch_table_jb",
@@ -232,6 +233,15 @@ TEST_F(FixturesTest, ReturnWithUntrackedCalleeSavedIsReview) {
 
 TEST_F(FixturesTest, IndirectJumpIsFlaggedNotGuessed) {
   EXPECT_THAT(Get("review_indirect_jump").messages, Contains(HasSubstr("unresolved indirect jump")));
+}
+
+TEST_F(FixturesTest, ClobberingACalleeSavedRegisterWithAKnownValueIsAMismatchNotAReview) {
+  // The distinction AbsVal::kOther carries: "I know what is in rbx and it
+  // is definitely not its entry value" answers the CFI with a mismatch,
+  // where "I have no idea what is in rbx" would only warrant a review.
+  const Checked& c = Get("bad_lea_into_callee_saved");
+  EXPECT_EQ(c.result.verdict, Verdict::kMismatch);
+  EXPECT_THAT(c.messages, Contains(HasSubstr("rbx")));
 }
 
 TEST_F(FixturesTest, SwitchTableCasesGetWalked) {

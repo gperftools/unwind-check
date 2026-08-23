@@ -41,6 +41,11 @@ inline constexpr uint64_t WidthBound(unsigned bits) {
 // quantity that we never redefine. Everything the analysis tracks is
 // expressed relative to it, which is what makes a declared CFI rule
 // directly checkable instead of something we have to re-derive.
+//
+// This is the *CFI* lattice: what a declared unwind rule can be checked
+// against, and the only thing Join reports disagreements about. Switch
+// table resolution rides in a separate lattice (TableVal, below) that no
+// CFI row can ever consult -- see the split's rationale there.
 struct AbsVal {
   enum class Kind : uint8_t {
     // Top of the lattice: truly unknown. No path has told us anything
@@ -58,88 +63,41 @@ struct AbsVal {
     kBottom,
     kCFARel,   // the value is CFA + delta
     kOrigReg,  // the value is whatever DWARF register `reg` held on entry
-    // The three kinds below exist only to resolve PIC switch-table
-    // dispatches. No CFI row ever asserts anything about them, so a conflict
-    // between two of these kinds is not a CFI/code disagreement -- see the
-    // carve-out in Join().
-    kConst,       // a known absolute address/constant, in `delta`
-    kTableEntry,  // result of a table load: table base `delta`, index reg
-                  // `reg`, and the undisplaced constant the table base was
-                  // computed from in `aux` (see the `add` transfer rule)
-    kJumpTarget,  // a resolved `table + table[index]`: table addr `delta`,
-                  // index reg `reg`
+    // Known to be *something else*: not CFA-relative, not any register's
+    // entry value. A rip-relative `lea` result is the common case.
+    //
+    // This is a third state of knowledge, and it is not a synonym for
+    // kTop. kTop is "I do not know what is in here", which answers a CFI
+    // rule with a review; kOther is "I know, and it is definitely not
+    // what you claimed", which answers with a mismatch. Both are "not the
+    // value the row names", but only one is evidence -- `lea .LC0(%rip),
+    // %rbx` where the CFI says rbx is untouched is a real CFI bug, while
+    // an unmodelled `add %rax,%rbx` is just us giving up.
+    //
+    // Every RowChecker test is `is_unknown() -> review, else -> mismatch`,
+    // so collapsing kOther into kTop would silently turn a whole class of
+    // verified-false into could-not-verify.
+    kOther,
   };
 
   Kind kind = Kind::kTop;
   int64_t delta = 0;
   uint8_t reg = 0;
-  uint64_t aux = 0;
-  // Two upper bounds on this value's true numeric content, both valid
-  // regardless of `kind` (a bound is a fact about the number a register
-  // holds, not about whatever else this AbsVal happens to track). Both are
-  // auxiliary, precision-only metadata: no CFI row ever asserts anything
-  // about either, so they are joined independently of
-  // `kind`/`delta`/`reg`/`aux` -- see AbsVal::SameIdentity and JoinValue in
-  // abs-state.cc.
-  //
-  // They are kept apart because they answer different questions and are
-  // trusted to different depths.
-  //
-  // `value_bound` is everything we can prove about the number, from any
-  // source: a zero-extending widen (`movzbl %al,%ecx` proves the result is
-  // at most 255), the bare fact that an instruction wrote a 32-bit register
-  // (every such write zero-extends on x86-64, so the full register is at
-  // most 0xffffffff), or a guard. Its job is *proving widths*: it is what
-  // lets a narrow `cmp $imm,%eax` say anything about rax at all, since
-  // without it the guard constrains only the low 32 bits and the table load
-  // reads all 64.
-  //
-  // `table_bound` is the subset of that established by a
-  // `cmp $imm,%r; ja default` guard and nothing else -- i.e. a bound the
-  // *compiler* declared, not one we inferred from an instruction's width.
-  // Only this one may size a switch table. The distinction is load-bearing:
-  // a width fact is honest but useless as a table size (`movzbl` proves an
-  // index is at most 255, which would resolve a 256-entry table out of
-  // whatever .rodata follows the real one), and a wrong table size sends the
-  // walk to wrong targets. Keeping them separate is also what keeps
-  // `table_bound == kBoundTop` a meaningful "no compiler-declared bound"
-  // predicate, which is what routes an unbounded dispatch to guessing
-  // recovery (REVIEW-LIGHT) instead of silently resolving it.
-  //
-  // For kTableEntry and kJumpTarget, `table_bound` means something slightly
-  // different -- the bound captured for the *index register* at `movslq`
-  // time, not a bound on this (address-valued) entry. It is captured then,
-  // rather than re-derived with a live lookup at the eventual `jmp`, because
-  // an intervening instruction could reuse the same register number for an
-  // unrelated guard, and a live lookup would silently pick that bound up
-  // instead of the one that actually sized this table. A snapshot taken when
-  // the index's job is already done is immune to anything afterward.
-  uint64_t value_bound = kBoundTop;
-  uint64_t table_bound = kBoundTop;
 
   static AbsVal Top() {
     return {};
   }
   static constexpr AbsVal Bottom() {
-    return AbsVal{Kind::kBottom, 0, 0, 0, kBoundTop, kBoundTop};
+    return AbsVal{Kind::kBottom, 0, 0};
   }
   static AbsVal CFARel(int64_t delta) {
-    return AbsVal{Kind::kCFARel, delta, 0, 0, kBoundTop, kBoundTop};
+    return AbsVal{Kind::kCFARel, delta, 0};
   }
   static AbsVal OrigReg(int reg) {
-    return AbsVal{Kind::kOrigReg, 0, static_cast<uint8_t>(reg), 0, kBoundTop, kBoundTop};
+    return AbsVal{Kind::kOrigReg, 0, static_cast<uint8_t>(reg)};
   }
-  static AbsVal Const(int64_t value) {
-    return AbsVal{Kind::kConst, value, 0, 0, kBoundTop, kBoundTop};
-  }
-  // `index_bound` is the index register's table_bound, snapshotted here --
-  // see the comment on table_bound for why it is taken now and not read
-  // live at the `jmp`.
-  static AbsVal TableEntry(uint64_t table_addr, uint8_t index_reg, uint64_t base_const, uint64_t index_bound) {
-    return AbsVal{Kind::kTableEntry, static_cast<int64_t>(table_addr), index_reg, base_const, kBoundTop, index_bound};
-  }
-  static AbsVal JumpTarget(uint64_t table_addr, uint8_t index_reg, uint64_t index_bound) {
-    return AbsVal{Kind::kJumpTarget, static_cast<int64_t>(table_addr), index_reg, 0, kBoundTop, index_bound};
+  static AbsVal Other() {
+    return AbsVal{Kind::kOther, 0, 0};
   }
 
   bool is_top() const {
@@ -150,7 +108,8 @@ struct AbsVal {
   }
   // Neither top nor bottom names a concrete value, so both read as
   // "cannot verify a declared CFI rule against this" to every call site
-  // that just wants to know whether it has something to compare.
+  // that just wants to know whether it has something to compare. kOther
+  // is deliberately *not* one of them: see the comment on that kind.
   bool is_unknown() const {
     return kind == Kind::kTop || kind == Kind::kBottom;
   }
@@ -159,61 +118,6 @@ struct AbsVal {
   }
   bool IsOrigReg(int r) const {
     return kind == Kind::kOrigReg && reg == r;
-  }
-  bool IsConst() const {
-    return kind == Kind::kConst;
-  }
-  int64_t ConstValue() const {
-    assert(IsConst());
-    return delta;
-  }
-  bool IsTableEntry() const {
-    return kind == Kind::kTableEntry;
-  }
-  bool IsJumpTarget() const {
-    return kind == Kind::kJumpTarget;
-  }
-  // Valid for kTableEntry and kJumpTarget.
-  uint64_t TableAddr() const {
-    assert(IsTableEntry() || IsJumpTarget());
-    return static_cast<uint64_t>(delta);
-  }
-  int IndexReg() const {
-    assert(IsTableEntry() || IsJumpTarget());
-    return reg;
-  }
-  // Valid for kTableEntry only: the undisplaced constant `table` was
-  // derived from, which the `add %B,%T` transfer rule must match against
-  // `%B` before it will resolve to a kJumpTarget.
-  uint64_t TableBaseConst() const {
-    assert(IsTableEntry());
-    return aux;
-  }
-  // True when a `cmp $imm,%r; ja default` guard proved a bound this value
-  // may be used to size a switch table from -- see `table_bound` above for
-  // why a `value_bound` alone does not qualify.
-  bool HasTableBound() const {
-    return table_bound != kBoundTop;
-  }
-  // Tightens both bounds to `b`, the effect of a guard proving this value
-  // is at most `b`. Both, because a compiler-declared bound is evidence
-  // about the number as well as evidence a table may be sized from.
-  void ApplyGuardBound(uint64_t b) {
-    value_bound = std::min(value_bound, b);
-    table_bound = std::min(table_bound, b);
-  }
-  void ClearBounds() {
-    value_bound = kBoundTop;
-    table_bound = kBoundTop;
-  }
-
-  // True when two values name the same thing -- same kind, and same
-  // kind-specific payload (delta/reg/aux) -- regardless of whether their
-  // auxiliary bounds agree. Join() uses this to decide whether a
-  // disagreement is "the same fact, differently bounded" versus a real
-  // conflict about what the value even is.
-  bool SameIdentity(const AbsVal& other) const {
-    return kind == other.kind && delta == other.delta && reg == other.reg && aux == other.aux;
   }
 
   bool operator==(const AbsVal&) const = default;
@@ -233,14 +137,194 @@ struct AbsVal {
       case Kind::kOrigReg:
         absl::Format(&sink, "entry %s", DWARFRegName(val.reg));
         return;
+      case Kind::kOther:
+        sink.Append("an unrelated value");
+        return;
+    }
+    sink.Append("?");
+  }
+};
+
+// The *table* lattice: everything that exists only to resolve PIC
+// switch-table dispatches, and nothing else.
+//
+// It is kept apart from AbsVal above rather than sharing one struct
+// because the two answer different questions and are trusted to different
+// depths. No CFI row can assert anything about a scratch register holding
+// a `.rodata` pointer or a table-derived offset, so a disagreement here is
+// lost precision, never the compiler-bug signal Join exists to report --
+// which means this lattice has no conflict reporting at all, and AbsVal's
+// join needs no carve-out to suppress it. Two different table values
+// meeting at a merge are both kOther on the CFI side, i.e. the same
+// identity, so there is nothing to report there either.
+//
+// Tracked for registers only. A table base or index that gets spilled and
+// reloaded loses its table identity, which costs nothing measurable (see
+// AGENT.md §4.3) and spares a second slot map.
+struct TableVal {
+  enum class Kind : uint8_t {
+    // Nothing table-related known -- and, like AbsVal::kTop, the join's
+    // identity element: a path that knows nothing contributes no
+    // constraint, so meeting it with a resolved dispatch leaves the
+    // dispatch standing. This is what a register starts as and what a
+    // fresh write resets it to.
+    kNone,
+    // Two paths each claimed a different table value, so nothing here can
+    // be trusted -- AbsVal::kBottom's counterpart, and absorbing for the
+    // same reason. Keeping this apart from kNone is not tidiness: if
+    // giving up landed on the identity element instead, a third
+    // predecessor arriving later would be silently adopted, resurrecting a
+    // concrete answer after two paths had already disagreed.
+    kConflict,
+    kConst,       // a known absolute address/constant, in `addr`
+    kTableEntry,  // result of a table load: table base `addr`, index reg
+                  // `index_reg`, and the undisplaced constant the table
+                  // base was computed from in `base_const` (see the `add`
+                  // transfer rule)
+    kJumpTarget,  // a resolved `table + table[index]`: table addr `addr`,
+                  // index reg `index_reg`
+  };
+
+  Kind kind = Kind::kNone;
+  int64_t addr = 0;
+  uint8_t index_reg = 0;
+  uint64_t base_const = 0;
+
+  // Two upper bounds on the number this register holds. Both are facts
+  // about the full 64-bit value, and both live here rather than on AbsVal
+  // because their only consumers are table resolution and the width proofs
+  // that feed it.
+  //
+  // `value_bound` is everything we can prove about the number, from any
+  // source: a zero-extending widen (`movzbl %al,%ecx` proves at most 255),
+  // the bare fact that an instruction wrote a 32-bit register (every such
+  // write zero-extends on x86-64, so the register is at most 0xffffffff),
+  // or a guard. Its job is *proving widths*: it is what lets a narrow
+  // `cmp $imm,%eax` say anything about rax at all, since without it the
+  // guard constrains only the low 32 bits and the table load reads all 64.
+  //
+  // `table_bound` is the subset of that established by a
+  // `cmp $imm,%r; ja default` guard and nothing else -- a bound the
+  // *compiler* declared, not one inferred from an instruction's width.
+  // Only this one may size a switch table. A width fact is honest but
+  // useless as a table size (`movzbl` proving an index is at most 255
+  // would resolve a 256-entry table out of whatever .rodata follows the
+  // real one), and a wrong table size sends the walk to wrong targets.
+  // Keeping them apart is also what keeps `table_bound == kBoundTop` a
+  // meaningful "no compiler-declared bound" predicate, which is what
+  // routes an unbounded dispatch to guessing recovery instead of silently
+  // resolving it.
+  //
+  // For kTableEntry and kJumpTarget, `table_bound` means the bound
+  // captured for the *index register* at `movslq` time, not a bound on
+  // this (address-valued) entry. It is captured then, rather than
+  // re-derived with a live lookup at the eventual `jmp`, because an
+  // intervening instruction could reuse the same register number for an
+  // unrelated guard and a live lookup would silently pick that up instead
+  // of the one that actually sized this table. A snapshot taken when the
+  // index's job is already done is immune to anything afterward.
+  uint64_t value_bound = kBoundTop;
+  uint64_t table_bound = kBoundTop;
+
+  static TableVal None() {
+    return {};
+  }
+  static TableVal Conflict() {
+    return TableVal{Kind::kConflict, 0, 0, 0, kBoundTop, kBoundTop};
+  }
+  bool is_none() const {
+    return kind == Kind::kNone;
+  }
+  bool is_conflict() const {
+    return kind == Kind::kConflict;
+  }
+  static TableVal Const(int64_t value) {
+    return TableVal{Kind::kConst, value, 0, 0, kBoundTop, kBoundTop};
+  }
+  // `index_bound` is the index register's table_bound, snapshotted here --
+  // see the comment on table_bound for why it is taken now and not read
+  // live at the `jmp`.
+  static TableVal TableEntry(uint64_t table_addr, uint8_t index_reg, uint64_t base_const, uint64_t index_bound) {
+    return TableVal{Kind::kTableEntry, static_cast<int64_t>(table_addr), index_reg, base_const, kBoundTop, index_bound};
+  }
+  static TableVal JumpTarget(uint64_t table_addr, uint8_t index_reg, uint64_t index_bound) {
+    return TableVal{Kind::kJumpTarget, static_cast<int64_t>(table_addr), index_reg, 0, kBoundTop, index_bound};
+  }
+
+  bool IsConst() const {
+    return kind == Kind::kConst;
+  }
+  int64_t ConstValue() const {
+    assert(IsConst());
+    return addr;
+  }
+  bool IsTableEntry() const {
+    return kind == Kind::kTableEntry;
+  }
+  bool IsJumpTarget() const {
+    return kind == Kind::kJumpTarget;
+  }
+  // Valid for kTableEntry and kJumpTarget.
+  uint64_t TableAddr() const {
+    assert(IsTableEntry() || IsJumpTarget());
+    return static_cast<uint64_t>(addr);
+  }
+  int IndexReg() const {
+    assert(IsTableEntry() || IsJumpTarget());
+    return index_reg;
+  }
+  // Valid for kTableEntry only: the undisplaced constant `addr` was
+  // derived from, which the `add %B,%T` transfer rule must match against
+  // `%B` before it will resolve to a kJumpTarget.
+  uint64_t TableBaseConst() const {
+    assert(IsTableEntry());
+    return base_const;
+  }
+
+  // True when a `cmp $imm,%r; ja default` guard proved a bound this value
+  // may be used to size a switch table from -- see `table_bound` above for
+  // why a `value_bound` alone does not qualify.
+  bool HasTableBound() const {
+    return table_bound != kBoundTop;
+  }
+  // Tightens both bounds to `b`, the effect of a guard proving this value
+  // is at most `b`. Both, because a compiler-declared bound is evidence
+  // about the number as well as evidence a table may be sized from.
+  void ApplyGuardBound(uint64_t b) {
+    value_bound = std::min(value_bound, b);
+    table_bound = std::min(table_bound, b);
+  }
+  void ClearBounds() {
+    value_bound = kBoundTop;
+    table_bound = kBoundTop;
+  }
+
+  // True when two values name the same thing, regardless of whether their
+  // bounds agree -- the same identity/auxiliary split AbsVal used to need
+  // internally, now confined to the lattice that actually has bounds.
+  bool SameIdentity(const TableVal& other) const {
+    return kind == other.kind && addr == other.addr && index_reg == other.index_reg && base_const == other.base_const;
+  }
+
+  bool operator==(const TableVal&) const = default;
+
+  template <typename Sink>
+  friend void AbslStringify(Sink& sink, const TableVal& val) {
+    switch (val.kind) {
+      case Kind::kNone:
+        sink.Append("nothing table-related");
+        return;
+      case Kind::kConflict:
+        sink.Append("conflicting table values");
+        return;
       case Kind::kConst:
-        absl::Format(&sink, "const 0x%x", val.delta);
+        absl::Format(&sink, "const 0x%x", val.addr);
         return;
       case Kind::kTableEntry:
-        absl::Format(&sink, "table[%s] entry (table@0x%x)", DWARFRegName(val.reg), val.TableAddr());
+        absl::Format(&sink, "table[%s] entry (table@0x%x)", DWARFRegName(val.index_reg), val.TableAddr());
         return;
       case Kind::kJumpTarget:
-        absl::Format(&sink, "jump target table@0x%x[%s]", val.TableAddr(), DWARFRegName(val.reg));
+        absl::Format(&sink, "jump target table@0x%x[%s]", val.TableAddr(), DWARFRegName(val.index_reg));
         return;
     }
     sink.Append("?");
@@ -254,26 +338,31 @@ struct AbsVal {
 // offsets from the CFA, so a `push` at function entry writes slot -16,
 // and the return address the call put there lives at slot -8.
 struct AbsState {
+  // The CFI lattice, for registers and for the stack slots we can name.
   AbsVal gpr[kNumGPRs];
   absl::btree_map<int64_t, AbsVal> slots;
+  // The table lattice, registers only -- see TableVal. Indexed the same
+  // way as gpr[], so tbl[r] is the switch-resolution half of register r.
+  TableVal tbl[kNumGPRs];
 
   // Applies a guard's proven bound to register r in place. Deliberately
   // *not* routed through SetReg: tightening a bound is not a value write,
   // so it must not invalidate `last_cmp` the way an actual write to the
-  // register does (see SetReg below). Out-of-range r is ignored, which is
-  // what the callers that pass a DWARFRegOf() result want.
+  // register does (see SetReg below), and it must not disturb the CFI half
+  // at all. Out-of-range r is ignored, which is what the callers that pass
+  // a DWARFRegOf() result want.
   void ApplyGuardBound(int r, uint64_t b) {
     if (r >= 0 && r < kNumGPRs) {
-      gpr[r].ApplyGuardBound(b);
+      tbl[r].ApplyGuardBound(b);
     }
   }
   // Records a width fact: r's full 64-bit value is at most `b`, proven by
   // something other than a compiler-declared guard (a zero-extending
-  // write, typically). Never touches table_bound -- see AbsVal's comment
-  // for why only a guard may size a table.
+  // write, typically). Never touches table_bound -- see TableVal for why
+  // only a guard may size a table.
   void ApplyValueBound(int r, uint64_t b) {
     if (r >= 0 && r < kNumGPRs) {
-      gpr[r].value_bound = std::min(gpr[r].value_bound, b);
+      tbl[r].value_bound = std::min(tbl[r].value_bound, b);
     }
   }
 
@@ -300,7 +389,7 @@ struct AbsState {
   // exactly those 32 bits and zero-extends them. Promoting it to a
   // full-register bound is possible only when something already proved the
   // register zero-extended; when it is not, this is where the fact waits
-  // for a narrow read to collect it. See AbsVal::value_bound.
+  // for a narrow read to collect it. See TableVal::value_bound.
   //
   // Either way, a write to `reg` invalidates it -- handled in
   // SetReg/ClobberReg below, without which `cmp $5,%eax; mov (%rbx),%rax;
@@ -387,23 +476,53 @@ struct AbsState {
     }
     return gpr[r];
   }
-  // SetReg and ClobberReg are the only two places a register's *value*
+  const TableVal& table(int r) const {
+    static constinit auto kNone = TableVal{};
+    if (r < 0 || r >= kNumGPRs) {
+      return kNone;
+    }
+    return tbl[r];
+  }
+
+  // The register writes. These are the only places a register's *value*
   // changes, which makes them the single choke point for invalidating
   // `last_cmp` when the compared register is overwritten. Join writes
-  // gpr[] directly and bypasses both, on purpose: it does its own
+  // gpr[]/tbl[] directly and bypasses them, on purpose: it does its own
   // last_cmp merge.
-  void SetReg(int r, const AbsVal& v) {
+  //
+  // Both halves always move together. The one-argument SetReg clears the
+  // table half rather than leaving it alone, so a register that just got a
+  // new value can never keep a stale table identity or a bound that
+  // described what used to be there -- the failure this split would
+  // otherwise make easy to write by accident.
+  void SetReg(int r, const AbsVal& v, const TableVal& t) {
     assert(0 <= r && r < kNumGPRs);
     gpr[r] = v;
+    tbl[r] = t;
     InvalidateLastCmpFor(r);
     if (r == kDWARFRsp && v.kind == AbsVal::Kind::kCFARel) {
       DropDeadSlots(v.delta);
     }
   }
+  void SetReg(int r, const AbsVal& v) {
+    SetReg(r, v, TableVal::None());
+  }
+  // A register that now holds a table-resolution value. Its CFI half is
+  // kOther by construction: a `.rodata` pointer or a table-derived address
+  // is definitely not any register's entry value and definitely not
+  // CFA-relative, which is exactly what a CFI rule claiming otherwise
+  // should be told.
+  void SetTableReg(int r, const TableVal& t) {
+    SetReg(r, AbsVal::Other(), t);
+  }
+  // A full-width register-to-register move: the one case where a value
+  // keeps its identity *and* its bounds, so both halves are copied.
+  void CopyReg(int dst, int src) {
+    assert(0 <= src && src < kNumGPRs);
+    SetReg(dst, gpr[src], tbl[src]);
+  }
   void ClobberReg(int r) {
-    assert(0 <= r && r < kNumGPRs);
-    gpr[r] = AbsVal::Top();
-    InvalidateLastCmpFor(r);
+    SetReg(r, AbsVal::Top(), TableVal::None());
   }
 
   // Slot lookup; absent slots read as unknown.

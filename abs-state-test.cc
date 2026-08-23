@@ -59,7 +59,7 @@ TEST(AbsValTest, StringifyNamesTopAndBottomDistinctly) {
   EXPECT_EQ(absl::StrCat(AbsVal::CFARel(8)), "CFA+8");
   EXPECT_EQ(absl::StrCat(AbsVal::CFARel(-16)), "CFA-16");
   EXPECT_EQ(absl::StrCat(AbsVal::OrigReg(kDWARFRbx)), "entry rbx");
-  EXPECT_EQ(absl::StrCat(AbsVal::Const(0x40)), "const 0x40");
+  EXPECT_EQ(absl::StrCat(AbsVal::Other()), "an unrelated value");
 }
 
 // --- AbsState::Entry --------------------------------------------------
@@ -552,65 +552,90 @@ TEST(AbsStateTest, SeedFromRowLeavesRspTopWhenTheCFAIsNotRspBased) {
   EXPECT_TRUE(s.reg(kDWARFRsp).is_top()) << "nothing anchors rsp when the CFA is based on another register";
 }
 
-// --- Join: switch-table resolution kinds -----------------------------------
+// --- Join: the table lattice ----------------------------------------------
 
-TEST(AbsStateTest, JoinOfDifferingConstantsGoesToBottomWithoutAConflict) {
+TEST(AbsStateTest, JoinOfDifferingTableValuesGivesUpWithoutAConflict) {
   // No CFI row ever asserts anything about a scratch register holding a
-  // .rodata pointer, so two paths disagreeing about one is lost
-  // precision, not the compiler-bug signal Join() otherwise reports. It
-  // still has to be kBottom, not kTop -- see the next test.
+  // .rodata pointer, so two paths disagreeing about one is lost precision,
+  // not the compiler-bug signal Join() otherwise reports.
+  //
+  // Note what makes that true now: on the CFI side both are kOther, which
+  // compares *equal*, so there is nothing to disagree about and no
+  // carve-out is needed to suppress a report. Only the table half gives up.
   AbsState a;
-  a.SetReg(kDWARFRax, AbsVal::Const(0x1000));
+  a.SetTableReg(kDWARFRax, TableVal::Const(0x1000));
   AbsState b;
-  b.SetReg(kDWARFRax, AbsVal::Const(0x2000));
+  b.SetTableReg(kDWARFRax, TableVal::Const(0x2000));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.reg(kDWARFRax).is_bottom());
+  EXPECT_EQ(a.reg(kDWARFRax).kind, AbsVal::Kind::kOther) << "still definitely not an entry value";
+  EXPECT_TRUE(a.table(kDWARFRax).is_conflict()) << "not kNone: that is the identity element, see the next test";
   EXPECT_TRUE(conflicts.empty());
 }
 
-TEST(AbsStateTest, JoinOfATableEntryAndAJumpTargetAlsoGoesToBottomWithoutAConflict) {
+TEST(AbsStateTest, JoinOfATableEntryAndAJumpTargetAlsoGivesUpWithoutAConflict) {
   AbsState a;
-  a.SetReg(kDWARFRax, AbsVal::TableEntry(0x1000, kDWARFRcx, 0x1000, kBoundTop));
+  a.SetTableReg(kDWARFRax, TableVal::TableEntry(0x1000, kDWARFRcx, 0x1000, kBoundTop));
   AbsState b;
-  b.SetReg(kDWARFRax, AbsVal::JumpTarget(0x2000, kDWARFRcx, kBoundTop));
+  b.SetTableReg(kDWARFRax, TableVal::JumpTarget(0x2000, kDWARFRcx, kBoundTop));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.reg(kDWARFRax).is_bottom());
+  EXPECT_TRUE(a.table(kDWARFRax).is_conflict());
   EXPECT_TRUE(conflicts.empty());
 }
 
-TEST(AbsStateTest, ATableResolutionConflictIsNotResurrectedByAThirdPredecessor) {
-  // The bug this guards against: kTop doubles as Join's identity element
-  // ("nothing has told us anything yet, adopt whatever arrives"), so if a
-  // table-resolution disagreement had resolved to kTop instead of
-  // kBottom, a third predecessor arriving after the first two already
-  // disagreed would have been silently adopted, resurrecting a concrete
-  // value after a real conflict -- order-dependent and unsound. kBottom
-  // is absorbing, so it must not happen.
+TEST(AbsStateTest, ATableValueSurvivesAPathThatKnowsNothingAboutIt) {
+  // kNone is the identity element, so a predecessor carrying no table
+  // information must leave a resolved dispatch standing rather than
+  // destroying it. Getting this wrong loses real switch tables: /bin/ls's
+  // main dispatch has a predecessor that never touched the index register.
   AbsState a;
-  a.SetReg(kDWARFRax, AbsVal::Const(0x1000));
+  a.SetTableReg(kDWARFRax, TableVal::JumpTarget(0x1000, kDWARFRcx, 9));
   AbsState b;
-  b.SetReg(kDWARFRax, AbsVal::Const(0x2000));
+  b.SetReg(kDWARFRax, AbsVal::Other());  // kOther on the CFI side, nothing on the table side
+
+  std::vector<JoinConflict> conflicts;
+  Join(b, &a, &conflicts);
+  EXPECT_TRUE(a.table(kDWARFRax).IsJumpTarget()) << "the identity survives the identity element";
+  EXPECT_EQ(a.table(kDWARFRax).table_bound, kBoundTop)
+      << "the bound does not: the other path proved none, and bounds join by max";
+  EXPECT_TRUE(conflicts.empty());
+}
+
+TEST(AbsStateTest, ATableValueGivenUpOnIsNotResurrectedByAThirdPredecessor) {
+  // The bug this guards against: if giving up landed on a state that then
+  // acted as an identity element ("nothing known yet, adopt whatever
+  // arrives"), a third predecessor showing up after the first two already
+  // disagreed would be silently adopted, resurrecting a concrete value
+  // after a real disagreement -- order-dependent and unsound.
+  //
+  // Which is why giving up lands on kConflict and not on kNone: kNone is
+  // the identity element (see the test above), so a disagreement resolving
+  // to it would be adopted right back out of. kConflict is absorbing.
+  AbsState a;
+  a.SetTableReg(kDWARFRax, TableVal::Const(0x1000));
+  AbsState b;
+  b.SetTableReg(kDWARFRax, TableVal::Const(0x2000));
   std::vector<JoinConflict> conflicts;
   ASSERT_TRUE(Join(b, &a, &conflicts));
-  ASSERT_TRUE(a.reg(kDWARFRax).is_bottom());
+  ASSERT_TRUE(a.table(kDWARFRax).is_conflict());
 
   AbsState c;
-  c.SetReg(kDWARFRax, AbsVal::Const(0x3000));
+  c.SetTableReg(kDWARFRax, TableVal::Const(0x3000));
   EXPECT_FALSE(Join(c, &a, &conflicts));
-  EXPECT_TRUE(a.reg(kDWARFRax).is_bottom());
+  EXPECT_TRUE(a.table(kDWARFRax).is_conflict());
   EXPECT_TRUE(conflicts.empty());
 }
 
-TEST(AbsStateTest, JoinOfAConstantAndAnUnrelatedConcreteValueStillConflicts) {
-  // The carve-out is scoped to the three switch-table kinds meeting each
-  // other; a constant meeting a kCFARel or kOrigReg is a normal
-  // disagreement and must still be reported.
+TEST(AbsStateTest, JoinOfATableValueAndAnUnrelatedConcreteValueStillConflicts) {
+  // A table value meeting a kCFARel or kOrigReg is a normal disagreement
+  // about something a CFI row may well consult, and must still be
+  // reported -- the suppression above is only for two table values meeting
+  // each other.
   AbsState a;
-  a.SetReg(kDWARFRax, AbsVal::Const(0x1000));
+  a.SetTableReg(kDWARFRax, TableVal::Const(0x1000));
   AbsState b;
   b.SetReg(kDWARFRax, AbsVal::CFARel(-8));
 
@@ -623,21 +648,57 @@ TEST(AbsStateTest, JoinOfAConstantAndAnUnrelatedConcreteValueStillConflicts) {
 
 TEST(AbsStateTest, JoinOfTwoJumpTargetsWithTheSameIdentityMergesJustTheBound) {
   // Same table, same index register, differing only in whether one side
-  // also proved a numeric bound: this is the same fact, not a conflict,
-  // so the kJumpTarget identity must survive with the bound widened to
-  // top -- not degrade to kBottom/kTop the way a genuine identity
-  // mismatch does.
+  // also proved a numeric bound: this is the same fact, not a
+  // disagreement, so the kJumpTarget identity must survive with the bound
+  // widened to top.
   AbsState a;
-  a.SetReg(kDWARFRax, AbsVal::JumpTarget(0x1000, kDWARFRcx, 9));
+  a.SetTableReg(kDWARFRax, TableVal::JumpTarget(0x1000, kDWARFRcx, 9));
   AbsState b;
-  b.SetReg(kDWARFRax, AbsVal::JumpTarget(0x1000, kDWARFRcx, kBoundTop));
+  b.SetTableReg(kDWARFRax, TableVal::JumpTarget(0x1000, kDWARFRcx, kBoundTop));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.reg(kDWARFRax).IsJumpTarget());
-  EXPECT_EQ(a.reg(kDWARFRax).TableAddr(), 0x1000u);
-  EXPECT_FALSE(a.reg(kDWARFRax).HasTableBound());
+  EXPECT_TRUE(a.table(kDWARFRax).IsJumpTarget());
+  EXPECT_EQ(a.table(kDWARFRax).TableAddr(), 0x1000u);
+  EXPECT_FALSE(a.table(kDWARFRax).HasTableBound());
   EXPECT_TRUE(conflicts.empty());
+}
+
+TEST(AbsStateTest, ATableHalfChangeAloneStillReportsTheJoinAsChanged) {
+  // A table join that widens a bound without the successor being requeued
+  // would leave it holding a *tighter* bound than the fixed point allows --
+  // the direction that sizes a table too small and walks to wrong targets.
+  AbsState a;
+  a.ApplyGuardBound(kDWARFRax, 4);
+  AbsState b;  // identical CFI half, no bound
+
+  std::vector<JoinConflict> conflicts;
+  EXPECT_TRUE(Join(b, &a, &conflicts)) << "the only difference is in the table half";
+  EXPECT_EQ(a.table(kDWARFRax).value_bound, kBoundTop);
+}
+
+TEST(AbsStateTest, WritingARegisterClearsItsTableHalf) {
+  // The invariant that makes the split safe to write against: a register
+  // that gets a new value cannot keep a stale table identity or a bound
+  // that described what used to be there.
+  AbsState a;
+  a.SetTableReg(kDWARFRax, TableVal::Const(0x1000));
+  a.ApplyGuardBound(kDWARFRax, 4);
+  a.SetReg(kDWARFRax, AbsVal::CFARel(-8));
+  EXPECT_EQ(a.table(kDWARFRax).kind, TableVal::Kind::kNone);
+  EXPECT_EQ(a.table(kDWARFRax).value_bound, kBoundTop);
+}
+
+TEST(AbsStateTest, CopyRegCarriesBothHalves) {
+  // The one case where a value keeps its identity *and* its bounds: a
+  // full-width register-to-register move.
+  AbsState a;
+  a.SetTableReg(kDWARFRax, TableVal::Const(0x1000));
+  a.ApplyGuardBound(kDWARFRax, 4);
+  a.CopyReg(kDWARFRcx, kDWARFRax);
+  EXPECT_EQ(a.reg(kDWARFRcx).kind, AbsVal::Kind::kOther);
+  EXPECT_TRUE(a.table(kDWARFRcx).IsConst());
+  EXPECT_EQ(a.table(kDWARFRcx).table_bound, 4u);
 }
 
 // --- Join: per-value switch-table bounds (§3.2) ---------------------------
@@ -650,8 +711,8 @@ TEST(AbsStateTest, JoinKeepsABoundBothSidesAgreeOn) {
 
   std::vector<JoinConflict> conflicts;
   EXPECT_FALSE(Join(b, &a, &conflicts));
-  EXPECT_EQ(a.reg(kDWARFRax).table_bound, 4u);
-  EXPECT_EQ(a.reg(kDWARFRax).value_bound, 4u);
+  EXPECT_EQ(a.table(kDWARFRax).table_bound, 4u);
+  EXPECT_EQ(a.table(kDWARFRax).value_bound, 4u);
 }
 
 TEST(AbsStateTest, JoinTakesTheWeakerOfTwoDisagreeingBoundsWithoutReportingAConflict) {
@@ -665,7 +726,7 @@ TEST(AbsStateTest, JoinTakesTheWeakerOfTwoDisagreeingBoundsWithoutReportingAConf
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
-  EXPECT_EQ(a.reg(kDWARFRax).table_bound, 7u);
+  EXPECT_EQ(a.table(kDWARFRax).table_bound, 7u);
   EXPECT_TRUE(conflicts.empty());
 }
 
@@ -680,38 +741,8 @@ TEST(AbsStateTest, JoinDropsABoundOnlyOneSideRecorded) {
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
-  EXPECT_FALSE(a.reg(kDWARFRax).HasTableBound());
-  EXPECT_EQ(a.reg(kDWARFRax).value_bound, kBoundTop);
-}
-
-TEST(AbsStateTest, JoinDropsABoundASlotHeldOnOnlyOneSide) {
-  // The same rule through a stack slot, where "the other side knows
-  // nothing" is spelled as the key simply being absent.
-  AbsState a;
-  AbsVal bounded = AbsVal::OrigReg(kDWARFRbx);
-  bounded.ApplyGuardBound(4);
-  a.SetSlot(-24, bounded);
-  AbsState b;  // no slot at all here
-
-  std::vector<JoinConflict> conflicts;
-  EXPECT_TRUE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.Slot(-24).IsOrigReg(kDWARFRbx)) << "the identity survives; only the bound does not";
-  EXPECT_EQ(a.Slot(-24).value_bound, kBoundTop);
-}
-
-TEST(AbsStateTest, JoinDoesNotAdoptABoundFromASlotOnlyTheIncomingSideHas) {
-  // The mirror image: this side knows nothing about the slot, so the
-  // incoming identity is adopted but its bound is not.
-  AbsState a;  // no slot at all here
-  AbsState b;
-  AbsVal bounded = AbsVal::OrigReg(kDWARFRbx);
-  bounded.ApplyGuardBound(4);
-  b.SetSlot(-24, bounded);
-
-  std::vector<JoinConflict> conflicts;
-  EXPECT_TRUE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.Slot(-24).IsOrigReg(kDWARFRbx));
-  EXPECT_EQ(a.Slot(-24).value_bound, kBoundTop);
+  EXPECT_FALSE(a.table(kDWARFRax).HasTableBound());
+  EXPECT_EQ(a.table(kDWARFRax).value_bound, kBoundTop);
 }
 
 TEST(AbsStateTest, JoinReportsNoChangeWhenTwoBoundedTopsAlreadyAgreeOnTop) {
@@ -725,24 +756,29 @@ TEST(AbsStateTest, JoinReportsNoChangeWhenTwoBoundedTopsAlreadyAgreeOnTop) {
 
   std::vector<JoinConflict> conflicts;
   EXPECT_FALSE(Join(b, &a, &conflicts));
-  EXPECT_EQ(a.reg(kDWARFRax).value_bound, kBoundTop);
+  EXPECT_EQ(a.table(kDWARFRax).value_bound, kBoundTop);
 }
 
-TEST(AbsStateTest, JoinOfADisagreeingBoundInAStackSlotAlsoDropsWithoutAConflict) {
-  // The same table-resolution carve-out the register loop has (see
-  // JoinOfATableEntryAndAJumpTargetAlsoGoesToBottomWithoutAConflict)
-  // applies through a stack slot too, now that both loops share the same
-  // per-value JoinValue logic -- a spilled dispatch scratch value must
-  // not produce a spurious, CFI-irrelevant conflict just because it went
-  // through the stack instead of staying in a register.
+TEST(AbsStateTest, TwoDifferentSpilledTableValuesDoNotConflictInASlot) {
+  // A dispatch scratch value that gets spilled must not produce a
+  // spurious, CFI-irrelevant conflict just because it went through the
+  // stack instead of staying in a register. This used to need a carve-out
+  // in the join; now the two values are simply both kOther by the time
+  // they reach a slot, so they compare equal and there is nothing to
+  // suppress -- and the slot keeps a real fact ("not any entry value")
+  // rather than degrading to kBottom.
   AbsState a;
-  a.SetSlot(-24, AbsVal::Const(0x1000));
+  a.SetTableReg(kDWARFRax, TableVal::Const(0x1000));
+  a.SetSlot(-24, a.reg(kDWARFRax));
+  a.ClobberReg(kDWARFRax);  // the scratch register gets reused, as it would
   AbsState b;
-  b.SetSlot(-24, AbsVal::Const(0x2000));
+  b.SetTableReg(kDWARFRax, TableVal::Const(0x2000));
+  b.SetSlot(-24, b.reg(kDWARFRax));
+  b.ClobberReg(kDWARFRax);
 
   std::vector<JoinConflict> conflicts;
-  EXPECT_TRUE(Join(b, &a, &conflicts));
-  EXPECT_TRUE(a.Slot(-24).is_bottom());
+  EXPECT_FALSE(Join(b, &a, &conflicts)) << "the spilled halves are indistinguishable, so nothing changes";
+  EXPECT_EQ(a.Slot(-24).kind, AbsVal::Kind::kOther);
   EXPECT_TRUE(conflicts.empty());
 }
 
@@ -750,8 +786,8 @@ TEST(AbsStateTest, ClobberRegClearsAPreviouslySetBound) {
   AbsState a;
   a.ApplyGuardBound(kDWARFRax, 4);
   a.ClobberReg(kDWARFRax);
-  EXPECT_FALSE(a.reg(kDWARFRax).HasTableBound());
-  EXPECT_EQ(a.reg(kDWARFRax).value_bound, kBoundTop);
+  EXPECT_FALSE(a.table(kDWARFRax).HasTableBound());
+  EXPECT_EQ(a.table(kDWARFRax).value_bound, kBoundTop);
 }
 
 TEST(AbsStateTest, WritingTheComparedRegisterInvalidatesLastCmp) {

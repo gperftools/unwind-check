@@ -9,31 +9,16 @@ namespace unwind_analysis {
 
 namespace {
 
-// The three switch-table-resolution kinds (see abs-state.h). A CFI row
-// can never assert anything about a scratch register holding a
-// `.rodata` pointer or table-derived offset, so a join disagreement
-// between two of these is not the compiler-bug signal Join() exists to
-// report -- it just means precision was lost. It still has to resolve to
-// kBottom, not kTop, even though nothing gets reported: kTop is the
-// identity element a later, third predecessor's value would be silently
-// adopted into (see JoinValue below), which would resurrect a concrete
-// answer after two paths already disagreed here -- order-dependent and
-// exactly the non-monotonic "undo" Join exists to rule out. kBottom is
-// absorbing, so once this has given up it stays given up regardless of
-// how many more predecessors arrive.
-bool IsTableResolutionKind(AbsVal::Kind k) {
-  return k == AbsVal::Kind::kConst || k == AbsVal::Kind::kTableEntry || k == AbsVal::Kind::kJumpTarget;
-}
-
-// What Join() does to one pair of values, whether they are a register's
-// contents or a stack slot's -- the two used to have separately-written,
-// subtly different logic; this is now the single place that logic lives.
+// What Join() does to one pair of CFI values, whether they are a
+// register's contents or a stack slot's -- the two used to have
+// separately-written, subtly different logic; this is now the single
+// place that logic lives.
 struct JoinValueResult {
   AbsVal value;
   bool changed;
-  // Set only for a genuine CFI-relevant disagreement the caller should
-  // report; the table-resolution carve-out and ordinary top/bottom
-  // handling never set this.
+  // Set only for a genuine disagreement the caller should report. Every
+  // disagreement in this lattice is one: the values that were not worth
+  // reporting about have moved to TableVal, which has no reporting at all.
   bool real_conflict;
 };
 
@@ -41,59 +26,66 @@ JoinValueResult JoinValue(const AbsVal& current, const AbsVal& incoming) {
   if (current == incoming) {
     return {current, false, false};
   }
+  // kBottom absorbs: a value already flagged as conflicting stays that
+  // way, and a value that only just learned of a conflict on the incoming
+  // side adopts it. Neither is a fresh disagreement to report -- that
+  // happened (or will happen) at the join that first produced the kBottom.
+  if (current.is_bottom()) {
+    return {current, false, false};
+  }
+  if (incoming.is_bottom()) {
+    return {AbsVal::Bottom(), true, false};
+  }
+  // kTop is the identity element: take whatever the other side knows.
+  if (current.is_top()) {
+    return {incoming, true, false};
+  }
+  if (incoming.is_top()) {
+    return {current, false, false};
+  }
+  // Two sides that each name something, and name different things. That
+  // is a real disagreement about a value a CFI row may well consult, so
+  // it goes to kBottom *and* gets reported.
+  //
+  // Note there is no carve-out here any more. Two unrelated `.rodata`
+  // pointers meeting at a merge used to arrive as two different kConst
+  // values and need suppressing; they now arrive as two kOthers, which
+  // compare equal above and never reach this point at all. The
+  // suppression became unnecessary rather than moving somewhere else.
+  return {AbsVal::Bottom(), true, true};
+}
 
-  // First decide what happens to the *identity* (kind/delta/reg/aux). The
-  // bounds are settled separately below, because they join by a different
-  // rule and have to join the same way no matter which branch the identity
-  // took.
-  AbsVal merged;
-  bool real_conflict = false;
-  if (current.is_bottom() || incoming.is_bottom()) {
-    // kBottom absorbs: a value already flagged as conflicting stays that
-    // way, and a value that only just learned of a conflict on the incoming
-    // side adopts it. Neither is a fresh disagreement to report -- that
-    // happened (or will happen) at the join that first produced the kBottom.
-    merged = AbsVal::Bottom();
+// The table lattice's join. Deliberately much smaller than the CFI one:
+// it reports nothing, because nothing here is a CFI claim.
+//
+// Identity follows the same top/bottom shape AbsVal uses -- kNone is the
+// identity element, kConflict is absorbing -- for exactly the reason spelled
+// out on TableVal::kConflict. Bounds join by max, which is
+// the only thing an upper bound can join by -- one path proving <= 4 and
+// another <= 7 leaves <= 7 standing -- and kBoundTop being max's identity
+// is what makes an unbounded path wipe out the other path's bound with no
+// special case. The two are settled separately so that giving up on the
+// identity does not silently keep a bound that only one path proved, and
+// vice versa.
+TableVal JoinTableValue(const TableVal& current, const TableVal& incoming) {
+  TableVal merged;
+  if (current.is_conflict() || incoming.is_conflict()) {
+    merged = TableVal::Conflict();  // absorbing
   } else if (current.SameIdentity(incoming)) {
-    // Both sides name the same thing -- true of any two kTop values in
-    // particular, since kTop's core is always {kTop,0,0,0} regardless of
-    // what each side's bounds say -- so, per the equality check above, all
-    // they can disagree about is the bounds. This has to be tested before
-    // the kTop-as-identity-element handling below, or two differently
-    // bounded kTops would take the "adopt whichever side is concrete"
-    // branch and one side's bounds would be preferred outright instead of
-    // joined.
-    merged = current;
-  } else if (current.is_top()) {
-    // kTop is the identity element for the identity: take whatever the
-    // other side knows. Only reached once SameIdentity has ruled out "both
-    // sides are kTop", so this is a genuine difference in kind.
-    merged = incoming;
-  } else if (incoming.is_top()) {
+    merged = current;  // also covers two kNones, differing only in bounds
+  } else if (current.is_none()) {
+    merged = incoming;  // kNone is the identity element: adopt what is known
+  } else if (incoming.is_none()) {
     merged = current;
   } else {
-    // A genuine identity disagreement -- ordinarily a real conflict, but
-    // not when both sides are one of the switch-table resolution kinds,
-    // which no CFI row can ever consult; see IsTableResolutionKind.
-    merged = AbsVal::Bottom();
-    real_conflict = !(IsTableResolutionKind(current.kind) && IsTableResolutionKind(incoming.kind));
+    // Two different resolved values. Giving up has to land on kConflict
+    // rather than kNone, or a third predecessor would be adopted into the
+    // identity element and resurrect a concrete answer -- see TableVal.
+    merged = TableVal::Conflict();
   }
-
-  // Bounds join by max, always, whatever the identity did. An upper bound
-  // that holds on one incoming path and not the other holds nowhere, and
-  // kBoundTop being max's identity is exactly what expresses that -- see
-  // kBoundTop's comment. Doing this after the identity merge (rather than
-  // letting each branch carry its own side's bounds along) is what stops an
-  // adopted kTop or an adopted concrete value from smuggling a bound the
-  // other path never proved.
   merged.value_bound = std::max(current.value_bound, incoming.value_bound);
   merged.table_bound = std::max(current.table_bound, incoming.table_bound);
-
-  // Compare against `current` rather than trusting the branch taken: several
-  // of them above can legitimately land back on exactly what was already
-  // there (two kTops that differ only in a bound, say), and reporting that
-  // as a change would requeue the successor for no new information.
-  return {merged, merged != current, real_conflict};
+  return merged;
 }
 
 }  // namespace
@@ -206,32 +198,34 @@ bool Join(const AbsState& incoming, AbsState* state, std::vector<JoinConflict>* 
       state->gpr[r] = result.value;
       changed = true;
     }
+    // The table half joins independently and reports nothing -- but it
+    // still has to feed `changed`. A table join that widens a bound
+    // without requeueing the successor would leave it holding a *tighter*
+    // bound than the fixed point allows, which is the direction that sizes
+    // a table too small and sends the walk to the wrong targets.
+    TableVal merged_table = JoinTableValue(state->tbl[r], incoming.tbl[r]);
+    if (merged_table != state->tbl[r]) {
+      state->tbl[r] = merged_table;
+      changed = true;
+    }
   }
 
   // Stack slots go through the exact same per-value decision as registers
   // above (JoinValue) -- what differs is only how the pair to compare is
   // found: a slot's "top" is represented by absence from the map instead
   // of a stored AbsVal (Slot() already reads a missing key that way), so a
-  // slot named by only one side needs no JoinValue call to know what
-  // happens to its identity. Its *bounds* still have to be joined, which is
-  // why that case is not a plain skip. A slot named by both goes through
-  // JoinValue like any register.
+  // slot named by only one side is top on the other and needs no lookup
+  // through JoinValue to know the identity-element answer (survives
+  // verbatim either way). Slots carry no table half and so no bounds, which
+  // is what makes that shortcut sound here.
   for (auto it = state->slots.begin(); it != state->slots.end();) {
-    auto other = incoming.slots.find(it->first);
-    if (other == incoming.slots.end()) {
-      // Incoming is top here, so the identity survives (top is the identity
-      // element) but the bounds do not: max against kBoundTop is kBoundTop.
-      // Skipping this would let a bound proved on one path alone survive a
-      // merge with a path that never proved it.
-      if (it->second.value_bound != kBoundTop || it->second.table_bound != kBoundTop) {
-        it->second.ClearBounds();
-        changed = true;
-      }
-      ++it;
+    if (it->second.is_bottom()) {
+      ++it;  // already absorbed; JoinValue would agree, no need to ask
       continue;
     }
-    if (it->second.is_bottom() && it->second.value_bound == kBoundTop && it->second.table_bound == kBoundTop) {
-      ++it;  // already fully absorbed; JoinValue would agree, no need to ask
+    auto other = incoming.slots.find(it->first);
+    if (other == incoming.slots.end()) {
+      ++it;  // incoming is top here; JoinValue(cur, top) == cur, unchanged
       continue;
     }
     JoinValueResult result = JoinValue(it->second, other->second);
@@ -246,11 +240,8 @@ bool Join(const AbsState& incoming, AbsState* state, std::vector<JoinConflict>* 
   }
   for (const auto& [offset, val] : incoming.slots) {
     if (state->slots.find(offset) == state->slots.end()) {
-      // state is top here, so val's identity is adopted -- but, exactly as
-      // above, not its bounds: this side never proved them.
-      AbsVal adopted = val;
-      adopted.ClearBounds();
-      state->slots.emplace(offset, adopted);
+      // state is top here; JoinValue(top, val) == val, changed.
+      state->slots.emplace(offset, val);
       changed = true;
     }
   }

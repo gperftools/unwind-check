@@ -414,6 +414,36 @@ good_switch_table:
 
 /* ---------------------------------------------------------------- */
 /*
+ * A callee-saved register clobbered with a `.rodata` address and never
+ * restored, with CFI that never says so.
+ *
+ * This is what AbsVal::kOther exists for. At the `ret` the analysis knows
+ * exactly what rbx holds -- a rip-relative lea result -- and knows it is
+ * definitely not rbx's entry value, so the CFI's silence is contradicted
+ * rather than merely unverifiable. Collapsing that state into kTop would
+ * turn this MISMATCH into a REVIEW, and nothing else in the suite would
+ * notice.
+ */
+        .section .rodata
+.Lother_blob:
+        .long   0
+        .text
+
+        .globl  bad_lea_into_callee_saved
+        .type   bad_lea_into_callee_saved, @function
+bad_lea_into_callee_saved:
+        .cfi_startproc
+        subq    $8, %rsp
+        .cfi_def_cfa_offset 16
+        leaq    .Lother_blob(%rip), %rbx
+        addq    $8, %rsp
+        .cfi_def_cfa_offset 8
+        ret
+        .cfi_endproc
+        .size   bad_lea_into_callee_saved, .-bad_lea_into_callee_saved
+
+/* ---------------------------------------------------------------- */
+/*
  * The other spelling of the same guard, and the harder half of it.
  *
  * Two things differ from good_switch_table above. The branch is `jbe`,
