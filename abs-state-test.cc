@@ -572,9 +572,9 @@ TEST(AbsStateTest, JoinOfDifferingConstantsGoesToBottomWithoutAConflict) {
 
 TEST(AbsStateTest, JoinOfATableEntryAndAJumpTargetAlsoGoesToBottomWithoutAConflict) {
   AbsState a;
-  a.SetReg(kDWARFRax, AbsVal::TableEntry(0x1000, kDWARFRcx, 0x1000, std::nullopt));
+  a.SetReg(kDWARFRax, AbsVal::TableEntry(0x1000, kDWARFRcx, 0x1000, kBoundTop));
   AbsState b;
-  b.SetReg(kDWARFRax, AbsVal::JumpTarget(0x2000, kDWARFRcx, std::nullopt));
+  b.SetReg(kDWARFRax, AbsVal::JumpTarget(0x2000, kDWARFRcx, kBoundTop));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
@@ -624,57 +624,108 @@ TEST(AbsStateTest, JoinOfAConstantAndAnUnrelatedConcreteValueStillConflicts) {
 TEST(AbsStateTest, JoinOfTwoJumpTargetsWithTheSameIdentityMergesJustTheBound) {
   // Same table, same index register, differing only in whether one side
   // also proved a numeric bound: this is the same fact, not a conflict,
-  // so the kJumpTarget identity must survive with the bound cleared --
-  // not degrade to kBottom/kTop the way a genuine identity mismatch does.
+  // so the kJumpTarget identity must survive with the bound widened to
+  // top -- not degrade to kBottom/kTop the way a genuine identity
+  // mismatch does.
   AbsState a;
   a.SetReg(kDWARFRax, AbsVal::JumpTarget(0x1000, kDWARFRcx, 9));
   AbsState b;
-  b.SetReg(kDWARFRax, AbsVal::JumpTarget(0x1000, kDWARFRcx, std::nullopt));
+  b.SetReg(kDWARFRax, AbsVal::JumpTarget(0x1000, kDWARFRcx, kBoundTop));
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
   EXPECT_TRUE(a.reg(kDWARFRax).IsJumpTarget());
   EXPECT_EQ(a.reg(kDWARFRax).TableAddr(), 0x1000u);
-  EXPECT_FALSE(a.reg(kDWARFRax).Bound().has_value());
+  EXPECT_FALSE(a.reg(kDWARFRax).HasTableBound());
   EXPECT_TRUE(conflicts.empty());
 }
 
 // --- Join: per-value switch-table bounds (§3.2) ---------------------------
 
-TEST(AbsStateTest, JoinKeepsABoundOnlyWhenBothSidesAgree) {
+TEST(AbsStateTest, JoinKeepsABoundBothSidesAgreeOn) {
   AbsState a;
-  a.SetBound(kDWARFRax, 4);
+  a.ApplyGuardBound(kDWARFRax, 4);
   AbsState b;
-  b.SetBound(kDWARFRax, 4);
+  b.ApplyGuardBound(kDWARFRax, 4);
 
   std::vector<JoinConflict> conflicts;
   EXPECT_FALSE(Join(b, &a, &conflicts));
-  EXPECT_EQ(a.Bound(kDWARFRax), 4u);
+  EXPECT_EQ(a.reg(kDWARFRax).table_bound, 4u);
+  EXPECT_EQ(a.reg(kDWARFRax).value_bound, 4u);
 }
 
-TEST(AbsStateTest, JoinDropsADisagreeingBoundWithoutReportingAConflict) {
+TEST(AbsStateTest, JoinTakesTheWeakerOfTwoDisagreeingBoundsWithoutReportingAConflict) {
+  // Two paths proving different bounds is not a conflict: it is two true
+  // statements, and what survives the merge is the weaker one. Anything
+  // tighter would claim a bound one incoming path never established.
   AbsState a;
-  a.SetBound(kDWARFRax, 4);
+  a.ApplyGuardBound(kDWARFRax, 4);
   AbsState b;
-  b.SetBound(kDWARFRax, 7);
+  b.ApplyGuardBound(kDWARFRax, 7);
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
-  EXPECT_FALSE(a.Bound(kDWARFRax).has_value());
+  EXPECT_EQ(a.reg(kDWARFRax).table_bound, 7u);
   EXPECT_TRUE(conflicts.empty());
 }
 
 TEST(AbsStateTest, JoinDropsABoundOnlyOneSideRecorded) {
   // A register bounded on only one incoming path is not really bounded
   // at the merged point: some other path reaches the same PC with no
-  // guard at all.
+  // guard at all. That is the same max rule as above -- the unbounded
+  // side is kBoundTop, which max absorbs everything into.
   AbsState a;
-  a.SetBound(kDWARFRax, 4);
+  a.ApplyGuardBound(kDWARFRax, 4);
   AbsState b;  // no bound
 
   std::vector<JoinConflict> conflicts;
   EXPECT_TRUE(Join(b, &a, &conflicts));
-  EXPECT_FALSE(a.Bound(kDWARFRax).has_value());
+  EXPECT_FALSE(a.reg(kDWARFRax).HasTableBound());
+  EXPECT_EQ(a.reg(kDWARFRax).value_bound, kBoundTop);
+}
+
+TEST(AbsStateTest, JoinDropsABoundASlotHeldOnOnlyOneSide) {
+  // The same rule through a stack slot, where "the other side knows
+  // nothing" is spelled as the key simply being absent.
+  AbsState a;
+  AbsVal bounded = AbsVal::OrigReg(kDWARFRbx);
+  bounded.ApplyGuardBound(4);
+  a.SetSlot(-24, bounded);
+  AbsState b;  // no slot at all here
+
+  std::vector<JoinConflict> conflicts;
+  EXPECT_TRUE(Join(b, &a, &conflicts));
+  EXPECT_TRUE(a.Slot(-24).IsOrigReg(kDWARFRbx)) << "the identity survives; only the bound does not";
+  EXPECT_EQ(a.Slot(-24).value_bound, kBoundTop);
+}
+
+TEST(AbsStateTest, JoinDoesNotAdoptABoundFromASlotOnlyTheIncomingSideHas) {
+  // The mirror image: this side knows nothing about the slot, so the
+  // incoming identity is adopted but its bound is not.
+  AbsState a;  // no slot at all here
+  AbsState b;
+  AbsVal bounded = AbsVal::OrigReg(kDWARFRbx);
+  bounded.ApplyGuardBound(4);
+  b.SetSlot(-24, bounded);
+
+  std::vector<JoinConflict> conflicts;
+  EXPECT_TRUE(Join(b, &a, &conflicts));
+  EXPECT_TRUE(a.Slot(-24).IsOrigReg(kDWARFRbx));
+  EXPECT_EQ(a.Slot(-24).value_bound, kBoundTop);
+}
+
+TEST(AbsStateTest, JoinReportsNoChangeWhenTwoBoundedTopsAlreadyAgreeOnTop) {
+  // A join that lands back on exactly what was already there must not
+  // report a change: `changed` requeues the successor, and a value that
+  // reports one on every visit spins the worklist toward its iteration
+  // cap for no new information.
+  AbsState a;  // rax is an unbounded kTop
+  AbsState b;
+  b.ApplyValueBound(kDWARFRax, 4);  // a bounded kTop
+
+  std::vector<JoinConflict> conflicts;
+  EXPECT_FALSE(Join(b, &a, &conflicts));
+  EXPECT_EQ(a.reg(kDWARFRax).value_bound, kBoundTop);
 }
 
 TEST(AbsStateTest, JoinOfADisagreeingBoundInAStackSlotAlsoDropsWithoutAConflict) {
@@ -697,9 +748,42 @@ TEST(AbsStateTest, JoinOfADisagreeingBoundInAStackSlotAlsoDropsWithoutAConflict)
 
 TEST(AbsStateTest, ClobberRegClearsAPreviouslySetBound) {
   AbsState a;
-  a.SetBound(kDWARFRax, 4);
+  a.ApplyGuardBound(kDWARFRax, 4);
   a.ClobberReg(kDWARFRax);
-  EXPECT_FALSE(a.Bound(kDWARFRax).has_value());
+  EXPECT_FALSE(a.reg(kDWARFRax).HasTableBound());
+  EXPECT_EQ(a.reg(kDWARFRax).value_bound, kBoundTop);
+}
+
+TEST(AbsStateTest, WritingTheComparedRegisterInvalidatesLastCmp) {
+  // `cmp $5,%eax; mov (%rbx),%rax; ja default` compares one rax and
+  // branches on a different one. last_cmp names a register number, so
+  // without this the guard would bound whatever landed there instead.
+  AbsState a;
+  a.last_cmp = AbsState::FlagsGuard{kDWARFRax, 32, 5};
+  a.SetReg(kDWARFRax, AbsVal::CFARel(-8));
+  EXPECT_FALSE(a.last_cmp.has_value());
+
+  AbsState b;
+  b.last_cmp = AbsState::FlagsGuard{kDWARFRax, 32, 5};
+  b.ClobberReg(kDWARFRax);
+  EXPECT_FALSE(b.last_cmp.has_value());
+}
+
+TEST(AbsStateTest, WritingAnUnrelatedRegisterLeavesLastCmpAlone) {
+  AbsState a;
+  a.last_cmp = AbsState::FlagsGuard{kDWARFRax, 32, 5};
+  a.SetReg(kDWARFRcx, AbsVal::CFARel(-8));
+  ASSERT_TRUE(a.last_cmp.has_value());
+  EXPECT_EQ(a.last_cmp->imm, 5u);
+}
+
+TEST(AbsStateTest, ApplyingABoundDoesNotInvalidateLastCmp) {
+  // A bound update is not a value write: the guard conversion tightens
+  // the very register last_cmp names, and must not shoot itself.
+  AbsState a;
+  a.last_cmp = AbsState::FlagsGuard{kDWARFRax, 32, 5};
+  a.ApplyGuardBound(kDWARFRax, 5);
+  EXPECT_TRUE(a.last_cmp.has_value());
 }
 
 // --- Join: last_cmp (§3.2) -------------------------------------------------

@@ -240,10 +240,10 @@ TEST_F(SemanticsTest, IndirectJumpResolvesOnceTheIndexRegisterHasAKnownBound) {
   // The bound is snapshotted at movslq-time, so it must be set on the index
   // register before that instruction runs -- a bound set afterwards, as this
   // test used to do, is no longer picked up, on purpose: the whole point is to
-  // stop the resolver from re-reading AbsState::Bound live at the `jmp`.
+  // stop the resolver from re-reading the index's bound live at the `jmp`.
   Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});  // rcx = const(table)
   int64_t table = state_.reg(kDWARFRcx).ConstValue();
-  state_.SetBound(kDWARFRax, 4);
+  state_.ApplyGuardBound(kDWARFRax, 4);
   Run({0x48, 0x63, 0x14, 0x81});            // rdx = table_entry(table, index=rax), captures bound(rax)=4
   Run({0x48, 0x01, 0xca});                  // rdx = jump_target(table, index=rax), carries the captured bound
   TransferOutcome out = Run({0xff, 0xe2});  // jmp *%rdx
@@ -252,25 +252,50 @@ TEST_F(SemanticsTest, IndirectJumpResolvesOnceTheIndexRegisterHasAKnownBound) {
   EXPECT_EQ(out.jump_table_entries, 5u);
 }
 
+TEST_F(SemanticsTest, IndirectJumpDoesNotResolveFromAWidthFactAlone) {
+  // A width fact bounds the index honestly -- `movzbl` really does prove
+  // it is at most 255 -- but it is not a size the compiler declared, and
+  // resolving a 256-entry table from it would read whatever .rodata
+  // happens to follow the real one. Only a guard may size a table.
+  Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});  // rcx = const(table)
+  Run({0x0f, 0xb6, 0xc0});                          // movzbl %al,%eax -- rax <= 255, no guard
+  ASSERT_EQ(state_.reg(kDWARFRax).value_bound, 255u);
+  ASSERT_FALSE(state_.reg(kDWARFRax).HasTableBound());
+  Run({0x48, 0x63, 0x14, 0x81});            // rdx = table_entry(table, index=rax)
+  Run({0x48, 0x01, 0xca});                  // rdx = jump_target(table, index=rax)
+  TransferOutcome out = Run({0xff, 0xe2});  // jmp *%rdx
+  EXPECT_FALSE(out.has_jump_table);
+  EXPECT_TRUE(out.has_unbounded_jump_target) << "the table shape resolved; only its size is missing";
+}
+
 TEST_F(SemanticsTest, IndirectJumpDoesNotResolveFromABoundSetAfterTheTableLoad) {
-  // The mirror image of the test above: a live AbsState::Bound at the
-  // `jmp` is deliberately no longer consulted, so a bound that only shows
-  // up after the movslq/add sequence (e.g. from an unrelated guard that
-  // happens to reuse the index register) must not resolve the table.
+  // The mirror image of the test above: a live bound lookup at the `jmp`
+  // is deliberately not done, so a bound that only shows up after the
+  // movslq/add sequence (e.g. from an unrelated guard that happens to
+  // reuse the index register) must not resolve the table.
   Run({0x48, 0x8d, 0x0d, 0x10, 0x00, 0x00, 0x00});  // rcx = const(table)
   Run({0x48, 0x63, 0x14, 0x81});                    // rdx = table_entry(table, index=rax), no bound yet
   Run({0x48, 0x01, 0xca});                          // rdx = jump_target(table, index=rax), still no bound
-  state_.SetBound(kDWARFRax, 4);
+  state_.ApplyGuardBound(kDWARFRax, 4);
   TransferOutcome out = Run({0xff, 0xe2});  // jmp *%rdx
   EXPECT_FALSE(out.has_jump_table);
-  EXPECT_TRUE(out.indirect_branch);
 }
 
 TEST_F(SemanticsTest, CmpWithANonNegativeImmediateSetsLastCmp) {
   Run({0x83, 0xf8, 0x09});  // cmp $9,%eax
   ASSERT_TRUE(state_.last_cmp.has_value());
   EXPECT_EQ(state_.last_cmp->reg, kDWARFRax);
+  EXPECT_EQ(state_.last_cmp->width_bits, 32u);
   EXPECT_EQ(state_.last_cmp->imm, 9u);
+}
+
+TEST_F(SemanticsTest, CmpOnItsOwnEstablishesNoBound) {
+  // A comparison sets flags and nothing else. It is the branch that picks
+  // a side and turns it into a fact -- deriving one here would invent a
+  // bound on the taken edge, or with no branch at all.
+  Run({0x83, 0xf8, 0x09});  // cmp $9,%eax
+  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, kBoundTop);
+  EXPECT_FALSE(state_.reg(kDWARFRax).HasTableBound());
 }
 
 TEST_F(SemanticsTest, LastCmpIsClearedByALaterFlagsWritingInstruction) {
@@ -280,57 +305,174 @@ TEST_F(SemanticsTest, LastCmpIsClearedByALaterFlagsWritingInstruction) {
   EXPECT_FALSE(state_.last_cmp.has_value());
 }
 
-TEST_F(SemanticsTest, LastCmpSurvivesAnInstructionThatDoesNotTouchFlags) {
+TEST_F(SemanticsTest, LastCmpIsClearedByAWriteToTheComparedRegister) {
+  // `cmp $9,%eax; mov (%rbx),%rax` leaves the flags alone but replaces the
+  // very value they describe.
   Run({0x83, 0xf8, 0x09});  // cmp $9,%eax
   ASSERT_TRUE(state_.last_cmp.has_value());
-  Run({0x89, 0xc1});  // mov %eax,%ecx -- does not write EFLAGS
+  Run({0x48, 0x8b, 0x03});  // mov (%rbx),%rax -- no flags written
+  EXPECT_FALSE(state_.last_cmp.has_value());
+}
+
+TEST_F(SemanticsTest, LastCmpSurvivesAnInstructionThatDoesNotTouchFlagsOrTheReg) {
+  Run({0x83, 0xf8, 0x09});  // cmp $9,%eax
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  Run({0x89, 0xc1});  // mov %eax,%ecx -- writes neither EFLAGS nor rax
   ASSERT_TRUE(state_.last_cmp.has_value());
   EXPECT_EQ(state_.last_cmp->imm, 9u);
 }
 
-TEST_F(SemanticsTest, MovzxCarriesTheSourcesBoundAcrossATruncatingWiden) {
-  state_.SetBound(kDWARFRax, 9);
+// --- width facts ----------------------------------------------------------
+
+TEST_F(SemanticsTest, AnyWriteToA32BitRegisterProvesTheFullRegisterIsZeroExtended) {
+  // Not about what was computed -- x86-64 zero-extends every 32-bit
+  // destination write, so the mere occurrence of one bounds the register.
+  // This is what later lets a `cmp $imm,%eax` guard bound *rax*.
+  Run({0x01, 0xc8});  // add %ecx,%eax
+  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, 0xffffffffu);
+  EXPECT_FALSE(state_.reg(kDWARFRax).HasTableBound()) << "a width fact is never a table size";
+}
+
+TEST_F(SemanticsTest, AWriteToA64BitRegisterProvesNoWidthFact) {
+  Run({0x48, 0x01, 0xc8});  // add %rcx,%rax
+  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, kBoundTop);
+}
+
+TEST_F(SemanticsTest, AWriteToAnEightBitRegisterProvesNothingAboutTheParent) {
+  // `mov %sil,%al` leaves bits 8..63 of rax untouched, so however tightly
+  // bounded %sil was, rax is not bounded at all.
+  state_.ApplyGuardBound(kDWARFRsi, 9);
+  Run({0x40, 0x88, 0xf0});  // mov %sil,%al
+  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, kBoundTop);
+  EXPECT_FALSE(state_.reg(kDWARFRax).HasTableBound());
+}
+
+TEST_F(SemanticsTest, MovzxIntoASixteenBitRegisterProvesNothingAboutTheParent) {
+  // Same reason: a 16-bit destination does not zero-extend into the
+  // upper half the way a 32-bit one does.
+  state_.ApplyGuardBound(kDWARFRax, 9);
+  Run({0x66, 0x0f, 0xb6, 0xc8});  // movzbw %al,%cx
+  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, kBoundTop);
+}
+
+TEST_F(SemanticsTest, MovzxFromMemoryProvesTheLoadWidth) {
+  // Where a byte-wide index usually comes from, and the fact that makes a
+  // later `cmp $imm,%al` guard able to say anything about rax at all.
+  Run({0x0f, 0xb6, 0x07});  // movzbl (%rdi),%eax
+  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, 255u);
+}
+
+TEST_F(SemanticsTest, MovsxFromMemoryProvesOnlyTheDestinationWidth) {
+  // Sign extension of unknown memory can produce a huge unsigned value,
+  // so only the 32-bit destination write itself proves anything.
+  Run({0x0f, 0xbe, 0x07});  // movsbl (%rdi),%eax
+  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, 0xffffffffu);
+}
+
+// --- proven guards --------------------------------------------------------
+//
+// A guard becomes "proven" on the one branch edge where the compared value
+// is in range (fde-checker.cc's ApplyInRangeGuard). These tests set that up
+// by hand; what they cover is the consumption side.
+
+TEST_F(SemanticsTest, AProvenGuardIsCashedInByAWiden) {
+  // `cmp $9,%al; ja default` on a register nothing proved zero-extended:
+  // the guard bounds only the low 8 bits, and `movzbl %al,%ecx` is what
+  // turns that into a bound on all of rcx.
+  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, 9, /*proven=*/true};
+  Run({0x0f, 0xb6, 0xc8});  // movzbl %al,%ecx
+  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, 9u);
+  EXPECT_EQ(state_.reg(kDWARFRcx).table_bound, 9u) << "a guard is compiler-declared, so it may size a table";
+}
+
+TEST_F(SemanticsTest, AProvenGuardIsCashedInWhenSourceAndDestinationAreTheSameRegister) {
+  // `movzbl %al,%eax` is the commonest spelling of the widen, and reads the
+  // register it also writes -- so the source and the guard both have to be
+  // read before the destination is clobbered.
+  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, 9, /*proven=*/true};
+  Run({0x0f, 0xb6, 0xc0});  // movzbl %al,%eax
+  EXPECT_EQ(state_.reg(kDWARFRax).table_bound, 9u);
+  EXPECT_FALSE(state_.last_cmp.has_value()) << "the write to rax retires the guard once it has been collected";
+}
+
+TEST_F(SemanticsTest, AnUnprovenGuardIsNotCashedIn) {
+  // The same shape with no branch having selected an edge. This is the
+  // fabrication the old fallback committed.
+  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, 9, /*proven=*/false};
+  Run({0x0f, 0xb6, 0xc8});  // movzbl %al,%ecx
+  EXPECT_FALSE(state_.reg(kDWARFRcx).HasTableBound());
+  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, 255u) << "only the load width itself survives";
+}
+
+TEST_F(SemanticsTest, AProvenGuardIsNotCashedInByAWiderRead) {
+  // A guard on the low 8 bits says nothing about bits 8..31, so a 32-bit
+  // read reaches past what was compared.
+  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, 9, /*proven=*/true};
+  Run({0x48, 0x63, 0xc8});  // movsxd %eax,%rcx
+  EXPECT_FALSE(state_.reg(kDWARFRcx).HasTableBound());
+}
+
+TEST_F(SemanticsTest, AProvenGuardSurvivesAFlagsWritingInstruction) {
+  // Once the branch has picked a side, "the low 8 bits of rax are at most 9"
+  // is a fact about rax, not about EFLAGS -- and the instructions between
+  // the branch and the widen are ordinary code that may well set flags.
+  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, 9, /*proven=*/true};
+  Run({0x83, 0xc1, 0x01});  // add $1,%ecx -- writes EFLAGS, not rax
+  ASSERT_TRUE(state_.last_cmp.has_value());
+  EXPECT_TRUE(state_.last_cmp->proven);
+}
+
+TEST_F(SemanticsTest, AProvenGuardDoesNotSurviveAWriteToItsOwnRegister) {
+  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, 9, /*proven=*/true};
+  Run({0x48, 0x8b, 0x03});  // mov (%rbx),%rax
+  EXPECT_FALSE(state_.last_cmp.has_value());
+}
+
+// --- carrying bounds across widens ----------------------------------------
+
+TEST_F(SemanticsTest, MovzxCarriesTheSourcesBoundsAcrossATruncatingWiden) {
+  state_.ApplyGuardBound(kDWARFRax, 9);
   Run({0x0f, 0xb6, 0xc8});  // movzbl %al,%ecx
   EXPECT_TRUE(state_.reg(kDWARFRcx).is_top()) << "the widened value's own identity does not survive the truncation";
-  ASSERT_TRUE(state_.reg(kDWARFRcx).Bound().has_value());
-  EXPECT_EQ(*state_.reg(kDWARFRcx).Bound(), 9u);
-  EXPECT_EQ(state_.reg(kDWARFRax).Bound(), 9u) << "the source's own bound is untouched by a read";
+  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, 9u);
+  EXPECT_EQ(state_.reg(kDWARFRcx).table_bound, 9u) << "a guard's bound stays usable as a table size across a widen";
+  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, 9u) << "the source's own bounds are untouched by a read";
 }
 
-TEST_F(SemanticsTest, NarrowCmpAndMovzxPropagatesBound) {
-  Run({0x3c, 0x09});  // cmp $9, %al
-  ASSERT_TRUE(state_.last_cmp.has_value());
-  EXPECT_EQ(state_.last_cmp->reg, kDWARFRax);
-  EXPECT_EQ(state_.last_cmp->width_bits, 8u);
-  EXPECT_EQ(state_.last_cmp->imm, 9u);
-
-  Run({0x0f, 0xb6, 0xc8});  // movzbl %al, %ecx
-  ASSERT_TRUE(state_.reg(kDWARFRcx).Bound().has_value());
-  EXPECT_EQ(*state_.reg(kDWARFRcx).Bound(), 9u);
+TEST_F(SemanticsTest, NarrowMovCarriesBoundsWhenTheDestinationIs32Bit) {
+  // GCC routinely widens a guarded index into whatever register the table
+  // load reads; a plain `mov %esi,%eax` is one of the spellings it uses.
+  state_.ApplyGuardBound(kDWARFRsi, 9);
+  Run({0x89, 0xf0});  // mov %esi,%eax
+  EXPECT_EQ(state_.reg(kDWARFRax).value_bound, 9u);
+  EXPECT_EQ(state_.reg(kDWARFRax).table_bound, 9u);
 }
 
-TEST_F(SemanticsTest, NarrowCmpAndMovsxPropagatesBoundWhenSignBitIsZero) {
-  Run({0x3c, 0x09});        // cmp $9, %al
-  Run({0x0f, 0xbe, 0xc8});  // movsbl %al, %ecx
-  ASSERT_TRUE(state_.reg(kDWARFRcx).Bound().has_value());
-  EXPECT_EQ(*state_.reg(kDWARFRcx).Bound(), 9u);
+TEST_F(SemanticsTest, MovsxCarriesBoundsWhenTheSignBitIsProvenClear) {
+  state_.ApplyGuardBound(kDWARFRax, 9);
+  Run({0x0f, 0xbe, 0xc8});  // movsbl %al,%ecx
+  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, 9u);
+  EXPECT_EQ(state_.reg(kDWARFRcx).table_bound, 9u);
 }
 
-TEST_F(SemanticsTest, NarrowCmpAndMovsxRejectsBoundWhenSignBitCanBeOne) {
-  Run({0x3c, 0xc8});  // cmp $200, %al
-  ASSERT_TRUE(state_.last_cmp.has_value());
-  EXPECT_EQ(state_.last_cmp->imm, 200u);
-
-  Run({0x0f, 0xbe, 0xc8});  // movsbl %al, %ecx
-  EXPECT_FALSE(state_.reg(kDWARFRcx).Bound().has_value())
-      << "sign extension from 200 (negative signed byte) must not propagate bound";
+TEST_F(SemanticsTest, MovsxRejectsBoundsWhenTheSignBitCanBeOne) {
+  state_.ApplyGuardBound(kDWARFRax, 200);
+  Run({0x0f, 0xbe, 0xc8});  // movsbl %al,%ecx -- 200 is a negative signed byte
+  EXPECT_FALSE(state_.reg(kDWARFRcx).HasTableBound());
+  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, 0xffffffffu) << "only the 32-bit destination write itself survives";
 }
 
-TEST_F(SemanticsTest, MovsxdCarriesBoundFrom32BitRegWhenNonNegative) {
-  Run({0x83, 0xf8, 0x09});  // cmp $9, %eax
-  Run({0x48, 0x63, 0xc8});  // movsxd %eax, %rcx
-  ASSERT_TRUE(state_.reg(kDWARFRcx).Bound().has_value());
-  EXPECT_EQ(*state_.reg(kDWARFRcx).Bound(), 9u);
+TEST_F(SemanticsTest, MovsxdCarriesBoundsFrom32BitRegWhenNonNegative) {
+  state_.ApplyGuardBound(kDWARFRax, 9);
+  Run({0x48, 0x63, 0xc8});  // movsxd %eax,%rcx
+  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, 9u);
+  EXPECT_EQ(state_.reg(kDWARFRcx).table_bound, 9u);
+}
+
+TEST_F(SemanticsTest, MovsxdRejectsBoundsWhenTheSignBitCanBeOne) {
+  state_.ApplyValueBound(kDWARFRax, 0xffffffffu);
+  Run({0x48, 0x63, 0xc8});  // movsxd %eax,%rcx
+  EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, kBoundTop) << "a 64-bit destination proves no width fact of its own";
 }
 
 TEST_F(SemanticsTest, LeaOnRspDropsDeadSlotsWhenMovingUp) {

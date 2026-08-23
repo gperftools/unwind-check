@@ -6,6 +6,15 @@
   The issue is us or at least some of it, we should more correctly
   flag/report unexpected entry state and then trust FDE data.
 
+* (PARTLY DONE) flag cases where "CFG structure" is un-discovered. The
+  bound half of this is now structural: bounds are an inclusive-upper-bound
+  lattice joined by max, so "an earlier bound is weakened later" is normal
+  widening rather than a lost fact, and a dispatch left without a
+  compiler-declared table_bound is a loud REVIEW (or REVIEW-LIGHT via
+  guessing). What is still not flagged is the pass-1 snapshot ordering in
+  AGENT.md §6: a table resolved from a not-yet-final bound is not itself
+  reported as order-dependent.
+
 * replace <Various>::ToString() with AbslStringify
 
 * IsFileBackedNonExecutable logic for table jumps might be a bit too
@@ -13,9 +22,6 @@
   combined entire exec+read-only-data into big PT_LOAD segment
   (possibly huge-page aligned).
 
-* ensure that we flag any cases where "CFG structure" is un-discovered
-  (e.g. earlier bound is bottomed later). All cases like this need to
-  be loudly REVIEWed or MISMATCHed.
 
 --
 
@@ -40,13 +46,8 @@
 
 * remove references to switch-tables plans in comments
 
-* very odd handling of less than 64-bit moves with destination first
-  clobbered and then bound carried from src and in an odd way through
-  std::option
 
-* looks like nothing in our MOVSXD handling is ensuring that operand width (number of bits we load from memory) is 32-bit
 
-* I dislike Bound/SetBound helpers on state, getting them normally form value likely more logical code
 
 * maybe some helper for DWARFRegOf where we need full64 bit reg. Or
   actually the other way around. DWARFRegOf should be common case only
@@ -61,8 +62,6 @@
 
 * ADD/SUB addition/subtraction should be unsigned (compilers like to screw up the signed overflows)
 
-* (DONE) so the logic of "move the bound over movzx" should ensure the bound
-  is small enough that narrow src register read isn't "smaller" than bound.
 
 * Do we need "empty state" class for InsnSemantics ? Also InsnSemantics::DWARFRegOf and IsFull64 are not really used externally.
 
@@ -101,3 +100,10 @@
 
 * double check if say storing {x,y,z}mm field over set of slots is
   clobbring them. Probably not.
+
+* AbsState::SetSlot erases any is_top() value, which drops the bounds a
+  kTop-with-bounds carries -- so spilling a movzbl result and reloading it
+  loses the width fact and any proven guard folded into it. Pre-existing,
+  and the 400-binary sweep says it currently costs nothing measurable, but
+  it is a silent precision cliff if compilers start spilling switch indices
+  more.

@@ -142,6 +142,8 @@ TEST_F(FixturesTest, EveryFixtureIsPresent) {
                            "review_indirect_jump",
                            "review_cfa_expression",
                            "good_switch_table",
+                           "good_switch_table_jbe",
+                           "good_switch_table_jb",
                            "bad_switch_table_case",
                            "review_switch_table_unguarded",
                            "good_jump_to_cold_fragment",
@@ -237,6 +239,24 @@ TEST_F(FixturesTest, SwitchTableCasesGetWalked) {
   // case bodies -- reachable only through the resolved table -- were
   // actually checked rather than silently skipped.
   const Checked& c = Get("good_switch_table");
+  EXPECT_EQ(c.result.verdict, Verdict::kBlessed);
+  EXPECT_GE(c.result.instructions_checked, 8u);
+}
+
+TEST_F(FixturesTest, SwitchTableGuardedByJbeOnASubRegisterResolves) {
+  // The taken-edge spelling of the guard, on eight bits of an argument
+  // register -- so the bound cannot be promoted at the branch and has to
+  // survive as a width-qualified fact until the movzbl collects it. Both
+  // halves have to work for the case bodies to be reached at all.
+  const Checked& c = Get("good_switch_table_jbe");
+  EXPECT_EQ(c.result.verdict, Verdict::kBlessed);
+  EXPECT_GE(c.result.instructions_checked, 8u);
+}
+
+TEST_F(FixturesTest, SwitchTableGuardedByJbResolvesWithTheStrictBound) {
+  // `jb $3` means index <= 2, so the table is three entries. An
+  // off-by-one either drops a case body or reads past the table.
+  const Checked& c = Get("good_switch_table_jb");
   EXPECT_EQ(c.result.verdict, Verdict::kBlessed);
   EXPECT_GE(c.result.instructions_checked, 8u);
 }

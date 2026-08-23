@@ -103,16 +103,22 @@ bool WritesEflags(const Instruction& insn) {
 struct RegInfoTable {
   int8_t dwarf_reg[ZYDIS_REGISTER_MAX_VALUE + 1];
   bool is_full_64[ZYDIS_REGISTER_MAX_VALUE + 1];
+  // Width of this register spelling in bits, 0 for anything that is not
+  // one of the 16 GPRs. Needed because a write's *width* is itself a fact
+  // about the value: see WrittenRegBound.
+  uint8_t width_bits[ZYDIS_REGISTER_MAX_VALUE + 1];
 
   RegInfoTable() {
     for (int r = 0; r <= ZYDIS_REGISTER_MAX_VALUE; ++r) {
       dwarf_reg[r] = -1;
       is_full_64[r] = false;
+      width_bits[r] = 0;
       auto zreg = static_cast<ZydisRegister>(r);
       ZydisRegister parent = ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, zreg);
       for (int i = 0; i < kNumGPRs; ++i) {
         if (kDwarfGprs[i] == parent) {
           dwarf_reg[r] = static_cast<int8_t>(i);
+          width_bits[r] = static_cast<uint8_t>(ZydisRegisterGetWidth(ZYDIS_MACHINE_MODE_LONG_64, zreg));
           if (parent == zreg) {
             is_full_64[r] = true;
           }
@@ -126,6 +132,97 @@ struct RegInfoTable {
 const RegInfoTable& GetRegInfoTable() {
   static const RegInfoTable table;
   return table;
+}
+
+// Width in bits of a GPR spelling (%al -> 8, %eax -> 32, %rax -> 64), or 0
+// if it is not one of the 16 GPRs.
+unsigned RegWidthBits(ZydisRegister reg) {
+  if (reg < 0 || reg > ZYDIS_REGISTER_MAX_VALUE) {
+    return 0;
+  }
+  return GetRegInfoTable().width_bits[reg];
+}
+
+// What merely *writing* this register spelling proves about the resulting
+// full 64-bit register, before looking at what was written.
+//
+// On x86-64 every write to a 32-bit GPR destination zero-extends into the
+// upper half, so `add %ecx,%eax` -- whatever it computed -- leaves rax at
+// most 0xffffffff. That fact is small but load-bearing: it is what later
+// lets `cmp $imm,%eax; ja` say anything about *rax*, which is the register
+// a table load actually indexes with. A 64-bit destination proves nothing
+// (kBoundTop), and an 8- or 16-bit destination proves nothing either,
+// because those writes leave the upper bits of the register alone.
+uint64_t WrittenRegBound(ZydisRegister reg) {
+  return RegWidthBits(reg) == 32 ? WidthBound(32) : kBoundTop;
+}
+
+// Clobbers the register `reg` names, keeping whatever its width alone
+// proves. Every explicitly-modelled case that gives up on a destination
+// should go through this rather than bare ClobberReg, so the
+// zero-extension fact survives being unable to model the value.
+void ClobberWrittenReg(AbsState* state, ZydisRegister reg, int dwarf_reg) {
+  state->ClobberReg(dwarf_reg);
+  state->gpr[dwarf_reg].value_bound = WrittenRegBound(reg);
+}
+
+// What a *proven* guard contributes to a zero-extending read of the low
+// `read_bits` bits of register `reg`.
+//
+// A proven guard says the low `width_bits` bits of its register are at most
+// `imm` -- a width-qualified fact, useless on its own to a table load that
+// indexes with all 64 bits. A widen is what cashes it in: reading those
+// bits and zero-extending them makes the destination equal to the bounded
+// quantity, so the qualification disappears and the result is a bound on
+// the whole destination register. That only works while the read stays
+// inside what the guard covered, hence the `read_bits <= width_bits` test:
+// reading 32 bits of a register guarded only in its low 8 reaches 24 bits
+// the guard never spoke about.
+//
+// Unproven guards contribute nothing. A comparison that has not yet had a
+// branch pick a side establishes no fact, and treating one as though it had
+// is what made an earlier version of this invent bounds on the default edge
+// of a switch -- or with no branch at all.
+uint64_t ProvenGuardBound(const AbsState& state, int reg, unsigned read_bits) {
+  if (reg < 0 || !state.last_cmp.has_value() || !state.last_cmp->proven) {
+    return kBoundTop;
+  }
+  if (state.last_cmp->reg != reg || read_bits > state.last_cmp->width_bits) {
+    return kBoundTop;
+  }
+  return std::min(WidthBound(read_bits), state.last_cmp->imm);
+}
+
+// The bounds of `src` after a zero-extending widen that keeps its low
+// `src_bits` bits -- `movzbl %al,%ecx`, or the narrow `mov %esi,%eax` that
+// x86-64 zero-extends for free. Truncation can only tighten an upper bound
+// (if src <= B < 2^w then src mod 2^w == src <= B; otherwise it is capped
+// by 2^w - 1), so both bounds survive and the width itself contributes a
+// new value bound.
+//
+// `table_bound` is carried across unchanged rather than tightened to the
+// width: tightening it would manufacture a compiler-declared bound out of
+// an instruction width, which is exactly what table_bound exists not to be.
+void ApplyZeroExtendedFrom(AbsVal* dst, const AbsVal& src, unsigned src_bits, uint64_t guard_bound) {
+  dst->value_bound = std::min({WidthBound(src_bits), src.value_bound, guard_bound});
+  // A guard is compiler-declared, so unlike the width term above it may
+  // size a table -- that is the whole point of collecting it here.
+  dst->table_bound = std::min(src.table_bound, guard_bound);
+}
+
+// The same for a sign-extending widen (`movsbl`, `movslq`). Sound only
+// when the source's low `src_bits` bits are known to have a clear sign
+// bit, since otherwise the result is a huge unsigned number rather than a
+// small one -- and `value_bound` is precisely the fact that proves it.
+// When it cannot be proven, nothing survives.
+void ApplySignExtendedFrom(AbsVal* dst, const AbsVal& src, unsigned src_bits, uint64_t guard_bound) {
+  const uint64_t low = std::min({WidthBound(src_bits), src.value_bound, guard_bound});
+  if (src_bits >= 64 || low >= (uint64_t{1} << (src_bits - 1))) {
+    dst->ClearBounds();
+    return;
+  }
+  dst->value_bound = low;
+  dst->table_bound = std::min(src.table_bound, guard_bound);
 }
 
 }  // namespace
@@ -160,7 +257,10 @@ void InsnSemantics::ClobberWrites(const Instruction& insn, AbsState* state) cons
     if (op.type == ZYDIS_OPERAND_TYPE_REGISTER) {
       int d = DWARFRegOf(op.reg.value);
       if (d >= 0) {
-        state->ClobberReg(d);
+        // Not a bare ClobberReg: an unmodelled instruction still tells us
+        // how wide its destination was, and on x86-64 that alone bounds
+        // the register. See WrittenRegBound.
+        ClobberWrittenReg(state, op.reg.value, d);
       }
     } else if (op.type == ZYDIS_OPERAND_TYPE_MEMORY) {
       std::optional<int64_t> slot = MemSlot(*state, insn, op.mem);
@@ -181,7 +281,14 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
   // state->last_cmp again below, overwriting this clear. Doing this
   // unconditionally, once, up front means no case below -- or the
   // unmodelled-instruction fallback -- has to remember to do it by hand.
-  if (WritesEflags(insn)) {
+  //
+  // A *proven* guard is exempt: once a branch has selected the in-range
+  // edge, "the low 32 bits of rsi are at most 14" is a fact about rsi, and
+  // no amount of later arithmetic on unrelated registers makes it untrue.
+  // Only writing rsi does, which SetReg/ClobberReg handle. Without this
+  // exemption any flag-writing instruction between the guard branch and
+  // the widen that collects it would throw the guard away.
+  if (WritesEflags(insn) && (!state->last_cmp.has_value() || !state->last_cmp->proven)) {
     state->last_cmp = std::nullopt;
   }
 
@@ -210,19 +317,21 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       const AbsVal v = r >= 0 ? state->reg(r) : AbsVal::Top();
       VLOG(1) << absl::StrFormat("0x%x: indirect jmp via reg %d, value=%v", insn.address, r, v);
       if (v.IsJumpTarget()) {
-        // The bound was captured once at movslq-time and carried through
-        // the `add` into this kJumpTarget -- not re-derived with a live
-        // AbsState::Bound lookup here, which would be vulnerable to an
-        // intervening instruction reusing the same register number for an
-        // unrelated guard.
-        std::optional<uint64_t> bound = v.Bound();
+        // The index's bound was captured once at movslq-time and carried
+        // through the `add` into this kJumpTarget -- not re-derived with a
+        // live lookup here, which would be vulnerable to an intervening
+        // instruction reusing the same register number for an unrelated
+        // guard. Only a table_bound will do: a value_bound is a width fact
+        // (`movzbl` proves an index is at most 255) and sizing a table from
+        // one would read whatever .rodata follows the real table. See
+        // AbsVal's comment.
         VLOG(1) << absl::StrFormat("0x%x:   jump target table=0x%x index_reg=%d captured_bound=%s", insn.address,
                                    v.TableAddr(), v.IndexReg(),
-                                   bound.has_value() ? absl::StrFormat("%u", *bound) : std::string("<none>"));
-        if (bound.has_value()) {
+                                   v.HasTableBound() ? absl::StrFormat("%u", v.table_bound) : std::string("<none>"));
+        if (v.HasTableBound()) {
           out.has_jump_table = true;
           out.jump_table_addr = v.TableAddr();
-          out.jump_table_entries = *bound + 1;
+          out.jump_table_entries = v.table_bound + 1;
           return out;
         }
         out.has_unbounded_jump_target = true;
@@ -369,7 +478,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
         break;
       }
       if (!IsFull64(insn.operands[0].reg.value)) {
-        state->ClobberReg(d);
+        ClobberWrittenReg(state, insn.operands[0].reg.value, d);
         return out;
       }
       const ZydisDecodedOperandMem& mem = insn.operands[1].mem;
@@ -403,35 +512,28 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
           break;
         }
         if (!IsFull64(dst.reg.value)) {
-          // A narrower mov's identity does not survive -- see the 8/16-bit
-          // case below for why this stays a clobber rather than a value
-          // copy -- but same-width-or-widening register-to-register moves
-          // (`mov %esi,%eax` and friends: a 32-bit destination write still
-          // zero-extends to the full 64-bit register on x86-64, the same
-          // as movzx) carry a numeric bound across exactly the way movzx
-          // does, and for the same reason: GCC frequently widens the
-          // guard register into whatever register the table load actually
-          // reads.
-          std::optional<uint64_t> carried;
-          if (src.type == ZYDIS_OPERAND_TYPE_REGISTER) {
-            int s = DWARFRegOf(src.reg.value);
-            // Deliberately not gated on IsFull64(src.reg): the bound
-            // lives on the DWARF-level register regardless of which
-            // sub-register spelling read it (`mov %esi,%eax` reads the
-            // same rsi-level bound `mov %rsi,%rax` would), unlike a
-            // value read, which ReadReg rightly refuses to give for a
-            // sub-register.
-            if (s >= 0) {
-              carried = state->reg(s).Bound();
-              if (!carried.has_value() && state->last_cmp.has_value() && state->last_cmp->reg == s &&
-                  state->last_cmp->width_bits == src.size) {
-                carried = state->last_cmp->imm;
-              }
-            }
-          }
-          state->ClobberReg(d);
-          if (carried.has_value()) {
-            state->SetBound(d, *carried);
+          // A narrower mov's identity does not survive the truncation. Its
+          // bounds can, but only for a 32-bit destination, which x86-64
+          // zero-extends into the full register -- exactly like movzx, and
+          // it matters for the same reason: GCC frequently widens a guarded
+          // index into whatever register the table load actually reads. An
+          // 8- or 16-bit destination leaves the upper bits of the register
+          // alone, so `mov %sil,%al` proves nothing whatsoever about rax,
+          // however tightly bounded %sil was.
+          // Read the source before writing the destination: they are very
+          // often the same register (`mov %eax,%eax`), and clobbering first
+          // would destroy both the value being read and the guard riding on
+          // it. Deliberately not gated on IsFull64(src.reg): the bounds live
+          // on the DWARF-level register regardless of which sub-register
+          // spelling read it, unlike a value read, which ReadReg rightly
+          // refuses to give for a sub-register.
+          const bool widening = RegWidthBits(dst.reg.value) == 32;
+          const int sr = (widening && src.type == ZYDIS_OPERAND_TYPE_REGISTER) ? DWARFRegOf(src.reg.value) : -1;
+          const AbsVal src_val = sr >= 0 ? state->reg(sr) : AbsVal::Top();
+          const uint64_t guard = sr >= 0 ? ProvenGuardBound(*state, sr, src.size) : kBoundTop;
+          ClobberWrittenReg(state, dst.reg.value, d);
+          if (sr >= 0) {
+            ApplyZeroExtendedFrom(&state->gpr[d], src_val, src.size, guard);
           }
           return out;
         }
@@ -476,24 +578,20 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       if (d < 0 || !IsFull64(insn.operands[0].reg.value)) {
         break;
       }
-      // Register-to-register `movsxd %src32, %dst64`: carries the bound across if the
-      // bound is non-negative (< 2^31), so the sign bit is 0 and sign-extension matches zero-extension.
+      // Register-to-register `movsxd %src32,%dst64`: the bounds survive only
+      // when the source's own value_bound proves the sign bit is clear, so
+      // that sign-extension and zero-extension agree -- ApplySignExtendedFrom
+      // is where that test lives.
       if (insn.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        int s = DWARFRegOf(insn.operands[1].reg.value);
-        std::optional<uint64_t> carried;
-        if (s >= 0) {
-          std::optional<uint64_t> b = state->reg(s).Bound();
-          if (!b.has_value() && state->last_cmp.has_value() && state->last_cmp->reg == s &&
-              state->last_cmp->width_bits == 32) {
-            b = state->last_cmp->imm;
-          }
-          if (b.has_value() && *b < (1ULL << 31)) {
-            carried = b;
-          }
-        }
+        const int sr = DWARFRegOf(insn.operands[1].reg.value);
+        const unsigned src_bits = insn.operands[1].size;
+        // Snapshot before the clobber -- `movsxd %eax,%rax` reads and writes
+        // the same register.
+        const AbsVal src_val = sr >= 0 ? state->reg(sr) : AbsVal::Top();
+        const uint64_t guard = sr >= 0 ? ProvenGuardBound(*state, sr, src_bits) : kBoundTop;
         state->ClobberReg(d);
-        if (carried.has_value()) {
-          state->SetBound(d, *carried);
+        if (sr >= 0) {
+          ApplySignExtendedFrom(&state->gpr[d], src_val, src_bits, guard);
         }
         return out;
       }
@@ -508,6 +606,9 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       if (mem.index == ZYDIS_REGISTER_NONE || mem.scale != 4 || mem.base == ZYDIS_REGISTER_NONE) {
         break;
       }
+      // A 64-bit movsxd destination forces a 32-bit source, so scale 4 and
+      // the load width already agree; assert it rather than re-deriving it.
+      assert(insn.operands[1].size == 32);
       int idx_reg = DWARFRegOf(mem.index);
       int base_reg = DWARFRegOf(mem.base);
       if (idx_reg < 0 || base_reg < 0 || !IsFull64(mem.base)) {
@@ -526,12 +627,12 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       // eventual `jmp` -- an intervening instruction reusing the same
       // register number for an unrelated guard would otherwise be able to
       // hand the resolver the wrong bound.
-      std::optional<uint64_t> bound = state->Bound(idx_reg);
+      uint64_t index_bound = state->reg(idx_reg).table_bound;
       VLOG(1) << absl::StrFormat("0x%x: movslq -> reg %d = kTableEntry(table=0x%x, index_reg=%d, captured_bound=%s)",
                                  insn.address, d, table, idx_reg,
-                                 bound.has_value() ? absl::StrFormat("%u", *bound) : std::string("<none>"));
+                                 index_bound != kBoundTop ? absl::StrFormat("%u", index_bound) : std::string("<none>"));
       state->SetReg(d, AbsVal::TableEntry(table, static_cast<uint8_t>(idx_reg),
-                                          static_cast<uint64_t>(base_val.ConstValue()), bound));
+                                          static_cast<uint64_t>(base_val.ConstValue()), index_bound));
       return out;
     }
 
@@ -553,7 +654,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
             if (base_candidate.IsConst() && entry_candidate.IsTableEntry() &&
                 entry_candidate.TableBaseConst() == static_cast<uint64_t>(base_candidate.ConstValue())) {
               return AbsVal::JumpTarget(entry_candidate.TableAddr(), static_cast<uint8_t>(entry_candidate.IndexReg()),
-                                        entry_candidate.Bound());
+                                        entry_candidate.table_bound);
             }
             return std::nullopt;
           };
@@ -579,7 +680,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       }
       const AbsVal cur = state->reg(d);
       if (!IsFull64(insn.operands[0].reg.value) || cur.kind != AbsVal::Kind::kCFARel) {
-        state->ClobberReg(d);
+        ClobberWrittenReg(state, insn.operands[0].reg.value, d);
         return out;
       }
       uint64_t imm = static_cast<uint64_t>(insn.operands[1].imm.value.s);
@@ -595,6 +696,14 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
       // this function already cleared; a matching cmp sets it again here.
       // Anything else (cmp of two registers, a memory operand) simply
       // leaves it cleared -- not a guard this analysis resolves.
+      //
+      // Recording it is *all* that happens here, deliberately. A comparison
+      // on its own establishes nothing -- it sets flags; it is the branch
+      // that picks a side and turns it into a fact, and only on the edge
+      // where the comparison came out in bounds. Deriving a bound here
+      // instead (an earlier version did, to rescue narrow compares) invents
+      // one out of thin air on the taken edge, or with no branch at all.
+      // See the guard conversion in fde-checker.cc's Drain.
       if (insn.op_count == 2 && insn.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
           insn.operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE) {
         int r = DWARFRegOf(insn.operands[0].reg.value);
@@ -612,48 +721,51 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
 
     case ZYDIS_MNEMONIC_MOVZX:
     case ZYDIS_MNEMONIC_MOVSX: {
-      // `movzbl %r8b,%ecx`, `movsbl %al,%edx` and friends: the destination's own identity
-      // does not survive the truncation in general, but a numeric bound
-      // established on the source does -- GCC routinely widens the guard
-      // register into whatever register the table load actually reads,
-      // so carrying just the bound across, rather than the whole value, is
-      // what lets the guard and the table load disagree on register without
-      // losing the guard.
+      // `movzbl %r8b,%ecx`, `movsbl %al,%edx` and friends: the destination's
+      // own identity does not survive the truncation, but its numeric bounds
+      // can -- GCC routinely widens a guarded index into whatever register
+      // the table load actually reads, so carrying the bounds across, rather
+      // than the whole value, is what lets the guard and the table load
+      // disagree on register without losing the guard.
       //
-      // For sign-extension (`movsx`), the bound is valid only when the immediate
-      // bound is small enough that the sign bit is guaranteed to be 0 (i.e.
-      // bound < (1 << (src_bits - 1))), so sign-extension is identical to zero-extension.
-      if (insn.op_count == 2 && insn.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
-          insn.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER) {
-        int d = DWARFRegOf(insn.operands[0].reg.value);
-        int s = DWARFRegOf(insn.operands[1].reg.value);
-        if (d >= 0) {
-          std::optional<uint64_t> carried;
-          uint8_t src_bits = insn.operands[1].size;
-          if (s >= 0) {
-            std::optional<uint64_t> b = state->reg(s).Bound();
-            if (!b.has_value() && state->last_cmp.has_value() && state->last_cmp->reg == s &&
-                state->last_cmp->width_bits == src_bits) {
-              b = state->last_cmp->imm;
-            }
-            if (b.has_value()) {
-              if (insn.id == ZYDIS_MNEMONIC_MOVZX) {
-                carried = b;
-              } else {
-                if (src_bits < 64 && *b < (1ULL << (src_bits - 1))) {
-                  carried = b;
-                }
-              }
-            }
-          }
-          state->ClobberReg(d);
-          if (carried.has_value()) {
-            state->SetBound(d, *carried);
-          }
-          return out;
-        }
+      // Only a destination that writes the whole 64-bit register qualifies:
+      // 64-bit explicitly, or 32-bit because x86-64 zero-extends those. A
+      // 16-bit destination (`movzbw %al,%cx`) leaves the upper bits of the
+      // register alone and so proves nothing about it.
+      if (insn.op_count != 2 || insn.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER) {
+        break;  // no reg destination we can name -- fall through to the generic clobber
       }
-      break;  // no reg destination we can name -- fall through to the generic clobber
+      int d = DWARFRegOf(insn.operands[0].reg.value);
+      if (d < 0) {
+        break;
+      }
+      const ZydisDecodedOperand& src = insn.operands[1];
+      if (src.type != ZYDIS_OPERAND_TYPE_REGISTER && src.type != ZYDIS_OPERAND_TYPE_MEMORY) {
+        break;
+      }
+      // Everything the source has to say is read *before* the destination is
+      // clobbered: `movzbl %al,%eax` is the single most common spelling of
+      // this instruction, and there the two are the same register.
+      //
+      // A memory source is worth handling and not just for symmetry: it is
+      // where a byte-wide index usually comes from, and `movzbl (%rdi),%eax`
+      // proving rax <= 255 is what later lets `cmp $imm,%al` bound rax at
+      // all. There is no source AbsVal in that case, only the load width.
+      const int sr = src.type == ZYDIS_OPERAND_TYPE_REGISTER ? DWARFRegOf(src.reg.value) : -1;
+      const AbsVal src_val = sr >= 0 ? state->reg(sr) : AbsVal::Top();
+      const uint64_t guard = sr >= 0 ? ProvenGuardBound(*state, sr, src.size) : kBoundTop;
+      ClobberWrittenReg(state, insn.operands[0].reg.value, d);
+      if (RegWidthBits(insn.operands[0].reg.value) < 32) {
+        return out;  // an 8/16-bit destination proves nothing about the parent
+      }
+      if (insn.id == ZYDIS_MNEMONIC_MOVZX) {
+        ApplyZeroExtendedFrom(&state->gpr[d], src_val, src.size, guard);
+      } else {
+        ApplySignExtendedFrom(&state->gpr[d], src_val, src.size, guard);
+      }
+      // Whatever the widen proved, the destination's own width still caps it.
+      state->gpr[d].value_bound = std::min(state->gpr[d].value_bound, WrittenRegBound(insn.operands[0].reg.value));
+      return out;
     }
 
     case ZYDIS_MNEMONIC_NOP:

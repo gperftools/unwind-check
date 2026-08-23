@@ -1,6 +1,8 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
 #include "abs-state.h"
 
+#include <algorithm>
+
 #include "absl/strings/str_format.h"
 
 namespace unwind_analysis {
@@ -39,50 +41,59 @@ JoinValueResult JoinValue(const AbsVal& current, const AbsVal& incoming) {
   if (current == incoming) {
     return {current, false, false};
   }
-  // kBottom absorbs: a value already flagged as conflicting stays that
-  // way, and a value that only just learned of a conflict on the incoming
-  // side adopts it. Neither case is a fresh disagreement to report --
-  // that happened (or will happen) at the join that first produced the
-  // kBottom.
-  if (current.is_bottom()) {
-    return {current, false, false};
+
+  // First decide what happens to the *identity* (kind/delta/reg/aux). The
+  // bounds are settled separately below, because they join by a different
+  // rule and have to join the same way no matter which branch the identity
+  // took.
+  AbsVal merged;
+  bool real_conflict = false;
+  if (current.is_bottom() || incoming.is_bottom()) {
+    // kBottom absorbs: a value already flagged as conflicting stays that
+    // way, and a value that only just learned of a conflict on the incoming
+    // side adopts it. Neither is a fresh disagreement to report -- that
+    // happened (or will happen) at the join that first produced the kBottom.
+    merged = AbsVal::Bottom();
+  } else if (current.SameIdentity(incoming)) {
+    // Both sides name the same thing -- true of any two kTop values in
+    // particular, since kTop's core is always {kTop,0,0,0} regardless of
+    // what each side's bounds say -- so, per the equality check above, all
+    // they can disagree about is the bounds. This has to be tested before
+    // the kTop-as-identity-element handling below, or two differently
+    // bounded kTops would take the "adopt whichever side is concrete"
+    // branch and one side's bounds would be preferred outright instead of
+    // joined.
+    merged = current;
+  } else if (current.is_top()) {
+    // kTop is the identity element for the identity: take whatever the
+    // other side knows. Only reached once SameIdentity has ruled out "both
+    // sides are kTop", so this is a genuine difference in kind.
+    merged = incoming;
+  } else if (incoming.is_top()) {
+    merged = current;
+  } else {
+    // A genuine identity disagreement -- ordinarily a real conflict, but
+    // not when both sides are one of the switch-table resolution kinds,
+    // which no CFI row can ever consult; see IsTableResolutionKind.
+    merged = AbsVal::Bottom();
+    real_conflict = !(IsTableResolutionKind(current.kind) && IsTableResolutionKind(incoming.kind));
   }
-  if (incoming.is_bottom()) {
-    return {AbsVal::Bottom(), true, false};
-  }
-  // Both sides share a core identity (kind/delta/reg/aux) -- true of any
-  // two kTop values in particular, since kTop's core is always the same
-  // {kTop,0,0,0} regardless of what each side's `bound` says -- and, per
-  // the equality check above, disagree about something. If that something
-  // is only the auxiliary bound, keep the shared identity and merge just
-  // that (equal-preserving-else-clear, the same rule the old per-register
-  // ubound array used). This has to be checked before the kTop-as-
-  // identity-element handling below, or two differently-bounded kTops
-  // would take the "adopt whichever side is concrete" branch and one
-  // side's bound would be silently and arbitrarily preferred instead of
-  // merged.
-  if (current.SameIdentity(incoming)) {
-    AbsVal merged = current;
-    merged.ClearBound();
-    return {merged, true, false};
-  }
-  // kTop is the identity element: take whatever the other side knows,
-  // bound included. Only reached once SameIdentity above has ruled out
-  // "both sides are kTop" -- this is the case where the two sides
-  // genuinely differ in kind.
-  if (current.is_top()) {
-    return {incoming, true, false};
-  }
-  if (incoming.is_top()) {
-    return {current, false, false};
-  }
-  // A genuine identity disagreement -- ordinarily a real conflict, but not
-  // when both sides are one of the switch-table resolution kinds, which
-  // no CFI row can ever consult; see IsTableResolutionKind.
-  if (IsTableResolutionKind(current.kind) && IsTableResolutionKind(incoming.kind)) {
-    return {AbsVal::Bottom(), true, false};
-  }
-  return {AbsVal::Bottom(), true, true};
+
+  // Bounds join by max, always, whatever the identity did. An upper bound
+  // that holds on one incoming path and not the other holds nowhere, and
+  // kBoundTop being max's identity is exactly what expresses that -- see
+  // kBoundTop's comment. Doing this after the identity merge (rather than
+  // letting each branch carry its own side's bounds along) is what stops an
+  // adopted kTop or an adopted concrete value from smuggling a bound the
+  // other path never proved.
+  merged.value_bound = std::max(current.value_bound, incoming.value_bound);
+  merged.table_bound = std::max(current.table_bound, incoming.table_bound);
+
+  // Compare against `current` rather than trusting the branch taken: several
+  // of them above can legitimately land back on exactly what was already
+  // there (two kTops that differ only in a bound, say), and reporting that
+  // as a change would requeue the successor for no new information.
+  return {merged, merged != current, real_conflict};
 }
 
 }  // namespace
@@ -201,18 +212,26 @@ bool Join(const AbsState& incoming, AbsState* state, std::vector<JoinConflict>* 
   // above (JoinValue) -- what differs is only how the pair to compare is
   // found: a slot's "top" is represented by absence from the map instead
   // of a stored AbsVal (Slot() already reads a missing key that way), so a
-  // slot named by only one side is top on the other and needs no lookup
-  // through JoinValue to know the identity-element answer (survives
-  // verbatim either way). A slot named by both goes through JoinValue like
-  // any register.
+  // slot named by only one side needs no JoinValue call to know what
+  // happens to its identity. Its *bounds* still have to be joined, which is
+  // why that case is not a plain skip. A slot named by both goes through
+  // JoinValue like any register.
   for (auto it = state->slots.begin(); it != state->slots.end();) {
-    if (it->second.is_bottom()) {
-      ++it;  // already absorbed; JoinValue would agree, no need to ask
-      continue;
-    }
     auto other = incoming.slots.find(it->first);
     if (other == incoming.slots.end()) {
-      ++it;  // incoming is top here; JoinValue(cur, top) == cur, unchanged
+      // Incoming is top here, so the identity survives (top is the identity
+      // element) but the bounds do not: max against kBoundTop is kBoundTop.
+      // Skipping this would let a bound proved on one path alone survive a
+      // merge with a path that never proved it.
+      if (it->second.value_bound != kBoundTop || it->second.table_bound != kBoundTop) {
+        it->second.ClearBounds();
+        changed = true;
+      }
+      ++it;
+      continue;
+    }
+    if (it->second.is_bottom() && it->second.value_bound == kBoundTop && it->second.table_bound == kBoundTop) {
+      ++it;  // already fully absorbed; JoinValue would agree, no need to ask
       continue;
     }
     JoinValueResult result = JoinValue(it->second, other->second);
@@ -227,16 +246,22 @@ bool Join(const AbsState& incoming, AbsState* state, std::vector<JoinConflict>* 
   }
   for (const auto& [offset, val] : incoming.slots) {
     if (state->slots.find(offset) == state->slots.end()) {
-      // state is top here; JoinValue(top, val) == val, changed.
-      state->slots.emplace(offset, val);
+      // state is top here, so val's identity is adopted -- but, exactly as
+      // above, not its bounds: this side never proved them.
+      AbsVal adopted = val;
+      adopted.ClearBounds();
+      state->slots.emplace(offset, adopted);
       changed = true;
     }
   }
 
-  // `last_cmp` is a single fact (there is exactly one EFLAGS), joined the
-  // same equal-preserving-else-clear way `bound` is: it survives only
-  // where both sides agree, since disagreement means the guard does not
-  // actually dominate this point -- some path reaching here never ran it.
+  // `last_cmp` is a single fact (there is exactly one EFLAGS), joined
+  // equal-preserving-else-clear rather than by max the way the bounds are
+  // -- it is not a bound but the raw comparison a guard branch has yet to
+  // interpret, so there is nothing to widen, only to keep or drop. It
+  // survives only where both sides agree, since disagreement means the
+  // guard does not actually dominate this point -- some path reaching here
+  // never ran it.
   // Never the reverse (nullopt adopting a value): `propagate`'s
   // first-sighting case is the only place a pc's *first* contribution is
   // ever recorded, so by the time Join runs here, an already-nullopt

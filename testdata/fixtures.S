@@ -413,6 +413,109 @@ good_switch_table:
         .size   good_switch_table, .-good_switch_table
 
 /* ---------------------------------------------------------------- */
+/*
+ * The other spelling of the same guard, and the harder half of it.
+ *
+ * Two things differ from good_switch_table above. The branch is `jbe`,
+ * which jumps *into* the dispatch rather than away from it, so the bound
+ * belongs to the taken edge and not to the fall-through. And the compare
+ * is on %dil -- eight bits of an argument register, whose upper 56 bits
+ * the psABI leaves undefined -- so nothing lets the guard be promoted to
+ * a fact about %rdi at the branch. It has to ride along as a proven,
+ * width-qualified fact until the `movzbl %dil,%eax` reads exactly the
+ * bits it covered and zero-extends them, which is what makes it a bound
+ * on all of %rax, which is what the table load indexes with.
+ *
+ * Blessed only if all of that works; a lost guard leaves an unresolved
+ * indirect jump and unwalked case bodies instead.
+ */
+        .section .rodata
+        .align  4
+.Lswitch_jbe_table:
+        .long   .Lswitch_jbe_case0-.Lswitch_jbe_table
+        .long   .Lswitch_jbe_case1-.Lswitch_jbe_table
+        .long   .Lswitch_jbe_case2-.Lswitch_jbe_table
+        .text
+
+        .globl  good_switch_table_jbe
+        .type   good_switch_table_jbe, @function
+good_switch_table_jbe:
+        .cfi_startproc
+        subq    $8, %rsp
+        .cfi_def_cfa_offset 16
+        cmpb    $2, %dil
+        jbe     .Lswitch_jbe_dispatch
+        movl    $0, %eax
+        jmp     .Lswitch_jbe_out
+.Lswitch_jbe_dispatch:
+        movzbl  %dil, %eax
+        leaq    .Lswitch_jbe_table(%rip), %rcx
+        movslq  (%rcx,%rax,4), %rdx
+        addq    %rcx, %rdx
+        notrack jmp *%rdx
+.Lswitch_jbe_case0:
+        movl    $10, %eax
+        jmp     .Lswitch_jbe_out
+.Lswitch_jbe_case1:
+        movl    $20, %eax
+        jmp     .Lswitch_jbe_out
+.Lswitch_jbe_case2:
+        movl    $30, %eax
+.Lswitch_jbe_out:
+        addq    $8, %rsp
+        .cfi_def_cfa_offset 8
+        ret
+        .cfi_endproc
+        .size   good_switch_table_jbe, .-good_switch_table_jbe
+
+/* ---------------------------------------------------------------- */
+/*
+ * The strict half of the same fork: `jb` puts the in-range case at
+ * `index < 3`, i.e. a bound of 2, on the taken edge. Getting the
+ * off-by-one wrong here sizes the table at 3 or 1 entries instead of 3,
+ * which shows up as an unwalked case body or a target read past the
+ * table's end.
+ */
+        .section .rodata
+        .align  4
+.Lswitch_jb_table:
+        .long   .Lswitch_jb_case0-.Lswitch_jb_table
+        .long   .Lswitch_jb_case1-.Lswitch_jb_table
+        .long   .Lswitch_jb_case2-.Lswitch_jb_table
+        .text
+
+        .globl  good_switch_table_jb
+        .type   good_switch_table_jb, @function
+good_switch_table_jb:
+        .cfi_startproc
+        subq    $8, %rsp
+        .cfi_def_cfa_offset 16
+        movl    %edi, %eax
+        cmpl    $3, %eax
+        jb      .Lswitch_jb_dispatch
+        movl    $0, %eax
+        jmp     .Lswitch_jb_out
+.Lswitch_jb_dispatch:
+        leaq    .Lswitch_jb_table(%rip), %rcx
+        movslq  (%rcx,%rax,4), %rdx
+        addq    %rcx, %rdx
+        notrack jmp *%rdx
+.Lswitch_jb_case0:
+        movl    $10, %eax
+        jmp     .Lswitch_jb_out
+.Lswitch_jb_case1:
+        movl    $20, %eax
+        jmp     .Lswitch_jb_out
+.Lswitch_jb_case2:
+        movl    $30, %eax
+.Lswitch_jb_out:
+        addq    $8, %rsp
+        .cfi_def_cfa_offset 8
+        ret
+        .cfi_endproc
+        .size   good_switch_table_jb, .-good_switch_table_jb
+
+/* ---------------------------------------------------------------- */
 /* Same shape, but one case body pushes a register without updating the
  * CFI -- the stale CFI this whole feature exists to catch, now reachable
  * only through a resolved switch table. */

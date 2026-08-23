@@ -246,57 +246,120 @@ jump from `foo`. Nothing structural separates them — the linker merges
 use, a convention rather than a guarantee. It matters: a statically linked
 binary has dozens, and each was being accused of an impossible entry row.
 
-**Auxiliary, CFI-irrelevant facts are joined separately from identity, and
-poison to an absorbing state, never to `kTop`.** Two kinds of value ride
-alongside the core CFA-relevant lattice above, existing only to resolve PIC
-switch-table dispatches (§6): `AbsVal::bound`, an unsigned upper bound a
-`cmp $imm,%r; ja default` guard established on a value (any `AbsVal`, not
-just the switch-table kinds — folded directly into `AbsVal` rather than
-kept in a side array, so `ClobberReg`/`SetReg` clear or carry it for free
-just by being whole-value operations); and `AbsState::last_cmp`, the most
-recent `cmp $imm,%reg` seen, tracked forward as one optional fact (there is
-exactly one EFLAGS) and cleared by any later instruction that writes flags
-without matching that pattern — see `InsnSemantics::Transfer`'s
-unconditional EFLAGS check and its `X86_INS_CMP` case. No CFI row ever
-asserts anything about either, so a disagreement between two paths about
-them is lost precision, not the compiler-bug signal `Join` otherwise
-exists to report.
+**Auxiliary, CFI-irrelevant facts are joined separately from identity.**
+Three values ride alongside the core CFA-relevant lattice above, existing
+only to resolve PIC switch-table dispatches (§6). No CFI row ever asserts
+anything about any of them, so a disagreement between two paths about them
+is lost precision, not the compiler-bug signal `Join` otherwise exists to
+report.
 
-Both are joined by the same rule, "equal-preserving-else-poison," expressed
-once as `JoinValue` in `abs-state.cc` and used identically for `gpr` and
-`slots` (previously two independently-written, subtly different loops —
-the `IsTableResolutionKind` carve-out below only existed for registers,
-so a switch-table scratch value that happened to get spilled to the stack
-before two paths disagreed about it produced a spurious, CFI-irrelevant
-`JoinConflict` the register path already avoided). `JoinValue` checks
-`AbsVal::SameIdentity` (same `kind`/`delta`/`reg`/`aux`, deliberately
-ignoring `bound`) *before* treating either side as `kTop`'s identity
-element: two `kTop`s differing only in `bound` are the same identity with
-disagreeing auxiliary data, not "nothing known, adopt whichever side
-concrete" — checking the other way around, table-resolution-kind
-disagreement (e.g. two different `.rodata` constants meeting at a merge
-point) resolves to `kBottom`, not `kTop`, even though nothing gets
-reported. This one matters for real, not just for tidiness: `kTop` is
-`Join`'s identity element, so if a genuine conflict here degraded to it, a
-*third* predecessor arriving later at the same merge point would be
-silently adopted, resurrecting a concrete value after two paths already
-disagreed — a real, order-dependent "undo" of a conflict already found,
-traced and confirmed in this codebase, not hypothetical. `kBottom` is
-absorbing, so once poisoned it stays poisoned regardless of how many more
-predecessors show up.
+* `AbsVal::value_bound` — an inclusive upper bound on the **full 64-bit**
+  value, from any source. Mostly width facts: every write to a 32-bit GPR
+  destination zero-extends on x86-64, so the bare occurrence of one proves
+  the register is at most `0xffffffff`, and `movzbl` proves 255. Its job is
+  proving widths, not sizing tables.
+* `AbsVal::table_bound` — the subset of that established by a
+  `cmp $imm,%r; ja default` guard and nothing else: a bound the *compiler*
+  declared. Only this one may size a switch table. The split is
+  load-bearing rather than tidy: a width fact is honest but useless as a
+  table size (`movzbl` proving an index is at most 255 would resolve a
+  256-entry table out of whatever `.rodata` follows the real one), and a
+  wrong table size sends the walk to wrong targets. Keeping them apart is
+  also what keeps "no compiler-declared bound" a meaningful predicate, and
+  that predicate is what routes an unbounded dispatch to guessing recovery
+  (§6) instead of silently resolving it.
+* `AbsState::last_cmp` — the guard itself, tracked forward as one optional
+  fact (there is exactly one EFLAGS).
 
-The switch-table guard itself used to be found by a 64-hop backward
-byte-walk on demand (`FindGuardBound`, since deleted), independent of the
-joined lattice and therefore with no protection against exactly the
-resurrection bug above, plus real cost: worklist dedup (below) made it
-merely wasteful rather than pathological, but it still re-derived the same
-answer on every reprocessing of a `ja`/`jae`. Tracking it forward as
-`last_cmp` removes the byte-walk, the hop cap, and the `fallthrough_pred`
-bookkeeping entirely, and gets the dominance property for free: a `ja`/`jae`
-reachable from a bypassing predecessor that never ran the `cmp` sees
-`last_cmp` cleared by the same `Join` that clears everything else on
-disagreement, rather than a structural search that had no way to know the
-point it was searching backward from had more than one real predecessor.
+Both bounds are folded into `AbsVal` rather than kept in a side array, so
+`ClobberReg`/`SetReg` clear or carry them for free just by being
+whole-value operations. Both are inclusive, with `~0` (`kBoundTop`) as the
+lattice's top and `0` — "this value is 0" — as its bottom, and **both join
+by `max`**, which is the only thing an upper bound can join by: two paths
+proving `<= 4` and `<= 7` leave `<= 7` standing, and `kBoundTop` being
+max's identity is exactly what makes an unbounded path wipe out the other
+path's bound with no special case. `JoinValue` settles the identity first
+(`AbsVal::SameIdentity`, which deliberately ignores both bounds) and
+applies `max` afterwards regardless of which identity branch ran, so an
+adopted `kTop` or an adopted concrete value cannot smuggle in a bound the
+other path never proved. The same applies to a stack slot only one side
+names: its identity survives, its bounds do not.
+
+`Join` still resolves a genuine identity disagreement between two
+table-resolution kinds to `kBottom` rather than `kTop`, even though nothing
+is reported. `kTop` is `Join`'s identity element, so if a real conflict
+degraded to it, a *third* predecessor arriving later at the same merge
+point would be silently adopted, resurrecting a concrete value after two
+paths already disagreed — a real, order-dependent "undo" of a conflict
+already found, traced and confirmed in this codebase, not hypothetical.
+`kBottom` is absorbing, so once poisoned it stays poisoned.
+
+**A comparison is not a bound; a branch is.** This is the part that was
+wrong for a long time and is worth stating flatly. `cmp $imm,%reg` sets
+flags and establishes nothing whatsoever; `InsnSemantics::Transfer`'s
+`ZYDIS_MNEMONIC_CMP` case only *records* it in `AbsState::last_cmp`. Deriving a
+bound at the `cmp` — which an earlier version did, to rescue narrow
+compares — invents one on the default edge of a switch, or with no branch
+at all. The single place a comparison becomes a fact is
+`ApplyInRangeGuard` in `fde-checker.cc`, on the one branch edge where the
+value is in range: the fall-through for `ja`/`jae`, which branch *away*
+from the table, and the taken edge for `jbe`/`jb`, which branch *into* it.
+
+`last_cmp` is invalidated by two independent things, and both are needed:
+any later EFLAGS write, handled once up front in `Transfer`; and any later
+write to the compared register, handled in `AbsState::SetReg`/`ClobberReg`
+— the only two places a register's value changes, which is what makes them
+the choke point. Without the second, `cmp $5,%eax; mov (%rbx),%rax; ja
+default` bounds whatever landed in rax rather than what was compared.
+(`Join` writes `gpr[]` directly and bypasses both, on purpose: it does its
+own `last_cmp` merge, equal-preserving-else-clear.)
+
+**A guard has two lives, and the `proven` flag says which.** Before a
+branch it is inert. After a branch has selected the in-range edge it is a
+fact about a value — *the low `width_bits` bits of `reg` are at most `imm`*
+— and from then on it survives EFLAGS writes, because flags have nothing to
+do with it any more; only a write to `reg` retires it.
+
+That width qualification is the whole point, and it is what an earlier cut
+of this got backwards. `cmp $0xe,%esi` on an argument register says nothing
+about `rsi`, whose upper half the psABI leaves undefined — but everything
+about the `mov %esi,%eax` two instructions later that reads exactly those
+32 bits and zero-extends them. So there are two ways a guard becomes a
+bound, and both are needed:
+
+1. **Promotion at the branch**, when `value_bound` already proves the
+   register no wider than what was compared (`value_bound <=
+   WidthBound(width)`), or the compare was 64-bit. Then it is a fact about
+   all 64 bits immediately.
+2. **Collection at a widen**, otherwise. The proven guard rides along until
+   a zero- or sign-extending read of at most `width_bits` bits picks it up
+   (`ProvenGuardBound` in `insn-semantics.cc`), and *that* is what makes it
+   a full-register fact — the widen's own zero-extension is the proof.
+   Reading more bits than the guard covered does not qualify.
+
+Both happen: the promotion path does not retire the guard. It cannot,
+because promotion is a decision about the *state*, and the state can weaken
+between visits as more predecessors arrive. Recording the fact in one place
+on the visit that promoted and another on the visit that could not would
+lose it entirely at the join, since `Join` never lets an absent `last_cmp`
+adopt a present one. `libstdc++`'s
+`basic_stringstream` dispatch is exactly this case and regressed to
+`REVIEW` until the guard was kept on both paths. Re-application is
+prevented by `ApplyInRangeGuard` acting only on a guard that is not yet
+proven, not by retiring it.
+
+The switch-table guard used to be found by a 64-hop backward byte-walk on
+demand (`FindGuardBound`, since deleted), independent of the joined lattice
+and therefore with no protection against exactly the resurrection bug
+above, plus real cost: worklist dedup (below) made it merely wasteful
+rather than pathological, but it still re-derived the same answer on every
+reprocessing of a `ja`/`jae`. Tracking it forward as `last_cmp` removes the
+byte-walk, the hop cap, and the `fallthrough_pred` bookkeeping entirely,
+and gets the dominance property for free: a `ja`/`jae` reachable from a
+bypassing predecessor that never ran the `cmp` sees `last_cmp` cleared by
+the same `Join` that clears everything else on disagreement, rather than a
+structural search that had no way to know the point it was searching
+backward from had more than one real predecessor.
 
 ### 4.4 Instruction semantics
 
@@ -308,20 +371,21 @@ close to the same small set objtool, LLVM's `CFIInstrInserter` and Binary
 Ninja's stack tracker each special-case; nobody lifts all of x86-64 for this
 question.
 
-`mov reg,reg` and `movzx reg,reg` both carry a value's `bound` (§4.3) across,
-not just its identity when the destination is a full 64-bit register: a
-narrower destination (`mov %esi,%eax`, `movzbl %al,%ecx`) can't keep the
-source's *identity* in general, but the source's numeric *bound* survives a
-zero-extending widen and both x86-64 write forms zero-extend to the full
-64-bit register, so both carry `Bound()` across explicitly even while
-clobbering everything else. GCC routinely widens a switch-table guard into
-whatever register the table load actually reads, so missing either form
-loses the guard's bound at the merge and turns a resolved table back into an
-unresolved indirect jump — measured directly: an early version of this fix
-only handled `movzx`, and `libstdc++.so.6`'s `regex_error` constructor (a
-plain `mov %esi,%eax` between the guard and the table load) lost its
-resolved dispatch and picked up a spurious `REVIEW` until the same treatment
-was given to narrow `mov`.
+A destination's *identity* survives only a full-width move, but its numeric
+bounds (§4.3) survive any write that covers the whole 64-bit register --
+64-bit explicitly, or 32-bit because x86-64 zero-extends those. That is
+`mov %esi,%eax`, `movzbl %al,%ecx`, `movsbl`, `movslq`: GCC routinely
+widens a guarded switch index into whatever register the table load
+actually reads, so carrying the bounds across is what lets the guard and
+the table load disagree on register without losing the guard. An 8- or
+16-bit destination carries nothing, because `mov %sil,%al` leaves bits
+8..63 of rax alone however tightly bounded `%sil` was. Sign-extending
+forms carry only when `value_bound` proves the source's sign bit clear, so
+that sign- and zero-extension agree.
+
+The source and the guard are read *before* the destination is clobbered:
+`movzbl %al,%eax` is the commonest spelling of the widen and reads the
+register it also writes.
 
 Everything else goes through Zydis's per-operand read/write accounting and
 drops the registers it writes to unknown. An unmodelled instruction therefore
@@ -580,10 +644,32 @@ some path — either a genuine inaccuracy or an artefact of a path this version
 cannot prove unreachable. It is flagged, which is what the contract asks for.
 
 Precision at scale: over a 400-binary sample of `/usr/bin` and
-`/usr/lib/x86_64-linux-gnu` — 41,872 FDEs, 40,932 blessed — there were **zero**
-crashes, hangs or runs over five seconds, and exactly **one** mismatch, which
-was `_start` again. Reproduce with `./robustness-sweep.rb`;
-anything it prints as ABNORMAL is a bug in this tool.
+`/usr/lib/x86_64-linux-gnu` — 669,554 FDEs, 653,986 blessed — there were
+**zero** crashes and zero abnormal exits. Reproduce with
+`./robustness-sweep.rb`; anything it prints as ABNORMAL is a bug in this
+tool. A handful of large binaries (`libLLVM-17.so.1`,
+`libwebkit2gtk-4.1.so.0.21.10`) take 30-40s, which the sweep reports
+separately rather than treating as a failure. Those numbers are about 16%
+higher than they were before the two-bound rework (§4.3) -- the extra
+per-write bound bookkeeping and the two additional max-joins per register
+and slot. That is a known, accepted cost, not a regression to bisect for.
+
+**Pin the binary when comparing runs.** `robustness-sweep.rb` resolves
+`./bazel-bin/unwind-check` on every invocation, so a `bazel test` in
+another window mid-sweep silently swaps it for the dbg build (§2) and the
+timings become meaningless. Copy the opt binary somewhere stable and pass
+it via `BIN=`.
+
+The two-bound rework (§4.3) removed a whole class of **false** mismatches
+along with the fabricated bounds that caused them: a bound invented from a
+bare `cmp` over-sized a switch table, the walk ran past the real table into
+the next thing in `.rodata`, and those junk "targets" were then accused of
+contradicting their own FDEs' CFI. Thirteen of these disappeared from
+`libwebkit2gtk` alone, all of them turning into `REVIEW-LIGHT`; mismatch
+counts on the other 63 binaries with any mismatch at all were byte-identical
+before and after. Wrongly accusing a compiler of a CFI bug is the worst
+output this tool can produce, so that is the single most valuable thing that
+change bought.
 
 Remaining reviews are dominated by indirect jumps that don't resolve to a
 switch table at all (data-driven dispatch, a table shape §4.4's rules don't
@@ -598,8 +684,8 @@ In rough order of value. Most of these remain deliberately out of scope;
 jump tables are the exception — implemented, with one traced-but-unresolved
 correctness question called out below rather than left silent.
 
-* **Jump tables are resolved** (§4.3, §4.4: `AbsVal::bound`/`last_cmp` track the
-  `cmp $imm,%r; ja default` guard, `insn-semantics.cc`'s `movslq`/`add` rules
+* **Jump tables are resolved** (§4.3, §4.4: `AbsVal::table_bound`/`last_cmp`
+  track the `cmp $imm,%r; ja default` guard, `insn-semantics.cc`'s `movslq`/`add` rules
   turn that plus a PIC table-base `lea` into a `kJumpTarget`, and
   `ResolveJumpTable`/`kMaxJumpTableEntries` reads and bounds the table itself)
   — this used to be out of scope; it no longer is. An indirect jump is still a
@@ -609,24 +695,27 @@ correctness question called out below rather than left silent.
   outside the FDE (typically a shared `.cold` case) is checked against
   whatever FDE covers it (§4.6) rather than just noted as unfollowed.
   **What's still a real gap:** whether a jump table gets resolved *at all* is
-  decided from `AbsState.last_cmp`/`.bound` as they stand *during* pass-1
-  dataflow, not from their fully-settled fixed-point value — unlike every
-  other edge in the walk, which is purely structural (never state-dependent)
-  and so trivially reprocessed with the latest state on every visit. A merge
-  point with genuinely disagreeing guards (two different dispatches sharing
-  one table, from different bounds) can, depending on visitation order, have
+  decided from `AbsVal::table_bound` as it stands *during* pass-1 dataflow,
+  not from its fully-settled fixed-point value — unlike every other edge in
+  the walk, which is purely structural (never state-dependent) and so
+  trivially reprocessed with the latest state on every visit. A merge point
+  with genuinely disagreeing guards (two different dispatches sharing one
+  table, from different bounds) can, depending on visitation order, have
   some of its targets resolved-and-walked using a not-yet-final snapshot of
-  the *rest* of the state (not the bound itself, which is provably sound —
-  the register-eventually-clobbered fields around it). Traced at length and
-  believed low-risk in practice — pass 2 always re-derives `has_jump_table`
-  from the truly-final state, so the top-level "is this dispatch flagged"
-  verdict is already order-independent, and a stale snapshot degrades to an
-  over-cautious `REVIEW`, not proven to reach a false `BLESSED` — but not
-  proven safe either, and deliberately not fixed this round: the fix is to
+  the state. Note this is *not* limited to "the fields around the bound":
+  the bound itself is a max-join over an auxiliary lattice, so it too only
+  widens toward its fixed point, and a snapshot taken early is tighter than
+  the final answer. What keeps that from being a soundness hole is that a
+  too-tight bound resolves *fewer* table entries, and the entries not
+  walked show up as an unreached-code `REVIEW` in pass 2 — provided they
+  land inside this FDE. Pass 2 also always re-derives `has_jump_table` from
+  the truly-final state, so the top-level "is this dispatch flagged"
+  verdict is order-independent. Believed low-risk and traced at length, but
+  not proven safe, and deliberately not fixed this round: the fix is to
   make edge-assertion itself a monotone, order-independent function of the
-  accumulating state (e.g. a running max/union of every valid piece of
-  evidence, rather than a snapshot re-evaluation), not a scheduling change —
-  a two-phase "settle everything else, then resolve tables" ordering does
+  accumulating state (e.g. a running union of every valid piece of
+  evidence, rather than a snapshot re-evaluation), not a scheduling change
+  — a two-phase "settle everything else, then resolve tables" ordering does
   not work, because a table's own targets (and exception landing pads) can
   reveal code relevant to *other*, not-yet-resolved dispatches' bounds.
 * **Guessing recovery for unbounded jump tables** (`fde-checker.{h,cc}`:
@@ -634,7 +723,7 @@ correctness question called out below rather than left silent.
   covers a table whose `cmp $imm,%r; ja default` guard was found; this one
   is for an indirect jump whose `kJumpTarget` shape is otherwise fully
   resolved (table base, index register, entry width) but which never had a
-  bound captured at all — `insn-semantics.cc`'s `Transfer` now marks that
+  compiler-declared bound captured at all — `insn-semantics.cc`'s `Transfer` now marks that
   case `has_unbounded_jump_target` instead of folding it into the generic
   "unresolved indirect jump" `REVIEW`.
 
