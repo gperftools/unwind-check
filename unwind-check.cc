@@ -53,6 +53,11 @@ ABSL_FLAG(bool, inspect, false,
           "on PATH.");
 ABSL_FLAG(bool, inspect_deep, false,
           "With --inspect, also show the dataflow's converged abstract state before each instruction.");
+ABSL_FLAG(bool, color, false,
+          "With --inspect, always colorize the listing, whether or not stdout is a tty.");
+ABSL_FLAG(bool, only_mismatch, false, "Only list FDEs with a MISMATCH verdict (the summary line is unaffected).");
+ABSL_FLAG(bool, only_review, false,
+          "Only list FDEs with a REVIEW or REVIEW-LIGHT verdict (the summary line is unaffected).");
 ABSL_FLAG(std::string, addr2line, "auto",
           "'auto' to use addr2line for source lines when the binary has debug info, 'off' to skip it, "
           "or a path to the tool.");
@@ -328,7 +333,7 @@ int Run(const std::string& path, const std::string& ruby_script_path) {
                  name.empty() ? "" : "  ", name, target->signal_frame ? "  (signal frame)" : "");
     fflush(stdout);
 
-    const bool color = isatty(STDOUT_FILENO) != 0;
+    const bool color = absl::GetFlag(FLAGS_color) || isatty(STDOUT_FILENO) != 0;
     absl::StatusOr<FDEResult> inspected = RunInspectPipeline(
         options, *target, function_starts.contains(target->pc_begin), inspect_deep, color, path, ruby_script_path);
     if (!inspected.ok()) {
@@ -391,6 +396,8 @@ int Run(const std::string& path, const std::string& ruby_script_path) {
   ReportOptions report_options;
   report_options.show_blessed = absl::GetFlag(FLAGS_show_blessed);
   report_options.summary_only = absl::GetFlag(FLAGS_summary_only);
+  report_options.only_mismatch = absl::GetFlag(FLAGS_only_mismatch);
+  report_options.only_review = absl::GetFlag(FLAGS_only_review);
   ReportContext report_context;
   report_context.image = &image;
   report_context.disasm = disasm;

@@ -19,6 +19,12 @@ namespace unwind_analysis {
 struct ReportOptions {
   bool show_blessed = false;  // also list blessed FDEs
   bool summary_only = false;  // just the histogram
+  // Restrict the listing (not the trailing summary line) to just this
+  // verdict category. Independent of each other: setting both lists the
+  // union, i.e. everything but blessed (and blessed only if show_blessed
+  // is also on).
+  bool only_mismatch = false;                    // list only kMismatch
+  bool only_review = false;                      // list only kReview / kReviewLight
 };
 
 // Optional: when given, each finding gets a few real instructions of

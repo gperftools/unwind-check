@@ -65,6 +65,26 @@ void PrintOne(const FDEResult& r, Symbolizer* sym, const ReportContext* ctx) {
   }
 }
 
+// Whether `verdict` belongs in the listing, per --show_blessed,
+// --only_mismatch and --only_review. The summary line ignores this --
+// it always covers every FDE.
+bool ShouldList(Verdict verdict, const ReportOptions& options) {
+  if (verdict == Verdict::kBlessed) {
+    return options.show_blessed;
+  }
+  if (!options.only_mismatch && !options.only_review) {
+    return true;
+  }
+  bool listed = false;
+  if (options.only_mismatch) {
+    listed = listed || verdict == Verdict::kMismatch;
+  }
+  if (options.only_review) {
+    listed = listed || verdict == Verdict::kReview || verdict == Verdict::kReviewLight;
+  }
+  return listed;
+}
+
 }  // namespace
 
 Summary Summarize(const std::vector<FDEResult>& results) {
@@ -95,7 +115,7 @@ void PrintReport(const std::vector<FDEResult>& results, Symbolizer* symbolizer, 
     // run rather than one per finding.
     std::vector<uint64_t> interesting;
     for (const FDEResult& r : results) {
-      if (r.verdict == Verdict::kBlessed && !options.show_blessed) {
+      if (!ShouldList(r.verdict, options)) {
         continue;
       }
       interesting.push_back(r.pc_begin);
@@ -114,7 +134,7 @@ void PrintReport(const std::vector<FDEResult>& results, Symbolizer* symbolizer, 
     std::vector<const FDEResult*> ordered;
     ordered.reserve(results.size());
     for (const FDEResult& r : results) {
-      if (r.verdict == Verdict::kBlessed && !options.show_blessed) {
+      if (!ShouldList(r.verdict, options)) {
         continue;
       }
       ordered.push_back(&r);
