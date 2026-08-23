@@ -314,11 +314,21 @@ default` bounds whatever landed in rax rather than what was compared.
 (`Join` writes `gpr[]` directly and bypasses both, on purpose: it does its
 own `last_cmp` merge, equal-preserving-else-clear.)
 
-**A guard has two lives, and the `proven` flag says which.** Before a
-branch it is inert. After a branch has selected the in-range edge it is a
-fact about a value — *the low `width_bits` bits of `reg` are at most `imm`*
-— and from then on it survives EFLAGS writes, because flags have nothing to
-do with it any more; only a write to `reg` retires it.
+**A guard has two lives, and `FlagsGuard::proven_bound` says which one it
+is living.** Before a branch it is inert and that field is `kBoundTop`.
+After a branch has selected the in-range edge it holds the bound
+established there, and the record is a fact about a value — *the low
+`width_bits` bits of `reg` are at most `proven_bound`* — which from then on
+survives EFLAGS writes, because flags have nothing to do with it any more;
+only a write to `reg` retires it.
+
+The comparison's own operand stays in a separate `imm` field and is never
+rewritten. The two cannot share one field: at `cmp` time the bound is not
+yet computable, since `ja`/`jbe` split at `reg <= imm` while `jae`/`jb`
+split at `reg < imm`, and which applies depends on a branch not yet seen.
+So the record genuinely starts as an operand and gains a bound later;
+keeping them apart is what stops either from having to mean both, and
+leaves the diagnostics able to say what a bound was derived from.
 
 That width qualification is the whole point, and it is what an earlier cut
 of this got backwards. `cmp $0xe,%esi` on an argument register says nothing
@@ -342,11 +352,10 @@ because promotion is a decision about the *state*, and the state can weaken
 between visits as more predecessors arrive. Recording the fact in one place
 on the visit that promoted and another on the visit that could not would
 lose it entirely at the join, since `Join` never lets an absent `last_cmp`
-adopt a present one. `libstdc++`'s
-`basic_stringstream` dispatch is exactly this case and regressed to
-`REVIEW` until the guard was kept on both paths. Re-application is
-prevented by `ApplyInRangeGuard` acting only on a guard that is not yet
-proven, not by retiring it.
+adopt a present one. `libstdc++`'s `basic_stringstream` dispatch is exactly
+this case and regressed to `REVIEW` until the guard was kept on both paths.
+Re-application is prevented by `ApplyInRangeGuard` acting only on a guard
+that has no `proven_bound` yet, not by retiring it.
 
 The switch-table guard used to be found by a 64-hop backward byte-walk on
 demand (`FindGuardBound`, since deleted), independent of the joined lattice
@@ -654,11 +663,21 @@ higher than they were before the two-bound rework (§4.3) -- the extra
 per-write bound bookkeeping and the two additional max-joins per register
 and slot. That is a known, accepted cost, not a regression to bisect for.
 
-**Pin the binary when comparing runs.** `robustness-sweep.rb` resolves
-`./bazel-bin/unwind-check` on every invocation, so a `bazel test` in
-another window mid-sweep silently swaps it for the dbg build (§2) and the
-timings become meaningless. Copy the opt binary somewhere stable and pass
-it via `BIN=`.
+**Two traps when comparing two sweep runs**, both of which produce
+plausible-looking nonsense rather than an obvious failure:
+
+* `robustness-sweep.rb` resolves `./bazel-bin/unwind-check` on every
+  invocation, so a `bazel test` in another window mid-sweep silently swaps
+  it for the dbg build (§2). Copy each opt binary somewhere stable and pass
+  it via `BIN=`.
+* The 400-binary sample is a seeded shuffle (`SWEEP_SEED`, default 0) of
+  whatever `candidate_binaries` globs *at that moment*, so installing or
+  removing any package in `/usr/bin` or `/usr/lib/x86_64-linux-gnu`
+  reshuffles the entire selection -- a single `apt install` between two
+  runs changed the sampled corpus from 669,554 FDEs to 741,775 here, which
+  looks exactly like a huge behaviour change. Run both binaries
+  back-to-back, and treat a differing `fdes=` total as proof you compared
+  different corpora rather than as a result.
 
 The two-bound rework (§4.3) removed a whole class of **false** mismatches
 along with the fabricated bounds that caused them: a bound invented from a

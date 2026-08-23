@@ -184,13 +184,13 @@ void ClobberWrittenReg(AbsState* state, ZydisRegister reg, int dwarf_reg) {
 // is what made an earlier version of this invent bounds on the default edge
 // of a switch -- or with no branch at all.
 uint64_t ProvenGuardBound(const AbsState& state, int reg, unsigned read_bits) {
-  if (reg < 0 || !state.last_cmp.has_value() || !state.last_cmp->proven) {
+  if (reg < 0 || !state.last_cmp.has_value() || !state.last_cmp->proven()) {
     return kBoundTop;
   }
   if (state.last_cmp->reg != reg || read_bits > state.last_cmp->width_bits) {
     return kBoundTop;
   }
-  return std::min(WidthBound(read_bits), state.last_cmp->imm);
+  return std::min(WidthBound(read_bits), state.last_cmp->proven_bound);
 }
 
 // The bounds of `src` after a zero-extending widen that keeps its low
@@ -288,7 +288,7 @@ TransferOutcome InsnSemantics::Transfer(const Instruction& insn, AbsState* state
   // Only writing rsi does, which SetReg/ClobberReg handle. Without this
   // exemption any flag-writing instruction between the guard branch and
   // the widen that collects it would throw the guard away.
-  if (WritesEflags(insn) && (!state->last_cmp.has_value() || !state->last_cmp->proven)) {
+  if (WritesEflags(insn) && (!state->last_cmp.has_value() || !state->last_cmp->proven())) {
     state->last_cmp = std::nullopt;
   }
 

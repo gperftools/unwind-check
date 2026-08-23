@@ -379,7 +379,7 @@ TEST_F(SemanticsTest, AProvenGuardIsCashedInByAWiden) {
   // `cmp $9,%al; ja default` on a register nothing proved zero-extended:
   // the guard bounds only the low 8 bits, and `movzbl %al,%ecx` is what
   // turns that into a bound on all of rcx.
-  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, 9, /*proven=*/true};
+  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, /*imm=*/9, /*proven_bound=*/9};
   Run({0x0f, 0xb6, 0xc8});  // movzbl %al,%ecx
   EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, 9u);
   EXPECT_EQ(state_.reg(kDWARFRcx).table_bound, 9u) << "a guard is compiler-declared, so it may size a table";
@@ -389,7 +389,7 @@ TEST_F(SemanticsTest, AProvenGuardIsCashedInWhenSourceAndDestinationAreTheSameRe
   // `movzbl %al,%eax` is the commonest spelling of the widen, and reads the
   // register it also writes -- so the source and the guard both have to be
   // read before the destination is clobbered.
-  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, 9, /*proven=*/true};
+  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, /*imm=*/9, /*proven_bound=*/9};
   Run({0x0f, 0xb6, 0xc0});  // movzbl %al,%eax
   EXPECT_EQ(state_.reg(kDWARFRax).table_bound, 9u);
   EXPECT_FALSE(state_.last_cmp.has_value()) << "the write to rax retires the guard once it has been collected";
@@ -398,7 +398,7 @@ TEST_F(SemanticsTest, AProvenGuardIsCashedInWhenSourceAndDestinationAreTheSameRe
 TEST_F(SemanticsTest, AnUnprovenGuardIsNotCashedIn) {
   // The same shape with no branch having selected an edge. This is the
   // fabrication the old fallback committed.
-  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, 9, /*proven=*/false};
+  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, /*imm=*/9, /*proven_bound=*/kBoundTop};
   Run({0x0f, 0xb6, 0xc8});  // movzbl %al,%ecx
   EXPECT_FALSE(state_.reg(kDWARFRcx).HasTableBound());
   EXPECT_EQ(state_.reg(kDWARFRcx).value_bound, 255u) << "only the load width itself survives";
@@ -407,7 +407,7 @@ TEST_F(SemanticsTest, AnUnprovenGuardIsNotCashedIn) {
 TEST_F(SemanticsTest, AProvenGuardIsNotCashedInByAWiderRead) {
   // A guard on the low 8 bits says nothing about bits 8..31, so a 32-bit
   // read reaches past what was compared.
-  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, 9, /*proven=*/true};
+  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, /*imm=*/9, /*proven_bound=*/9};
   Run({0x48, 0x63, 0xc8});  // movsxd %eax,%rcx
   EXPECT_FALSE(state_.reg(kDWARFRcx).HasTableBound());
 }
@@ -416,14 +416,14 @@ TEST_F(SemanticsTest, AProvenGuardSurvivesAFlagsWritingInstruction) {
   // Once the branch has picked a side, "the low 8 bits of rax are at most 9"
   // is a fact about rax, not about EFLAGS -- and the instructions between
   // the branch and the widen are ordinary code that may well set flags.
-  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, 9, /*proven=*/true};
+  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, /*imm=*/9, /*proven_bound=*/9};
   Run({0x83, 0xc1, 0x01});  // add $1,%ecx -- writes EFLAGS, not rax
   ASSERT_TRUE(state_.last_cmp.has_value());
-  EXPECT_TRUE(state_.last_cmp->proven);
+  EXPECT_TRUE(state_.last_cmp->proven());
 }
 
 TEST_F(SemanticsTest, AProvenGuardDoesNotSurviveAWriteToItsOwnRegister) {
-  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, 9, /*proven=*/true};
+  state_.last_cmp = AbsState::FlagsGuard{kDWARFRax, 8, /*imm=*/9, /*proven_bound=*/9};
   Run({0x48, 0x8b, 0x03});  // mov (%rbx),%rax
   EXPECT_FALSE(state_.last_cmp.has_value());
 }

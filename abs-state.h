@@ -277,18 +277,17 @@ struct AbsState {
     }
   }
 
-  // The `cmp $imm,%reg` guard currently in play. It has two lives, and the
-  // `proven` flag says which one.
+  // The `cmp $imm,%reg` guard currently in play. It has two lives, and
+  // `proven_bound` says which one it is living.
   //
-  // Before a branch (`proven == false`) it is only a comparison: flags were
-  // set, nothing was established. It is inert -- nothing may derive a bound
-  // from it -- and any later EFLAGS write drops it, since the flags no
-  // longer answer for this cmp. That is handled once up front in
-  // InsnSemantics::Transfer.
+  // Before a branch it is only a comparison: flags were set, nothing was
+  // established. It is inert -- nothing may derive a bound from it -- and
+  // any later EFLAGS write drops it, since the flags no longer answer for
+  // this cmp. That is handled once up front in InsnSemantics::Transfer.
   //
-  // After a `ja`/`jae` has selected the in-range edge (`proven == true`,
-  // set in fde-checker's Drain and only on that edge) it is a fact about a
-  // value: the low `width_bits` bits of `reg` are at most `imm`. Flags no
+  // After a branch has selected the in-range edge (in fde-checker's
+  // ApplyInRangeGuard, and only on that edge) it is a fact about a value:
+  // the low `width_bits` bits of `reg` are at most `proven_bound`. Flags no
   // longer matter to it, so an EFLAGS write no longer clears it -- and it
   // has to survive them, because the instructions between the branch and
   // the widen that consumes it are ordinary code.
@@ -310,8 +309,33 @@ struct AbsState {
   struct FlagsGuard {
     int reg = 0;
     uint8_t width_bits = 0;
+    // The comparison's own operand, exactly as decoded. Never rewritten,
+    // so it still says what the bound below was derived from once one
+    // exists -- which is what the diagnostics print.
     uint64_t imm = 0;
-    bool proven = false;
+    // The bound a branch established, or kBoundTop while none has. This
+    // is the `proven` state: kBoundTop means "a comparison happened,
+    // nothing is established yet", anything else means "the low
+    // `width_bits` bits of `reg` are at most this".
+    //
+    // It cannot simply be `imm`, because at `cmp` time the bound is not
+    // yet computable: `ja`/`jbe` split at `reg <= imm` but `jae`/`jb` at
+    // `reg < imm`, and which one applies depends on a branch that has not
+    // been seen. So the record genuinely starts as an operand and gains a
+    // bound later; keeping the two in separate fields is what stops either
+    // from having to mean both.
+    //
+    // A vacuous bound reads as no bound at all (a 64-bit `cmp $-1,%rax`
+    // proves `rax <= kBoundTop`, which constrains nothing) -- the same
+    // collapse the rest of the bound lattice makes.
+    uint64_t proven_bound = kBoundTop;
+
+    // Whether a branch has turned this comparison into a fact about a
+    // value. See proven_bound.
+    bool proven() const {
+      return proven_bound != kBoundTop;
+    }
+
     bool operator==(const FlagsGuard&) const = default;
   };
   std::optional<FlagsGuard> last_cmp;
