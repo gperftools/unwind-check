@@ -31,20 +31,22 @@ def die(msg)
   exit 1
 end
 
+$count = 400
+$jobs = Etc.nprocessors
+$verbose = false
+$full = false
+
 def parse_args(argv)
-  count = 400
-  jobs = Etc.nprocessors
-  verbose = false
   argv.each do |arg|
     case arg
-    when /\A-j(\d+)\z/ then jobs = $1.to_i
-    when '-v' then verbose = true
-    when /\A\d+\z/ then count = arg.to_i
+    when /\A-j(\d+)\z/ then $jobs = $1.to_i
+    when '-v' then $verbose = true
+    when "--full" then $full = true
+    when /\A\d+\z/ then $count = arg.to_i
     else die "unrecognized argument: #{arg}"
     end
   end
-  die '-jN needs N >= 1' if jobs < 1
-  [count, jobs, verbose]
+  die '-jN needs N >= 1' if $jobs < 1
 end
 
 # Candidate binaries, deduped by realpath so the many .so.N -> .so.N.N.N
@@ -74,7 +76,8 @@ Result = Struct.new(:path, :rc, :elapsed_ms, :totals, :abnormal)
 
 def check_binary(path)
   start = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-  out, _err, status = Open3.capture3('timeout', TIMEOUT_SECS.to_s, BIN, '--summary_only', '--addr2line=off', path)
+  args = ['--summary_only', '--addr2line=off', $full ? "--full" : nil, path].compact
+  out, _err, status = Open3.capture3('timeout', TIMEOUT_SECS.to_s, BIN, *args)
   elapsed_ms = ((Process.clock_gettime(Process::CLOCK_MONOTONIC) - start) * 1000).round
   rc = status.exitstatus || -1
 
@@ -87,18 +90,17 @@ def check_binary(path)
   Result.new(path, rc, elapsed_ms, totals, false)
 end
 
-# Runs `jobs` concurrent checks, driven by a pipe-of-tokens: `jobs` bytes
+# Runs `$jobs` concurrent checks, driven by a pipe-of-tokens: `$jobs` bytes
 # are written to a pipe up front (assumed to fit in one write -- true for
 # any sane N against the kernel's default 64KiB pipe capacity). The main
 # thread reads one token per binary before spawning that binary's worker
 # thread, so it blocks (spawning no new thread) once all tokens are
 # checked out, and the worker writes its token back when done. Same
 # trick make's jobserver uses to bound concurrency across independent
-# workers without a shared counter -- and it keeps the thread count itself
-# down to `jobs` instead of one per binary.
-def run_sweep(binaries, jobs, verbose: false)
+# workers without a shared counter.
+def run_sweep(binaries)
   token_read, token_write = IO.pipe
-  token_write.write("\0" * jobs)
+  token_write.write("\0" * $jobs)
 
   print_mutex = Mutex.new
   results = Array.new(binaries.size)
@@ -110,7 +112,7 @@ def run_sweep(binaries, jobs, verbose: false)
         results[i] = r
         if r.abnormal
           print_mutex.synchronize { puts "ABNORMAL rc=#{r.rc} #{r.elapsed_ms}ms #{path}" }
-        elsif verbose
+        elsif $verbose
           t = r.totals
           print_mutex.synchronize do
             puts "#{r.elapsed_ms}ms fdes=#{t.fdes} blessed=#{t.blessed} " \
@@ -131,10 +133,10 @@ end
 def main
   die "no #{BIN}; run: bazel build -c opt :unwind-check" unless File.executable?(BIN)
 
-  count, jobs, verbose = parse_args(ARGV)
-  binaries = candidate_binaries.shuffle(random: Random.new(SEED)).first(count)
+  parse_args(ARGV)
+  binaries = candidate_binaries.shuffle(random: Random.new(SEED)).first($count)
 
-  results = run_sweep(binaries, jobs, verbose: verbose)
+  results = run_sweep(binaries)
 
   abnormal = results.count(&:abnormal)
   totals = results.reject(&:abnormal).reduce(ZERO_TOTALS) { |acc, r| acc + r.totals }
