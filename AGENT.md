@@ -793,100 +793,6 @@ hand-realigned openssl asm -- or no CFA rule stated) and a CFA-defining
 register whose value has gone untracked, both triggering the give-up
 described above.
 
-Measured on this machine (§5's caveat about drift applies here too; §5's own
-per-binary numbers were *not* re-measured in this pass, so a difference
-between a count below and a count in §5 may just mean the system's copy of
-that binary moved on, not that either checker regressed):
-
-| binary | FDEs | light: blessed/review/mismatch | light runtime | full runtime |
-| --- | --- | --- | --- | --- |
-| `/bin/ls` | 341 | 341 / 0 / 0 | <0.01s | ~0.04s |
-| `libc.so.6` | 3919 | 3910 / 7 / 2 | ~0.08s | ~0.6s |
-| `libstdc++.so.6` | 5332 | 5332 / 0 / 0 | ~0.08s | ~0.4s |
-| `/usr/bin/gcc` | 2448 | 2444 / 4 / 0 | ~0.03s | ~0.13s |
-
-These four are all modest-sized inputs, and the full-runtime column
-undersells how much larger the gap gets on a big one: the same 400-binary
-sweep discussed below timed the full checker at 17.5s on `libLLVM-17.so.1`
-(107k FDEs) against the light checker's ~2.7s on the same binary, and at
-10.1s on `cpack`, both far past the roughly 5-10x this table's small
-binaries would suggest -- full's cost grows much more steeply with FDE
-count and function size (dataflow worklist, LSDA, switch-table resolution)
-than light's straight-line pass does. Use the sweep totals, not this table,
-to reason about large binaries.
-
-`libc.so.6`'s 2 mismatches are exactly the ones §5 already discusses
-(`__mpn_addmul_1`, `__mpn_submul_1`), matching the full checker's own output
-address-for-address today. `_start` and `__clone` are blessed via the same
-"RA declared undefined at entry means no unwind from here, so the rest of
-the row does not matter" special case `FDEChecker::Run()` already applies
-(`LightCheck` checks `first_row->regs[kDWARFRip].kind ==
-RegRule::Kind::kUndefined` up front and returns `kBlessed` immediately,
-mirroring `fde-checker.cc`) -- unaffected by the give-up redesign, since
-this check runs before the main loop even starts. Both `/bin/ls` and
-`/usr/bin/gcc` show 0 mismatches for *both* checkers as of this measurement;
-§5 previously documented a mismatch on each of these, which is more likely a
-toolchain/package update moving those binaries out from under an old
-observation than a regression, since the full checker's own output
-(untouched by anything in this section) shows the same 0.
-
-**The review count is not near zero, and should not be described that way
--- own up to what is actually driving it.** An earlier measurement of this
-checker (before the give-up redesign) found the review count collapsing to
-near zero, and that description no longer holds: a full 400-binary sweep
-now finds 518 REVIEW findings (against 258 MISMATCH, and the same 0
-abnormal exits as before). Sampling the highest-review binaries
-(`libLLVM-17.so.1`, `git`, `openSeaChest_Configure`, `libfreerdp-client2`,
-`tkgate`) and categorizing every review message found roughly 85% are the
-"register holds entry `<reg>`, cannot be verified" give-up, another 15% are
-the rbp/rsp carve-out's "not on pop/leave" fallback, and a small remainder
-are unevaluable CFA rules. The dominant shape, concretely: a function
-captures its own rsp (or a frame offset) into a callee-saved register
-*before* a dynamically-sized stack allocation, does the allocation, and
-later restores rsp with a plain `mov %reg,%rsp` -- the standard
-alloca/VLA-cleanup idiom, and not remotely rare in real, unexceptional C and
-C++ code. The compiler's own CFI is exact about this (it declares the exact
-CFA delta the restore produces), but this checker, having no memory of the
-earlier instruction that made that register CFA-relative, sees the restore
-with the register carrying only its own untouched entry-value tag and
-cannot confirm it -- a direct, load-bearing cost of dropping all state
-carrying, not a rare edge case like `swapcontext` below. This is the
-central trade this second design makes: giving up early instead of trying
-to carry state far enough to verify this idiom keeps the checker's logic to
-one small function anyone can read start to finish, at the price of a
-REVIEW on a genuinely common, provably-correct pattern the previous design
-could sometimes verify. Worth knowing before leaning on the review count as
-a signal of anything beyond "this checker's simple model stopped being able
-to follow the code here."
-
-**`swapcontext`, the case that originally motivated the (now-removed)
-carrying machinery, resolved more simply by giving up instead.** glibc's
-`swapcontext` loads a brand-new rsp mid-function from a `ucontext_t` field
-(`mov 0xa0(%rdx),%rsp`), under a CFA row that never changes across the whole
-function -- genuinely unverifiable from that point on, and `FDEChecker`
-itself only ever produces a REVIEW here ("CFA is declared as rsp+8, but rsp
-holds unknown here, so the rule cannot be verified" --
-`RowChecker::CheckCFA`, `fde-checker.cc`), never a MISMATCH, since it
-treats any non-`kCFARel` register value as unverifiable rather than
-guessing at it. An earlier version of this checker, seeding fresh from
-every instruction's own row with no memory of anything earlier, could not
-reproduce that REVIEW at all: it stayed completely silent on the clobbering
-instruction (an untracked value was simply not checked against anything),
-and then, several unrelated instructions later, misread an ordinary `push`
-as a false MISMATCH, because reseeding fresh from the still-unchanged row
-made that push's "before" state trivially restate a row that had already
-stopped describing reality. The carrying machinery built to fix that (see
-this file's git history) is gone now, replaced by something that resolves
-the same case more directly: `CheckCFA` reports the exact same REVIEW
-`RowChecker::CheckCFA` does, right at the clobbering instruction (verified
-directly: `unwind-check --pc=<swapcontext> libc.so.6` now reports `REVIEW`
-with that message at `0x53ed8`), and then gives up on the rest of the FDE --
-so the later `push` is never reached, and the false MISMATCH it used to
-produce cannot occur, without any carrying at all. What carrying used to
-buy -- letting the walk continue *past* an unverifiable point without
-fabricating false certainty -- turned out to be worth less than simply not
-continuing.
-
 **The one binary in 400 that falsifies "alignment padding is always a nop or
 `int3`", still true under the current design and still being left alone
 rather than fixed.** `libffi.so.6.0.4`'s `ffi_closure_unix64` -- a
@@ -918,90 +824,26 @@ does not produce -- so inspecting a light-checker finding by address means
 comparing two different checkers' output for the same FDE. `unwind-check`
 says so on stderr when `--inspect` runs without `--full`.
 
-**A `CHECK` in the loop that looks fragile and is not.** The fallthrough
-branch asserts `CHECK(next_row != nullptr)` immediately after looking up
-the row governing `next_pc`, rather than handling `nullptr` gracefully the
-way the loop's *first* row lookup for a given `pc` does a few lines above
-(`if (row == nullptr) { break; }`). These look like the same defensive
-situation but are not: by the time the `next_row` lookup runs, `row =
-cfi.RowAt(pc)` has already succeeded for this iteration's `pc`, and
-`CFI::RowAt` (`cfi-table.cc`) returns `nullptr` only when `rows` is empty or
-no row's `pc_start` is `<= pc` -- both already disproven by that same
-successful lookup, since the row that covered `pc` necessarily has
-`pc_start <= pc < next_pc` too, and `next_pc < cfi.pc_end` is already
-required to reach this code. So `next_row` cannot be `nullptr` here as a
-matter of `RowAt`'s own logic, not as an assumption about how well-formed
-real CFI data tends to be -- unlike the first lookup, which has no such
-preceding guarantee (a genuinely empty-rows FDE is real and handled
-elsewhere in this file). Confirmed empirically too: a full 400-binary sweep
-against this code produced 0 abnormal exits.
-
 ## 5. Where it stands
 
 Measured with the tool itself (numbers drift a little with the toolchain
 versions installed on whatever machine runs this — treat the shape, not the
-exact digits, as durable):
+exact digits, as durable): ***skipped***
 
-| binary | FDEs | blessed | review | mismatch |
-| --- | --- | --- | --- | --- |
-| `/bin/ls` | 341 | 338 | 2 | 1 |
-| `libc.so.6` | 3919 | 3862 | 54 | 3 |
-| `libstdc++.so.6` | 5332 | 5149 | 183 | 0 |
-| `/usr/bin/gcc` | 2448 | 2295 | 152 | 1 |
-| a `-static` hello world | 1090 | 1055 | 32 | 3 |
+In general, as expected, most FDEs on a typical developer's Debian sid
+system are BLESSED. Some notable exceptions exist. Mainly for code
+compiled with LLVM (2 known issues to be filed). And plenty of
+mismatches for ocaml-compiled native code too. Some mismatches from
+asm codes that wrongly declare FDE and don't update CFI
+directives. Some false positives too, sadly (for the full
+checker). Caused by failures recognize noreturn calls and then despite
+all the intention causing mismatch due to disagrement over tracked
+values/slots.
 
-This table predates guessing recovery (§6): on current binaries some of each
-`review` column now further splits into `review-light`, e.g. `/usr/bin/gcc`
-currently reports 2294 blessed, 3 review-light, 150 review, 1 mismatch —
-still 2448 total, just a few of the old reviews now guessed clean. Shape,
-not exact digits, applies here too.
-
-The Capstone-to-Zydis migration was validated by A/B-diffing both decoders'
-output, on the same machine, over this table's binaries plus the 400-binary
-`robustness-sweep.rb` sample: identical verdict counts everywhere except one
-FDE in `libstdc++.so.6` (`std::from_chars`'s internals), which moved from
-blessed to review. Traced by hand: a local scratch buffer's stack slot
-genuinely overlaps a callee-saved spill slot the CFI still declares live at
-that PC, on one code path — Zydis's decode is not in question, the finding
-is real, and REVIEW (not MISMATCH) is the correct, conservative verdict for
-it. Whether Capstone missed this from a decode gap or some other imprecision
-was not tracked down. `libaom.so.3`, the one binary in the sweep sample over
-robustness-sweep.rb's 5-second slow-flag threshold, is very slightly faster
-under Zydis (~5.7s vs ~6.6s under Capstone) rather than slower.
-
-Review counts here are much lower than earlier versions of this tool. Two
-things did most of it: §4.6's cross-FDE check resolves the majority of what
-used to be an unavoidable REVIEW at every `.cold`-fragment tail call and
-every switch-table case shared across FDEs, verifying them against the
-target's own declared row instead; and, on top of that, exception landing
-pads (§4.5) and switch-table resolution (§4.3, §4.4) closed most of what was
-`libstdc++.so.6`'s outlier-sized review count — it went from 501 reviews to
-183 once landing pads stopped being an unchecked coverage gap by name.
-
-The remaining mismatches are known and were checked by hand; some kinds are
-already listed in `spec/README` as known-bad:
-
-* GMP's hand-written `__mpn_addmul_1` and `__mpn_submul_1` carry no `.cfi_*` at
-  all, so the table still claims `rsp+8` two pushes in.
-* glibc's `__clone` ends its CFI before it is done with the stack.
-* `_start`, which pops the return address while the CIE still says it is on the
-  stack. Real, and harmless: nothing unwinds past `_start`.
-
-`/usr/bin/gcc`'s remaining mismatch is a spill slot the CFI claims holds one
-register but which is reached holding the entry value of a different one on
-some path — either a genuine inaccuracy or an artefact of a path this version
-cannot prove unreachable. It is flagged, which is what the contract asks for.
-
-Precision at scale: over a 400-binary sample of `/usr/bin` and
-`/usr/lib/x86_64-linux-gnu` — 741,775 FDEs, 710,014 blessed, 424 mismatches
-— there were **zero** crashes and zero abnormal exits. Reproduce with
-`./robustness-sweep.rb`; anything it prints as ABNORMAL is a bug in this
-tool. A handful of large binaries (`libLLVM-17.so.1`,
-`libwebkit2gtk-4.1.so.0.21.10`) take 30-40s, which the sweep reports
-separately rather than treating as a failure. Those numbers are about 16%
-higher than they were before the two-bound rework (§4.3) -- the extra
-per-write bound bookkeeping and the two additional max-joins per register
-and slot. That is a known, accepted cost, not a regression to bisect for.
+There is still plenty of issue with discovering switch table
+bounds. Also somewhat common is REVIEW noise caused by "unreached
+instructions" caused by failing to register incoming paths into .cold
+function fragment.
 
 **Two traps when comparing two sweep runs**, both of which produce
 plausible-looking nonsense rather than an obvious failure:
@@ -1019,131 +861,7 @@ plausible-looking nonsense rather than an obvious failure:
   back-to-back, and treat a differing `fdes=` total as proof you compared
   different corpora rather than as a result.
 
-The two-bound rework (§4.3) removed a whole class of **false** mismatches
-along with the fabricated bounds that caused them: a bound invented from a
-bare `cmp` over-sized a switch table, the walk ran past the real table into
-the next thing in `.rodata`, and those junk "targets" were then accused of
-contradicting their own FDEs' CFI. Thirteen of these disappeared from
-`libwebkit2gtk` alone, all of them turning into `REVIEW-LIGHT`; mismatch
-counts on the other 63 binaries with any mismatch at all were byte-identical
-before and after. Wrongly accusing a compiler of a CFI bug is the worst
-output this tool can produce, so that is the single most valuable thing that
-change bought.
-
-Remaining reviews are dominated by indirect jumps that don't resolve to a
-switch table at all (data-driven dispatch, a table shape §4.4's rules don't
-recognise, or a genuinely unbounded dispatch with no guard), a landing pad
-whose call site couldn't be matched and so fell back to trusting its own row
-(§4.5), and jump-out edges whose target has no covering FDE, which still
-fall back to the ABI-based tail-call heuristic (§4.6).
-
 ## 6. Known gaps and what is next
-
-In rough order of value. Most of these remain deliberately out of scope;
-jump tables are the exception — implemented, with one traced-but-unresolved
-correctness question called out below rather than left silent. The first
-entry below is a different kind of item from the rest: not a deliberate
-scope boundary, but a confirmed miss.
-
-* **Jump tables are resolved** (§4.3, §4.4: `AbsVal::table_bound`/`last_cmp`
-  track the `cmp $imm,%r; ja default` guard, `insn-semantics.cc`'s `movslq`/`add` rules
-  turn that plus a PIC table-base `lea` into a `kJumpTarget`, and
-  `ResolveJumpTable`/`kMaxJumpTableEntries` reads and bounds the table itself)
-  — this used to be out of scope; it no longer is. An indirect jump is still a
-  named `REVIEW` when it can't be resolved this way, unless the state at that
-  point already looks like a clean function exit, in which case it's blessed
-  as a probable indirect tail call instead (§4.6). A table entry landing
-  outside the FDE (typically a shared `.cold` case) is checked against
-  whatever FDE covers it (§4.6) rather than just noted as unfollowed.
-  **What's still a real gap:** whether a jump table gets resolved *at all* is
-  decided from `AbsVal::table_bound` as it stands *during* pass-1 dataflow,
-  not from its fully-settled fixed-point value — unlike every other edge in
-  the walk, which is purely structural (never state-dependent) and so
-  trivially reprocessed with the latest state on every visit. A merge point
-  with genuinely disagreeing guards (two different dispatches sharing one
-  table, from different bounds) can, depending on visitation order, have
-  some of its targets resolved-and-walked using a not-yet-final snapshot of
-  the state. Note this is *not* limited to "the fields around the bound":
-  the bound itself is a max-join over an auxiliary lattice, so it too only
-  widens toward its fixed point, and a snapshot taken early is tighter than
-  the final answer. What keeps that from being a soundness hole is that a
-  too-tight bound resolves *fewer* table entries, and the entries not
-  walked show up as an unreached-code `REVIEW` in pass 2 — provided they
-  land inside this FDE. Pass 2 also always re-derives `has_jump_table` from
-  the truly-final state, so the top-level "is this dispatch flagged"
-  verdict is order-independent. Believed low-risk and traced at length, but
-  not proven safe, and deliberately not fixed this round: the fix is to
-  make edge-assertion itself a monotone, order-independent function of the
-  accumulating state (e.g. a running union of every valid piece of
-  evidence, rather than a snapshot re-evaluation), not a scheduling change
-  — a two-phase "settle everything else, then resolve tables" ordering does
-  not work, because a table's own targets (and exception landing pads) can
-  reveal code relevant to *other*, not-yet-resolved dispatches' bounds.
-* **Guessing recovery for unbounded jump tables** (`fde-checker.{h,cc}`:
-  `CheckWithGuessing`, `ProbeJumpTable`, `RowMatchesCleanly`). The bullet above
-  covers a table whose `cmp $imm,%r; ja default` guard was found; this one
-  is for an indirect jump whose `kJumpTarget` shape is otherwise fully
-  resolved (table base, index register, entry width) but which never had a
-  compiler-declared bound captured at all — `insn-semantics.cc`'s `Transfer` now marks that
-  case `has_unbounded_jump_target` instead of folding it into the generic
-  "unresolved indirect jump" `REVIEW`.
-
-  A normal `Check()` run still reports that `REVIEW` (findings are what a
-  human reads), but also counts how many such jumps it saw in
-  `FDEResult::guessable_jump_pc` — populated only when there was **exactly
-  one**, on the theory that guessing across several independent
-  uncertainties in one FDE compounds risk for no proportionate gain.
-  `CheckWithGuessing`, the entry point `unwind-check.cc` and `--inspect`
-  actually call, checks that field and, when set, runs a **second,
-  independent `Check()`** with `guessing_enabled = true`. That run reaches
-  the same jump and, instead of giving up, calls `ProbeJumpTable`: index 0
-  is always worth trying (a known-good table base's first entry), and each
-  subsequent index is trusted only as long as it keeps decoding to a real
-  instruction landing inside some FDE *and* the actual declared CFI row at that
-  target (this FDE's own row if the target lands inside it, otherwise
-  whichever FDE covers it, exactly the in-FDE/cross-FDE split §4.6 already
-  uses for a real resolved table) checked against the state the jump
-  carries, via `RowMatchesCleanly` — a dry run of the same `RowChecker`
-  logic into a scratch sink, so a candidate that will not check out cleanly
-  never pollutes the real report before the guess decides to stop trusting
-  it. The probe stops at the first index that fails either test, or at
-  `kMaxJumpTableEntries`, whichever comes first, and the recovered entries
-  then get walked and verified exactly like any other resolved dispatch.
-
-  `CheckWithGuessing` accepts this second run's result only when it comes
-  back **fully `BLESSED`** — any remaining finding, guessed-table-related
-  or not, means the original `REVIEW` is returned untouched, findings and
-  all. On success, the original result's verdict becomes `REVIEW-LIGHT`
-  and its findings are kept as-is (so a human still sees exactly why the
-  FDE was flagged), with the retry's `guessed_jump_tables` (the guessed
-  entry count and every resolved target address) attached for the report
-  and `--inspect` to show.
-
-  **This is a guess, not a proof**, and deliberately reported as one:
-  nothing in the acceptance test can distinguish "still inside the real
-  table" from "wandered into a second table placed immediately after it in
-  `.rodata`" — a real risk, since back-to-back switch tables are common and
-  a neighboring table's entries are, by construction, also valid-looking
-  code addresses. Checking each candidate's CFI compatibility during the
-  probe (rather than only structural decode-and-lands-in-FDE, which was
-  this feature's first cut) tightens the boundary a lot in practice — a
-  genuinely different dispatch's targets are checked against *this* jump's
-  live register state, which usually will not match — but it is still a
-  heuristic acceptance test, not a guarantee, which is exactly why a
-  successful guess downgrades to `REVIEW-LIGHT` rather than `BLESSED`
-  outright, and why `REVIEW-LIGHT` keeps the original findings visible
-  rather than presenting as a clean pass.
-* **DWARF expressions.** Recorded, never evaluated. A tiny expression
-  interpreter plus the four-state DRAP recogniser from
-  `../backtrace-test/doc/amd64-drap-problem.adoc` — including the known gcc<16
-  missing-`cfi_restore` window — is the next chunk.
-* `.eh_frame_hdr` consistency checking (count, sortedness, entries pointing at
-  the FDEs they claim) is not implemented; only `.eh_frame` itself is checked.
-* aarch64, `.debug_frame`, 64-bit DWARF lengths, CIE versions other than 1.
-* `--format=json` and a suppression baseline.
-* The full `spec/README` corpus as a regression suite: sqlite/speedtest1, the
-  LLVM binaries with the two confirmed clang bugs, glibc `dl_trampoline` and
-  `setcontext`, widevine's realigning code, the openssl perlasm.
 
 Testing gaps: the structural checks (overlapping ranges, non-executable FDE
 ranges) have no test — they are hard to produce with an assembler and are
