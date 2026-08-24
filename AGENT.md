@@ -1,115 +1,77 @@
 # unwind-check
 
-Where things live and why they are the way they are. See `goal.md` for the
-original brief.
+Where things live and why they are the way they are. See `goal.md` for the original brief.
 
 ## 1. What this is
 
-A static checker that takes an x86-64 Linux ELF (executable or `.so`) and asks,
-for every instruction covered by `.eh_frame`, whether the CFI declared there
-matches what the code actually does to the stack.
+A static checker that takes an x86-64 Linux ELF (executable or `.so`) and asks, for every
+instruction covered by `.eh_frame`, whether the CFI declared there matches what the code actually
+does to the stack.
 
-Nothing else does this. `llvm-dwarfdump --verify` never looks at `.eh_frame` at
-all; `readelf -wf` and `llvm-readelf --unwind` are pure dumpers with no verify
-mode, and will not even tell you two FDEs overlap. The bugs this is aimed at are
-catalogued in `../backtrace-test/spec/README`: two confirmed clang CFI bugs
-where a stack adjustment moved but its CFI annotation did not, plus a long tail
-of hand-written assembly with missing or wrong `.cfi_*`.
+Nothing else does this. `llvm-dwarfdump --verify` never looks at `.eh_frame`; `readelf -wf` /
+`llvm-readelf --unwind` are pure dumpers with no verify mode and won't even tell you two FDEs
+overlap. The bugs this targets are catalogued in `../backtrace-test/spec/README`: two confirmed
+clang CFI bugs (a stack adjustment moved but its CFI annotation didn't) plus a long tail of
+hand-written assembly with missing or wrong `.cfi_*`.
 
-**The contract, and it governs every judgement call in here:** bless the easy
-cases, and flag anything else for a human with a diagnostic saying why. There
-are three verdicts, plus one deliberately weaker shade of `REVIEW`:
+**The contract, and it governs every judgement call in here:** bless the easy cases, flag anything
+else for a human with a diagnostic saying why. Silence is never an answer — an unhandled construct
+is a loud `REVIEW`, and code the walk never reached is reported as such, not counted as blessed.
+Four verdicts:
 
 * `BLESSED` — every instruction reached was checked and agreed.
-* `REVIEW` — nothing looked wrong, but something was beyond what this version
-  can analyse. Named explicitly, never silent.
-* `REVIEW-LIGHT` — a `REVIEW` whose sole point of uncertainty was one
-  table-shaped indirect jump with no compiler-declared bound, which guessing
-  then fully recovered (§6, "Guessing recovery for unbounded jump tables").
-  Grouped separately in reports and the summary line, still exits non-zero
-  like any other review, and never a synonym for
-  `BLESSED`: it is only ever reached by falling back to the original
-  `REVIEW`'s own findings, downgraded, when a second, independent analysis
-  guessing the table's size came back completely clean.
+* `REVIEW` — nothing looked wrong, but something was beyond what this version can analyse. Named
+  explicitly.
+* `REVIEW-LIGHT` — a `REVIEW` whose sole point of uncertainty was one table-shaped indirect jump
+  with no compiler-declared bound, fully recovered by guessing (§6). Still exits non-zero; only
+  reached when a second, independent guess at the table size came back completely clean.
 * `MISMATCH` — the CFI contradicts the code.
 
-Silence is never an answer. An unhandled construct is a loud `REVIEW`, and code
-the walk never reached is reported as such rather than counted as blessed.
-
-Exit codes follow: 0 all blessed, 1 a mismatch, 2 review only, 3 the run failed.
+Exit codes: 0 all blessed, 1 a mismatch, 2 review only, 3 the run failed.
 
 ## 2. Build and test
 
 ```
-bazel test :all                              # five test targets, all hermetic
+bazel test :all                              # six test targets, all hermetic
 bazel build -c opt :unwind-check && ./bazel-bin/unwind-check --summary_only /bin/ls
 ```
 
-**Use `-c opt` for anything that runs on a real binary.** A dbg build is slow
-enough that even a single medium binary like `/usr/bin/gcc` can run for
-minutes instead of under a second; `libc.so.6` under dbg is enough to time out
-an interactive session. `bazel test` is fine either way since the fixtures are
-tiny, but `bazel run` / `bazel-bin/unwind-check` against anything real should
-always be `-c opt`.
-
-**Gotcha: `bazel-bin/unwind-check` is one symlink, not one binary.** It points
-at whichever config directory the *most recent* `bazel build`/`bazel test`
-invocation touched. Running `bazel build :all` or `bazel test :all` (no
-`-c opt`) after a `bazel build -c opt :unwind-check` silently repoints
-`bazel-bin/unwind-check` back at the dbg build — the file still runs, just
-30-60x slower, which reads exactly like a hang or a real performance
-regression on something like `libc.so.6` (measured: a run that takes 3.8s
-under opt sat past a 2-minute timeout under the config `bazel test :all` left
-behind). If a real binary suddenly looks like it hung after touching the
-build, re-run `bazel build -c opt :unwind-check` before concluding anything
-about the code — it re-points the symlink even when nothing needed
-recompiling, and costs nothing to run defensively before any timing-sensitive
-check.
+**Use `-c opt` for anything that runs on a real binary** — a dbg build is slow enough that
+`/usr/bin/gcc` can take minutes and `libc.so.6` can time out an interactive session. **Gotcha:**
+`bazel-bin/unwind-check` is one symlink, not one binary — it points at whichever config the *most
+recent* build/test touched, so a plain `bazel test :all` after `bazel build -c opt` silently
+repoints it back to the (30-60x slower) dbg build, which reads exactly like a hang or a perf
+regression. If a real binary suddenly looks hung after touching the build, re-run `bazel build -c
+opt :unwind-check` first.
 
 * `.bazelversion` pins 9.2.0.
-* Disassembly is Zydis, the locally installed `libzydis-dev` (4.1.1 here),
-  linked with a bare `-lZydis -lZycore` and the system include path. No bazel
-  integration, following the same policy `goal.md` set for its predecessor.
-  Started as Capstone; switched to Zydis because Capstone has real gaps on
-  x86 (the TODO's "11 cannot decode the instruction at this address in
-  libcrypto" was one symptom). The formatter is pinned to
-  `ZYDIS_FORMATTER_STYLE_ATT` for diagnostics -- safely, unlike Capstone,
-  where selecting AT&T syntax is known to also reorder the *structured*
-  operand array, not just the printed text, silently breaking anything that
-  assumes operands[0] is the destination. Zydis's formatter is a separate
-  pass over the already-decoded operands, so the style chosen there has no
-  effect on what `Transfer()` sees.
-* abseil comes from the bazel central registry. Unlike backtrace-test, this tool
-  is offline rather than async-signal-safe, so it is free to use exceptions,
-  RAII, allocation and abseil, and it does.
-* C++20, 2-space, 120 cols, `BasedOnStyle: Google`. Emacs mode line on every
-  file; keep them on new ones. Everything is in `namespace unwind_analysis`.
+* Disassembly is Zydis (`libzydis-dev`, system-installed, `-lZydis -lZycore`, no bazel integration
+  — same offline policy `goal.md` set). Formatter is pinned to `ZYDIS_FORMATTER_STYLE_ATT`; unlike
+  Capstone, Zydis's AT&T style is a separate pass over already-decoded operands, so it can't
+  reorder the structured operand array `Transfer()` reads.
+* abseil comes from the bazel central registry. This tool is offline rather than
+  async-signal-safe, so it freely uses exceptions, RAII, allocation, abseil.
+* C++20, 2-space, 120 cols, `BasedOnStyle: Google`. Emacs mode line on every file. Everything is
+  in `namespace unwind_analysis`.
 
-The light checker (§4.9) runs by default; `--full` switches to the
-dataflow-based `FDEChecker` this section otherwise describes.
+The light checker (§4.9) runs by default; `--full` switches to the dataflow-based `FDEChecker`
+(§4.5-§4.6; §4.3-§4.4's lattice and instruction semantics are shared machinery both checkers use).
 
-Useful flags: `--show_blessed` (list blessed FDEs too), `--summary_only`,
-`--function=<regex>`, `--pc=<hex>`, `--dump_cfi` (print the decoded row table
-instead of checking; compare against `readelf --debug-dump=frames-interp`),
-`--addr2line=auto|off|<path>`, `--check_unmentioned_callee_saved`,
-`--report_coverage_gaps`, `--inspect` (requires `--pc`; prints a nice
-disasm+CFI listing of that FDE instead of the summary report -- see below),
-`--inspect_deep` (with `--inspect`, also shows the dataflow's converged
-abstract state before each instruction).
+Useful flags: `--show_blessed`, `--summary_only`, `--function=<regex>`, `--pc=<hex>`, `--dump_cfi`
+(print the decoded row table instead of checking; compare against `readelf
+--debug-dump=frames-interp`), `--addr2line=auto|off|<path>`, `--check_unmentioned_callee_saved`,
+`--report_coverage_gaps`, `--inspect` (requires `--pc`; disasm+CFI listing of one FDE instead of
+the summary), `--inspect_deep` (with `--inspect`, also shows the dataflow's converged abstract
+state before each instruction).
 
-`--inspect` doesn't draw its own disassembly or jump arrows: `diagnostics.cc`
-serializes the declared CFI rows, findings, and (deep mode) converged state as
-JSON and pipes it into `inspect.rb`, which runs `objdump -d
---visualize-jumps` over the same address range and splices our annotations
-into objdump's output by address, right before the line each annotation
-describes. `objdump` already draws jump-arrow gutters and colorizes
-disassembly better than reimplementing that was worth it. `inspect.rb` is a
-Bazel `data` dependency of `unwind-check`, located at runtime via the
-`@rules_cc//cc/runfiles` library; both it and `subprocess.{h,cc}` (a
-`posix_spawn`-based helper used here and by `symbolizer.cc`'s `addr2line`
-invocation, argv-array only, no shell) fail loudly rather than degrade
-silently -- a missing `ruby`/`objdump`, or objdump output the script doesn't
-recognize, is a hard error naming what went wrong.
+`--inspect` serializes declared CFI rows/findings/(deep mode) state as JSON (`diagnostics.cc`) and
+pipes it into `inspect.rb`, which runs `objdump -d --visualize-jumps` over the range and splices
+annotations in by address, reusing objdump's jump-arrow gutters and disasm coloring rather than
+reimplementing them. `inspect.rb` (a Bazel `data` dep, located via `@rules_cc//cc/runfiles`) and
+`subprocess.{h,cc}` (`posix_spawn`-based, argv-array only, no shell — also used by
+`symbolizer.cc`'s addr2line) fail loudly on a missing tool or unrecognized output. `--inspect`
+always runs the full checker regardless of `--full` (needs `CheckWithGuessing`'s `trace_out`,
+which `LightCheck` doesn't produce) — a stderr warning says so.
 
 ## 3. Code map
 
@@ -122,747 +84,351 @@ recognize, is a hard error naming what went wrong.
 | `disasm.{h,cc}` | thin wrapper over a Zydis decoder and AT&T-style formatter |
 | `abs-state.{h,cc}` | the two lattices (CFI and switch-table) and their joins (§4.3) |
 | `insn-semantics.{h,cc}` | the *computed* side: what each instruction does to the stack (§4.4) |
-| `lsda-reader.{h,cc}` | parses `.gcc_except_table`'s call-site table for exception landing pads (§4.5) |
+| `lsda-reader.{h,cc}` | parses `.gcc_except_table`'s call-site table for landing pads (§4.5) |
 | `fde-checker.{h,cc}` | CFG walk, worklist dataflow, and the comparison (§4.5) |
-| `light-checker.{h,cc}` | the second, no-dataflow checker (§4.9); `--full` switches back to `fde-checker` |
+| `light-checker.{h,cc}` | the second, no-dataflow checker (§4.9); default, `--full` switches back |
 | `symbolizer.{h,cc}` | symbol names and source lines (§4.7) |
-| `subprocess.{h,cc}` | `posix_spawn`-based child-process helper, no shell involved |
+| `subprocess.{h,cc}` | `posix_spawn`-based child-process helper, no shell |
 | `report.{h,cc}`, `unwind-check.cc` | flags, structural checks, output |
-| `diagnostics.{h,cc}`, `inspect.rb` | `--inspect`: gathers CFI rows/findings/state as JSON, pipes into `inspect.rb`, which interleaves them into `objdump --visualize-jumps`'s output |
+| `diagnostics.{h,cc}`, `inspect.rb` | `--inspect` JSON + objdump splice (§2) |
 | `testdata/fixtures.S` | hand-written CFI whose right answer is fixed by the fixture |
-| `robustness-sweep.rb` | the non-hermetic counterpart to `bazel test`: does it survive real binaries |
+| `robustness-sweep.rb` | non-hermetic counterpart to `bazel test`: survives real binaries? |
 
 ## 4. How it works
 
 ### 4.1 The fake load
 
-The reader we copied works on **live pointers**: `MakeSlice` does
-`reinterpret_cast<const uint8_t*>(addr)` and takes pcrel bases straight off the
-slice it is reading. Mapping the file raw and handing it file offsets would
-silently corrupt every `pc_begin`, because the `.eh_frame`-to-`.text` delta is
-different in file-offset space than in vaddr space.
+The copied reader works on **live pointers**: it dereferences addresses directly and takes pcrel
+bases off the slice it's reading. Mapping the file raw with file offsets would corrupt every
+`pc_begin`, since the `.eh_frame`-to-`.text` delta differs between file-offset space and vaddr
+space.
 
-So `ELFImage` materialises one address space reservation spanning every
-PT_LOAD's vaddr range, with each segment mmap'd via `MAP_FIXED` at the offset
-its `p_vaddr` asks for. Downstream lives in one consistent address space;
-`bias()` converts back to link-time vaddrs for the report. This is checked
-directly by `elf-image-test.cc`'s `PreservesVaddrDistancesAcrossSections`.
+So `ELFImage` reserves one address space spanning every PT_LOAD's vaddr range, mmapping each
+segment `MAP_FIXED` at its `p_vaddr`. Downstream lives in one consistent address space; `bias()`
+converts back to link-time vaddrs for the report. Checked by `elf-image-test.cc`'s
+`PreservesVaddrDistancesAcrossSections`.
 
 ### 4.2 The copied reader
 
-`eh-frame-reader.h` is `../backtrace-test/eh-frame-reader.h` with two changes,
-both enabled by being offline. Everything else is byte-identical, deliberately,
-so the two can still be diffed.
+`eh-frame-reader.h` is `../backtrace-test/eh-frame-reader.h` with two changes, both enabled by
+being offline — everything else byte-identical, deliberately, so the two can still be diffed:
 
-1. **`Fail` throws `EHFrameError`** instead of taking the `WithExit` non-local
-   exit that runs no destructors. One malformed FDE now costs one report line
-   instead of the process — and the upstream rule that nothing in that file may
-   own anything by RAII does not apply here.
-2. **`EnumerateFDEs`** walks `.eh_frame` linearly. Upstream only ever
-   binary-searches `.eh_frame_hdr` for a single PC, which is all a runtime
-   unwinder needs; a checker wants every entry. `StartFDE` also gained the FDE's
-   PC range, which upstream's visitor never needed.
+1. **`Fail` throws `EHFrameError`** instead of the `WithExit` non-local exit that skips
+   destructors — one malformed FDE now costs one report line, not the process. (Don't reach for
+   `AW_SKIP_EXIT` if resyncing — that turns `Fail` into `__builtin_trap()`, exactly wrong here.)
+2. **`EnumerateFDEs`** walks `.eh_frame` linearly instead of binary-searching `.eh_frame_hdr` for
+   one PC — a checker wants every entry. `StartFDE` also gained the FDE's PC range.
 
-Do **not** reach for the existing `AW_SKIP_EXIT` knob if resyncing: it turns
-`Fail` into `__builtin_trap()`, which is exactly wrong here.
-
-Verified against ground truth: our FDE ranges match `readelf -wf` exactly on
-`/bin/ls`, libc, libstdc++ and gcc (~12,000 FDEs, zero differences), and
-`--dump_cfi` reproduces `readelf --debug-dump=frames-interp` row for row.
+Verified against ground truth: matches `readelf -wf` exactly on `/bin/ls`, libc, libstdc++, gcc
+(~12,000 FDEs, zero diffs); `--dump_cfi` reproduces `readelf --debug-dump=frames-interp` row for
+row.
 
 ### 4.3 The lattice
 
-The anchor: **CFA is defined once as `rsp` on entry plus 8** and never
-redefined. Every tracked value is expressed relative to it, which is what makes
-a declared CFI rule directly checkable instead of something to re-derive.
+**Anchor:** CFA is defined once as `rsp` on entry plus 8 and never redefined. Every tracked value
+is relative to it, which is what makes a declared CFI rule directly checkable instead of something
+to re-derive.
 
-A value is `kTop`, `kBottom`, `kCFARel(delta)`, or `kOrigReg(r)` — "whatever
-DWARF register r held on entry". `kTop` and `kBottom` used to be a single
-conflated `kUnknown`; they are kept apart because they behave oppositely under
-`Join`. `kTop` means *truly unknown* — nothing has been tracked, or precision
-was deliberately dropped (an unmodelled instruction, a clobber) — and is the
-meet's identity element: meeting it with anything yields that thing back.
-`kBottom` means *error/conflict* — two paths each claimed a different concrete
-value — and is absorbing: once a register or slot drops to `kBottom` it stays
-there, rather than a later join quietly overwriting the recorded conflict with
-whatever a third path happens to say. The state is those for the 16 GPRs plus
-a map from CFA-relative stack offset to value; a slot absent from the map
-reads as `kTop`, so `kBottom` must be stored explicitly there while `kTop`
-never is.
+**Two separate lattice types**, same top/bottom shape, different join rules, consulted by
+different code:
 
-`Join` is pointwise, and **reports** what disagreed rather than silently
-widening. `.eh_frame` declares one state per PC, so two edges arriving with
-different values cannot both match the single row there. It is also
-order-independent: joining `a` into a copy of `b` and `b` into a copy of `a`
-land on the same state, which `abs-state-test.cc` checks directly.
+* `AbsVal` (the CFI lattice, what a declared unwind rule is checked against): `kTop` (truly
+  unknown — nothing tracked, or precision deliberately dropped; identity element of `Join`),
+  `kBottom` (error/conflict — two paths claimed different concrete values; absorbing, so a later
+  join can't paper over a recorded conflict), `kCFARel(delta)`, `kOrigReg(r)` ("whatever DWARF
+  register r held on entry"), `kOther` (known, and definitely *not* CFA-relative or any register's
+  entry value — e.g. a rip-relative `lea` result). `kOther` matters because every `RowChecker`
+  test is `is_unknown() -> review, else -> mismatch`: `lea .LC0(%rip),%rbx` where the CFI says rbx
+  is untouched is a real bug (`kOther` vs. declared), while an unmodelled `add %rax,%rbx` is just
+  giving up (`kTop` — regression-tested by `fixtures.S`'s `bad_lea_into_callee_saved`). State: 16
+  GPRs plus a map from CFA-relative stack offset to value; an absent slot reads as `kTop`, so
+  `kBottom` must be stored explicitly.
+* `TableVal` (everything that exists solely to resolve PIC switch-table dispatches, invisible to
+  any CFI rule): `kNone`, `kConflict`, `kConst`, `kTableEntry`, `kJumpTarget`, plus `value_bound`
+  and `table_bound`. `value_bound` is anything provable about a number's width, from any source (a
+  zero-extending widen, a 32-bit write, a guard). `table_bound` is the narrower subset established
+  *only* by a `cmp $imm,%r; ja default` guard — a compiler-declared bound — and only it may size a
+  switch table; a width fact like `movzbl` proving "at most 255" is honest but would resolve a
+  256-entry table out of whatever `.rodata` follows the real one. Both bounds join by `max`, with
+  `kBoundTop` as identity so one unbounded path wipes out another's bound with no special case.
+  `kNone` vs `kConflict` must stay distinct: adopt-from-`kNone` lets an ignorant predecessor
+  destroy a resolved dispatch (loses `/bin/ls`'s main switch immediately), while the reverse lets
+  a third predecessor resurrect an answer after two others already disagreed.
 
-**Seeding is not `Entry()`.** Plenty of FDEs cover a *fragment* of a function —
-cold parts split out of a function, PLT stubs — and start with registers already
-spilled and rsp well below the CFA. `AbsState::SeedFromRow` reads the start
-state off the FDE's own first row. Assuming `Entry()` everywhere produced 28
-false mismatches on `/bin/ls` alone.
+`Join` itself is pointwise and **reports** what disagreed rather than widening silently —
+`.eh_frame` declares one state per PC, so two edges landing there with different values can't both
+be right — and is order-independent (checked in `abs-state-test.cc`).
 
-`SeedFromRow` also takes `at_function_entry`, which decides what an
-*unmentioned* register (`RegRule::Kind::kUnset`, the row saying nothing at
-all) seeds to. At a genuine function entry nothing has executed yet, so
-silence trivially means "still holds what the caller passed in," the same
-fact `Entry()` assumes outright — so it seeds to `kOrigReg(r)`. Anywhere else
-— a `.cold` fragment reached by a jump after the hot part already ran, an
-exception landing pad reached by the unwinder mid-function — the CFI's
-silence only means nothing needed unwinding that register, not that it is
-unchanged, so it seeds to `kTop` instead. An *explicit* `kSameValue` rule is a
-real CFI assertion either way and is always trusted. `FDEChecker` passes
-`false` when it falls back to seeding a landing pad from its own declared
-row (§4.5's fallback path) — the primary path derives a landing pad's state
-from the call site that actually reaches it instead of seeding from the row
-at all, so this only matters for the rarer fallback.
+**Both halves of a register move together.** `SetReg` clears the table half too, so a fresh CFI
+value can't keep a stale table identity; `SetTableReg` stamps `kOther` on the CFI side (a
+`.rodata` pointer is definitionally "not an entry value"); `CopyReg` carries both, for a
+full-width register move only. **Slots hold CFI values only** — a spilled table base/index loses
+its table identity, which the 400-binary sweep shows costs nothing measurable and avoids a second
+slot map and join.
 
-For the FDE's own first row, `FDEChecker` deliberately does **not** pass its
-own `at_function_entry` parameter through here — it passes `is_canonical_entry`
-instead, a structural fact about the row itself (`CFA = rsp+8`, `ra` at
-`[CFA-8]`) rather than a claim from the symbol table. The two sound like they
-should agree, and for a normal, symbolized function they do. But a stripped
-binary — the common case — has no `.symtab`, and dynsym only names exported
-functions: on a stock `/bin/ls` here, 339 of its 341 FDEs carry no symbol at
-all, so `at_function_entry` is false for nearly everything. Seeding on it
-anyway made unmentioned callee-saved registers seed to `kTop` almost
-everywhere, which cascades into a wrong-looking mismatch or review at nearly
-every `ret` — dropping `/bin/ls` from 327/341 blessed to 31/341 in testing.
-`is_canonical_entry` needs no symbol and is sound for the same reason
-`at_function_entry` is: a callee-saved register cannot be clobbered without
-first being spilled, and spilling one requires moving off `CFA = rsp+8` — so
-an unmoved, canonical CFA is itself proof nothing relevant has run yet. The
-one thing this trades away is precision on a genuine entry with a
-*non-canonical* first row (`_dl_runtime_resolve_fxsave` again): such an FDE
-now seeds unmentioned registers to `kTop` rather than their entry value, but
-it already earns its own review below for not looking like an entry, so
-nothing is lost silently.
+**Seeding is not `Entry()`.** Many FDEs cover a *fragment* — cold splits, PLT stubs — starting
+with registers already spilled. `AbsState::SeedFromRow` reads the start state off the FDE's own
+first row instead; assuming `Entry()` everywhere produced 28 false mismatches on `/bin/ls` alone.
 
-Where a function symbol starts the FDE, `FDEChecker` separately notes it if the
-first row is not the canonical `CFA = rsp+8` with `ra` at `[CFA-8]`. That is a
-**review, not a mismatch**, and deliberately so: we cannot prove an FDE is
-entered by a call. glibc's `_dl_runtime_resolve_fxsave` carries a real function
-symbol and legitimately starts at `rsp+24`, because the PLT jumps to it with two
-words already pushed. `unwind-check.cc`'s `IsEntryPointName` additionally drops
-`foo.cold` fragments, which carry real `STT_FUNC` symbols but are reached by a
-jump from `foo`. Nothing structural separates them — the linker merges
-`.text.unlikely` into `.text` — so that one goes by the name GCC and clang both
-use, a convention rather than a guarantee. It matters: a statically linked
-binary has dozens, and each was being accused of an impossible entry row.
+`SeedFromRow` takes `at_function_entry`, deciding what an *unmentioned* register seeds to:
+`kOrigReg(r)` at a genuine entry (silence means "still holds the caller's value"), `kTop`
+elsewhere (a `.cold` fragment or landing pad reached mid-function, where silence just means
+nothing needed unwinding that register). An *explicit* `kSameValue` rule is always trusted either
+way.
 
-**There are two lattices, and they are separate types.** `AbsVal` is the
-CFI lattice: the thing a declared unwind rule is checked against, and the
-only thing `Join` reports disagreements about. `TableVal` is everything
-that exists solely to resolve PIC switch-table dispatches. They used to be
-one struct with seven kinds and two auxiliary bound fields, three of the
-kinds being invisible to every CFI rule; splitting them is what let a pile
-of special cases be deleted rather than relocated.
+For the FDE's own first row, `FDEChecker` uses `is_canonical_entry` instead (`CFA = rsp+8`, `ra`
+at `[CFA-8]` — a structural fact, not a symbol-table claim) — because most FDEs carry no symbol at
+all (339/341 on a stock `/bin/ls`), and seeding on `at_function_entry` there dropped `/bin/ls`
+from 327/341 blessed to 31/341 (unmentioned callee-saved regs seeding to `kTop` almost
+everywhere). A canonical, unmoved CFA is itself proof nothing relevant has run yet, symbol or not
+— at the cost of precision on a genuine entry with a non-canonical first row
+(`_dl_runtime_resolve_fxsave`, entered at `rsp+24` because the PLT already pushed two words),
+which already earns its own review below for not looking like an entry.
 
-`AbsVal` is `kTop`, `kBottom`, `kCFARel(delta)`, `kOrigReg(r)`, `kOther`.
-`TableVal` is `kNone`, `kConflict`, `kConst`, `kTableEntry`, `kJumpTarget`,
-plus the two bounds. Both have the same top/bottom shape, and for the same
-reasons — the identity element must adopt, the give-up state must absorb —
-but they are joined by different rules and consulted by different code.
+Where a function symbol starts the FDE but the first row isn't canonical, that's a **review, not a
+mismatch** — we can't prove an FDE is entered by a call. `IsEntryPointName` also drops `foo.cold`
+fragments (real `STT_FUNC` symbols reached by a jump from `foo`, by naming convention only — the
+linker merges `.text.unlikely` into `.text`, so nothing structural separates them).
 
-**`kOther` is a third state of knowledge, not a synonym for `kTop`.** It
-means "I know what is in this register, and it is definitely not
-CFA-relative and not any register's entry value" — a rip-relative `lea`
-result, typically. Every `RowChecker` test is `is_unknown() -> review, else
--> mismatch`, so the difference is exactly the difference between *could
-not verify* and *verified false*: `lea .LC0(%rip),%rbx` where the CFI says
-rbx is untouched is a real CFI bug, while an unmodelled `add %rax,%rbx` is
-just us giving up. Before the split this state was carried, accidentally,
-by the table kinds themselves — they happened to make `is_unknown()` false.
-Moving those out without naming what they were doing would have silently
-downgraded that whole class of mismatch to review. `bad_lea_into_callee_saved`
-in the fixtures is there to catch exactly that, and it is the only check in
-the suite that does.
+**A comparison is not a bound; a branch is.** `cmp $imm,%reg` only records itself in
+`AbsState::last_cmp`; deriving a bound at the `cmp` invents one on paths where it doesn't apply (a
+switch's default edge, or no branch at all). The only place a comparison becomes a fact is
+`TransferEdge` — a second entry point beside `Transfer`, called by the walker on a per-edge copy
+of the state — on the one branch edge where the value is in range (fall-through for `ja`/`jae`,
+taken edge for `jbe`/`jb`). `last_cmp` is invalidated by any later EFLAGS write (`Transfer`) or
+any later write to the compared register (`SetReg`/`ClobberReg`) — both needed, or `cmp $5,%eax;
+mov (%rbx),%rax; ja default` would bound the wrong value. (`Join` merges `last_cmp` itself:
+equal-preserving-else-clear.)
 
-**The join carve-out is gone, not moved.** `Join` used to need a rule
-saying "two switch-table kinds disagreeing is not a reportable conflict",
-because two unrelated `.rodata` pointers meeting at a merge arrived as two
-different `kConst`s. They now arrive as two `kOther`s, which compare
-*equal*, so there is nothing to report and nothing to suppress. What is
-left is one rule with no exceptions: two CFI values that each name
-something, and name different things, go to `kBottom` and get reported.
-
-`TableVal`'s join reports nothing at all, because nothing in it is a CFI
-claim. Identity is adopt-from-`kNone`, keep-if-equal, else `kConflict`.
-Both bounds join by `max`, which is the only thing an upper bound can join
-by: two paths proving `<= 4` and `<= 7` leave `<= 7` standing, and
-`kBoundTop` being max's identity is what makes an unbounded path wipe out
-the other path's bound with no special case. Identity and bounds are
-settled separately so that giving up on one cannot silently keep the other.
-
-Keeping `kNone` and `kConflict` apart is load-bearing in both directions,
-and getting it wrong is easy: collapsing them into one "nothing here" state
-makes a predecessor that knows nothing *destroy* a resolved dispatch
-instead of being absorbed by it, which loses real switch tables (`/bin/ls`'s
-main dispatch, immediately). Collapsing the other way — letting a
-disagreement land on the identity element — lets a third predecessor
-resurrect a concrete answer after two paths already disagreed.
-
-**The bounds live on `TableVal`.** `value_bound` is everything provable
-about the number, from any source: a zero-extending widen (`movzbl %al,%ecx`
-proves at most 255), the bare fact that an instruction wrote a 32-bit
-register (every such write zero-extends on x86-64), or a guard. Its job is
-proving widths. `table_bound` is the subset established by a
-`cmp $imm,%r; ja default` guard and nothing else — a bound the *compiler*
-declared — and only it may size a switch table. A width fact is honest but
-useless as a table size (`movzbl` proving an index is at most 255 would
-resolve a 256-entry table out of whatever `.rodata` follows the real one),
-and a wrong table size sends the walk to wrong targets. The split also
-keeps `table_bound == kBoundTop` a meaningful "no compiler-declared bound"
-predicate, which is what routes an unbounded dispatch to guessing recovery
-(§6) rather than silently resolving it.
-
-**Both halves of a register always move together.** `AbsState::SetReg`
-clears the table half rather than leaving it alone, so a register that just
-got a new value can never keep a stale table identity or a bound describing
-what used to be there — the mistake this split would otherwise make easy to
-write by accident. `SetTableReg` sets a table value and stamps `kOther` on
-the CFI side, since a `.rodata` pointer is precisely "definitely not an
-entry value". `CopyReg` carries both, for the one case that must: a
-full-width register-to-register move, where a value keeps its identity
-*and* its bounds.
-
-**Slots hold CFI values only.** A table base or index that gets spilled and
-reloaded loses its table identity. This is deliberate, not an oversight:
-the 400-binary sweep shows it costs nothing measurable, and it spares a
-second slot map and a second join. It also dissolves a bug the old design
-had to handle explicitly — a spilled switch scratch value used to produce a
-spurious conflict, which is why the carve-out had to be generalised from
-registers to slots; two spilled table values are now both `kOther`, so they
-simply agree.
-
-**A comparison is not a bound; a branch is.** This is the part that was
-wrong for a long time and is worth stating flatly. `cmp $imm,%reg` sets
-flags and establishes nothing whatsoever; `InsnSemantics::Transfer`'s
-`ZYDIS_MNEMONIC_CMP` case only *records* it in `AbsState::last_cmp`. Deriving a
-bound at the `cmp` — which an earlier version did, to rescue narrow
-compares — invents one on the default edge of a switch, or with no branch
-at all. The single place a comparison becomes a fact is
-`InsnSemantics::TransferEdge`, on the one branch edge where the value is in
-range: the fall-through for `ja`/`jae`, which branch *away* from the table,
-and the taken edge for `jbe`/`jb`, which branch *into* it.
-
-`TransferEdge` is a second entry point alongside `Transfer`, and the split
-is the point: `Transfer` says what an instruction does on *every* path out
-of it, `TransferEdge` what one particular successor additionally proves. A
-conditional branch produces two different successor states and
-`TransferOutcome` has no way to express that, so the walker makes its own
-per-edge copy and calls `TransferEdge` on it. It must not be folded into
-`Transfer`, which runs before the walk knows which successor it is
-building. Keeping it here rather than in the walker is what leaves
-`fde-checker.cc` with exactly one Zydis mnemonic reference (padding
-detection); deciding *which edge means what* is instruction semantics,
-while deciding *which edges exist and where they go* is the walk.
-
-`last_cmp` is invalidated by two independent things, and both are needed:
-any later EFLAGS write, handled once up front in `Transfer`; and any later
-write to the compared register, handled in `AbsState::SetReg`/`ClobberReg`
-— the only two places a register's value changes, which is what makes them
-the choke point. Without the second, `cmp $5,%eax; mov (%rbx),%rax; ja
-default` bounds whatever landed in rax rather than what was compared.
-(`Join` writes `gpr[]` directly and bypasses both, on purpose: it does its
-own `last_cmp` merge, equal-preserving-else-clear.)
-
-**A guard has two lives, and `FlagsGuard::proven_bound` says which one it
-is living.** Before a branch it is inert and that field is `kBoundTop`.
-After a branch has selected the in-range edge it holds the bound
-established there, and the record is a fact about a value — *the low
-`width_bits` bits of `reg` are at most `proven_bound`* — which from then on
-survives EFLAGS writes, because flags have nothing to do with it any more;
-only a write to `reg` retires it.
-
-The comparison's own operand stays in a separate `imm` field and is never
-rewritten. The two cannot share one field: at `cmp` time the bound is not
-yet computable, since `ja`/`jbe` split at `reg <= imm` while `jae`/`jb`
-split at `reg < imm`, and which applies depends on a branch not yet seen.
-So the record genuinely starts as an operand and gains a bound later;
-keeping them apart is what stops either from having to mean both, and
-leaves the diagnostics able to say what a bound was derived from.
-
-That width qualification is the whole point, and it is what an earlier cut
-of this got backwards. `cmp $0xe,%esi` on an argument register says nothing
-about `rsi`, whose upper half the psABI leaves undefined — but everything
-about the `mov %esi,%eax` two instructions later that reads exactly those
-32 bits and zero-extends them. So there are two ways a guard becomes a
-bound, and both are needed:
-
-1. **Promotion at the branch**, when `value_bound` already proves the
-   register no wider than what was compared (`value_bound <=
-   WidthBound(width)`), or the compare was 64-bit. Then it is a fact about
-   all 64 bits immediately.
-2. **Collection at a widen**, otherwise. The proven guard rides along until
-   a zero- or sign-extending read of at most `width_bits` bits picks it up
-   (`ProvenGuardBound` in `insn-semantics.cc`), and *that* is what makes it
-   a full-register fact — the widen's own zero-extension is the proof.
-   Reading more bits than the guard covered does not qualify.
-
-Both happen: the promotion path does not retire the guard. It cannot,
-because promotion is a decision about the *state*, and the state can weaken
-between visits as more predecessors arrive. Recording the fact in one place
-on the visit that promoted and another on the visit that could not would
-lose it entirely at the join, since `Join` never lets an absent `last_cmp`
-adopt a present one. `libstdc++`'s `basic_stringstream` dispatch is exactly
-this case and regressed to `REVIEW` until the guard was kept on both paths.
-Re-application is prevented by `TransferEdge` acting only on a guard that
-has no `proven_bound` yet, not by retiring it.
-
-The switch-table guard used to be found by a 64-hop backward byte-walk on
-demand (`FindGuardBound`, since deleted), independent of the joined lattice
-and therefore with no protection against exactly the resurrection bug
-above, plus real cost: worklist dedup (below) made it merely wasteful
-rather than pathological, but it still re-derived the same answer on every
-reprocessing of a `ja`/`jae`. Tracking it forward as `last_cmp` removes the
-byte-walk, the hop cap, and the `fallthrough_pred` bookkeeping entirely,
-and gets the dominance property for free: a `ja`/`jae` reachable from a
-bypassing predecessor that never ran the `cmp` sees `last_cmp` cleared by
-the same `Join` that clears everything else on disagreement, rather than a
-structural search that had no way to know the point it was searching
-backward from had more than one real predecessor.
+A guard becomes a bound two ways, both needed because of width: `cmp $0xe,%esi` says nothing about
+all of `rsi` (upper half undefined by the psABI) but everything about a later `mov %esi,%eax` that
+reads exactly those 32 bits. (1) **Promotion at the branch**, when `value_bound` already proves
+the register no wider than what was compared, or the compare was 64-bit — immediate full-register
+fact. (2) **Collection at a widen** otherwise: the guard rides along until a zero/sign-extending
+read of at most as many bits picks it up. Promotion doesn't retire the guard, since the state can
+still weaken at a later join and `Join` never lets an absent `last_cmp` adopt a present one — both
+paths must record it (`libstdc++`'s `basic_stringstream` dispatch regressed to `REVIEW` until they
+did). Guard bounds are tracked forward this way rather than found by an on-demand backward
+byte-walk, which gets the dominance property for free (a `ja` reachable from a predecessor that
+skipped the `cmp` just sees `last_cmp` cleared by the ordinary `Join`).
 
 ### 4.4 Instruction semantics
 
-Modelled precisely: `push`/`pop`, `add`/`sub`/`and`/`lea` on rsp/rbp, `mov` to
-and from `[rsp+off]` / `[rbp+off]`, `mov reg,reg`, `movzx reg,reg`, `leave`,
-`call`, `ret`, `jmp`, `jcc`, `cmp $imm,%reg` (only for the `AbsState::last_cmp`
-switch-table guard fact, §4.3 — cmp writes no register or memory). That is
-close to the same small set objtool, LLVM's `CFIInstrInserter` and Binary
-Ninja's stack tracker each special-case; nobody lifts all of x86-64 for this
-question.
+Modelled precisely: `push`/`pop`, `add`/`sub`/`and`/`lea` on rsp/rbp, `mov` to and from
+`[rsp+off]`/`[rbp+off]`, `mov reg,reg`, `movzx reg,reg`, `leave`, `call`, `ret`, `jmp`, `jcc`,
+`cmp $imm,%reg` (only for the switch-table guard fact, §4.3). Close to the same small set objtool,
+LLVM's `CFIInstrInserter`, and Binary Ninja's stack tracker each special-case — nobody lifts all
+of x86-64 for this question.
 
-A destination's *identity* survives only a full-width move, but its numeric
-bounds (§4.3, on the TableVal half) survive any write that covers the whole
-64-bit register --
-64-bit explicitly, or 32-bit because x86-64 zero-extends those. That is
-`mov %esi,%eax`, `movzbl %al,%ecx`, `movsbl`, `movslq`: GCC routinely
-widens a guarded switch index into whatever register the table load
-actually reads, so carrying the bounds across is what lets the guard and
-the table load disagree on register without losing the guard. An 8- or
-16-bit destination carries nothing, because `mov %sil,%al` leaves bits
-8..63 of rax alone however tightly bounded `%sil` was. Sign-extending
-forms carry only when `value_bound` proves the source's sign bit clear, so
-that sign- and zero-extension agree.
+A destination's *identity* survives only a full-width move; its numeric bounds (TableVal half)
+survive any write covering the whole 64-bit register — 64-bit explicit, or 32-bit (x86-64
+zero-extends those): `mov %esi,%eax`, `movzbl`, `movsbl`, `movslq`. An 8/16-bit destination
+carries nothing (`mov %sil,%al` leaves bits 8..63 alone). Sign-extending forms carry only when
+`value_bound` proves the source's sign bit clear. Source and guard are read before the destination
+is clobbered — `movzbl %al,%eax` reads the register it also writes.
 
-The source and the guard are read *before* the destination is clobbered:
-`movzbl %al,%eax` is the commonest spelling of the widen and reads the
-register it also writes.
+Everything else goes through Zydis's per-operand read/write accounting and drops written registers
+to unknown — an unmodelled instruction costs precision, never correctness (`and $-16,%rsp` needs
+no special case: rsp just goes untracked). Two deliberate approximations:
 
-Everything else goes through Zydis's per-operand read/write accounting and
-drops the registers it writes to unknown. An unmodelled instruction therefore
-costs precision, never correctness — including `and $-16,%rsp`, which needs no
-realignment special case: rsp simply becomes untracked, an rbp-based CFA rule
-stays checkable, and an rsp-based one turns into a review note.
-
-Two deliberate approximations, both commented at their definitions:
-
-* **Stores through a base we cannot place are assumed not to alias the frame.**
-  Unsound in principle, and exactly what objtool and `CFIInstrInserter` assume.
-  The alternative drowns the report.
-* **Dropping dead slots spares the 128-byte red zone** (`DropDeadSlots`). GCC
-  routinely leaves a register's `DW_CFA_offset` rule in force after the `pop`
-  that restored it, never emitting `DW_CFA_restore`. That is safe precisely
-  because the kernel honours the red zone. Dropping those slots outright flagged
-  essentially every GCC-compiled function. Calls use `DropSlotsBelow` instead —
-  no red zone survives a call.
+* **Stores through an unplaceable base are assumed not to alias the frame.** Unsound in principle,
+  same assumption objtool and `CFIInstrInserter` make. The alternative drowns the report.
+* **Dropping dead slots spares the 128-byte red zone** (`DropDeadSlots`). GCC routinely leaves a
+  `DW_CFA_offset` rule in force after the `pop` that restored it, relying on the kernel honouring
+  the red zone; not dropping those slots flagged essentially every GCC-compiled function. Calls
+  use `DropSlotsBelow` instead — no red zone survives a call.
 
 ### 4.5 The walk, and the one inference in it
 
-Analysis runs in two passes:
+Two passes: (1) forward worklist dataflow, recursive descent within `[pc_begin, pc_end)` following
+direct branches until the state converges; (2) verification in deterministic (sorted PC) order,
+comparing the declared row against the state *before* the transfer function runs at each address
+(the row at pc describes the state when `RIP == pc`).
 
-1. **Forward dataflow (abstract interpretation):** Recursive descent within
-   `[pc_begin, pc_end)` following direct branches, with a per-instruction
-   worklist dataflow until the state settles across all reachable instructions.
-2. **Verification and reporting:** Once the dataflow has converged to a fixed
-   point, reached instructions are inspected in deterministic (sorted PC) order.
-   At each address the declared CFI row is compared against the settled state
-   **before** the transfer function runs, because the row at pc describes the
-   state when `RIP == pc`.
+**`FallThroughIsReal`.** Falling off an instruction is usually a real edge, but not after a
+noreturn call (`call abort`) or alignment padding before a cold fragment. The CFI settles it, with
+no noreturn-function list: an edge is dropped when a new row starts at the next address, **and**
+either signal says that row belongs to a different block:
 
-The subtle part is `FallThroughIsReal`. Falling off the end of an instruction is
-usually a real edge, but not when the call never returns (`call abort`) or the
-bytes are the alignment nop before a cold fragment. Carrying our state into
-those manufactures contradictions that are not in the binary.
+* **CFA rule check.** Satisfied by neither before- nor after-state means it describes something
+  unrelated. Satisfied only by the after-state is an ordinary edge. Satisfied only by the
+  before-state means the CFI is one instruction late — the bug this tool exists to find — so that
+  edge is taken and reported.
+* **Row shape right after a call.** The CFA test alone is blind to the common case: a call never
+  moves rsp, so an rsp-based CFA rule is trivially satisfied on both sides whether or not the
+  callee returns. A row with no register-save rule beyond `ra` is prologue-shaped — the same shape
+  a real block start has. Seeing that shape appear right after a call, when the row being left had
+  accumulated real rules, means a fresh block starts here (e.g. two `.cold` throw-sites
+  concatenated back to back). Fires only right after a call, and only when the row being left
+  wasn't itself already bare.
 
-The CFI itself settles it, with no list of noreturn functions and no care for
-what the callee is named. An edge is dropped when a new CFI row starts at the
-next address — unrelated code never begins in the middle of a row, and a
-stale-CFI bug can span several instructions, so within one row we must keep
-walking — **and** either of two signals says that row belongs to a different
-block:
+Cost of getting this wrong: a doubly-wrong CFI could be pruned instead of reported, but then shows
+up as an unchecked coverage gap, not a silent pass. Validated against `robustness-sweep.rb`'s
+400-binary sample: the shape check never changed a binary's mismatch count, only reclassified a
+handful of FDEs from `BLESSED` to `REVIEW` (GCC-family binaries calling `internal_error`/
+`fancy_abort`-style helpers). Merge conflicts are `REVIEW`, not `MISMATCH`, and only reported when
+the row at that address actually consults the register/slot that disagreed.
 
-* **The CFA rule.** Satisfied by neither the state before this instruction nor
-  the state after it means the rule describes something unrelated to this
-  instruction. Satisfied by the state *after* is an ordinary edge. Satisfied by
-  the state *before* means the CFI is describing things one instruction late —
-  which is the bug we exist to find, so that edge is taken and reported.
-* **The row's shape, right after a call.** The CFA test alone is blind to the
-  common case: a call never moves `rsp`, so an `rsp`-based CFA rule is
-  trivially satisfied on both sides of any call whether or not the callee
-  returns — `call __cxa_throw` included. A row that carries no register-save
-  rule at all beyond `ra` is the shape of a block that hasn't executed any
-  prologue yet, the same shape a real block start has. Seeing that shape
-  appear immediately after a call, when the row being left had accumulated
-  real rules, means the compiler is declaring a fresh block here rather than
-  continuing this one — e.g. two `.cold` throw-sites concatenated back to
-  back, where the second's prologue-shaped row is only reachable by (falsely)
-  falling out of the first's `call __cxa_throw`. This check only fires right
-  after a call and only when the row being left was *not* itself already
-  bare, so it cannot mistake a genuinely reachable, register-light block for
-  a fresh one.
+**Exception landing pads.** Nothing branches to a landing pad directly — only the unwinder does,
+via the LSDA — so the walk wouldn't find one on its own. `lsda-reader.{h,cc}` parses
+`.gcc_except_table`'s call-site table into `[start,end) -> landing_pad` ranges; when the dataflow
+processes a `call` whose PC falls in one, `Check()` propagates the actual computed post-call state
+(callee-saved/CFA preserved, caller-saved clobbered — the same transfer used for the call's
+fall-through edge) to the pad as a real edge, which doubles as a cross-check that the pad's
+declared row agrees with reality — a stale CFI on the exceptional edge is now a genuine
+`MISMATCH`, not unobservable. Seeding a pad from its own declared row survives only as a fallback
+for an unresolved call site, flagged with its own weaker `REVIEW`.
 
-Cost: a doubly-wrong CFI could be pruned rather than reported. It then shows up
-as an unchecked coverage gap, not as a silent pass. Validated against the
-400-binary sweep (`robustness-sweep.rb`): across a 200-binary sample the shape
-check never changed a binary's mismatch count, only reclassified a handful of
-FDEs from `BLESSED` to `REVIEW` — cases (all in GCC-family binaries, calling
-into `internal_error`/`fancy_abort`-style helpers) where the walk had
-previously been silently blessing dead fallthrough code because nothing in it
-happened to conflict with the stale propagated state.
-
-Merge conflicts are reported as `REVIEW`, not `MISMATCH`, and only when the row
-at that address actually consults the register or slot that disagreed. A
-disagreement the CFI never reads cannot make the row wrong, and this version has
-known reachability gaps, so it reports rather than accuses.
-
-**Exception landing pads.** Nothing in a function body branches to a landing
-pad directly — it's reached only through the unwinder, via the LSDA — so the
-walk above would never find one on its own. `lsda-reader.{h,cc}` parses
-`.gcc_except_table`'s call-site table (`ReadLSDACallSites`) into `[start, end)
-→ landing_pad` ranges; whenever the forward dataflow processes a `call`
-instruction whose PC falls in one of those ranges, `Check()` treats
-the landing pad as a real edge and propagates the *actual computed state
-right after that call* — callee-saved and CFA preserved, caller-saved
-clobbered, the same transfer function already used for the call's own
-fall-through edge, since that's exactly what the unwinder would restore
-before jumping to the pad. This is strictly more precise than an earlier
-version that seeded each pad by trusting its own declared CFI row outright:
-the state now comes from code actually walked, so it doubles as a real
-cross-check that the row agrees with it — a stale CFI specific to the
-exceptional edge is now a genuine `MISMATCH` opportunity, not
-definitionally unobservable. That row-trusting seed survives only as a
-fallback, for a landing pad no call site's range happened to resolve to (an
-unusual encoding, or a call left unreached for an unrelated reason) — used
-rarely, and flagged with its own `REVIEW` when it fires, so it's visibly the
-weaker path rather than silently indistinguishable from a verified one.
-
-Wiring a landing pad in as a real edge means one call site can, in
-principle, feed many different landing pads and one landing pad can be fed
-by many call sites (a shared cleanup block in exception-heavy C++ is
-exactly this shape) — ordinary multi-predecessor `Join`, nothing special.
-What *did* need a real fix: without deduplicating the worklist, several
-predecessors each detecting a change before their shared target is dequeued
-produced duplicate pops that redid decode/`Transfer` work for no new
-information, since the state read out of `in_states` is already fully
-joined by the time any of the duplicate pops run. `propagate`'s
-`pending_pushes` map exists for exactly this — at most one entry per pc
-sits in the worklist at a time — and mattered in practice: a landing pad
-with high call-site fan-in in real C++ (`lib2geom.so.1.4.0`,
-`zutty`) turned sub-second FDEs into 15-50 second ones before the fix.
-(A tempting-looking alternative — batch every call site's contribution to a
-landing pad locally and flush it to the worklist only once, rather than
-deduplicating pushes — was tried first and made no measurable difference;
-the actual cost was the duplicate *pops*, not redundant re-walks of the
-pad's own body, so batching the flush didn't address it. Worklist dedup
-did, and is the simpler fix besides.)
+One call site can feed many pads and vice versa — ordinary `Join`. The worklist must dedup pending
+pushes (`pending_pushes`, at most one entry per pc), or several predecessors detecting a change
+before a shared target is dequeued redo `Transfer` for no new information — a high-fan-in landing
+pad in real C++ (`lib2geom.so.1.4.0`, `zutty`) turned sub-second FDEs into 15-50s ones without
+this.
 
 ### 4.6 Exit-state validation
 
-Everything above checks the declared CFI against the code within one FDE.
-This section is about the edge itself: what happens when an *unconditional*
-direct jump, or a resolved switch-table entry, leaves `[pc_begin, pc_end)`.
+What happens when an *unconditional* jump, or a resolved switch-table entry, leaves `[pc_begin,
+pc_end)`.
 
-**The primary path: check against the target's own declared row.**
-`CheckCrossFDEEdge` (in `fde-checker.cc`) looks
-up whichever checkable FDE covers the jump target and, if one does, compares
-the abstract state at the jump against *that* FDE's declared CFI row at that
-exact PC — the same `RowChecker::Check` used for every ordinary in-FDE
-comparison, unmodified. This works with no coordinate translation, because a
-tail call or a jump into a `.cold` fragment pushes no new frame: the target's
-CFA rule and the source's tracked CFA-relative values describe the same
-physical stack, so `RowChecker::CheckCFA`'s test reduces to "does the target
-row's CFA rule yield the same CFA the source state is already tracking",
-regardless of whose row it is. The one adjustment: when the target row is
-that FDE's own canonical entry (`CFIRow::IsCanonicalEntry`), an unmentioned
-callee-saved register is force-checked as still holding its entry value —
-DWARF's ordinary convention at a genuine call entry, the same one
-`AbsState::SeedFromRow` already applies when seeding that FDE's own analysis
-— so a tail call that clobbers a callee-saved register without restoring it
-is still caught even when the target's body never bothered to say so
-explicitly. This is strictly more precise than guessing at ABI compliance: a
-jump into a `.cold` fragment whose frame is legitimately still half torn down
-now verifies cleanly instead of only earning a REVIEW, and a jump whose state
-actually contradicts the target is a real `MISMATCH`, not a hand-waved
-REVIEW. The same lookup and comparison applies to a resolved switch-table
-entry landing outside the FDE, which is the common way a table dispatches
-into a shared `.cold` case.
+**Primary path: check against the target's own declared row.** `CheckCrossFDEEdge` looks up
+whichever checkable FDE covers the jump target and compares the abstract state at the jump against
+that FDE's declared row there, via the same `RowChecker::Check` used everywhere else. No
+coordinate translation needed — a tail call or jump into a `.cold` fragment pushes no new frame,
+so the target's CFA rule and the source's CFA-relative values describe the same physical stack.
+One adjustment: when the target row is that FDE's own canonical entry, an unmentioned callee-saved
+register is force-checked as still holding its entry value (the same convention `SeedFromRow`
+applies at a real entry), so a tail call that clobbers a callee-saved register without restoring
+it is still caught. Same lookup applies to a resolved switch-table entry landing outside the FDE.
 
-**The fallback: the x86-64 return convention.** `CheckExitState` runs only
-when no checkable FDE covers the target — a jump into a PLT stub (excluded
-from the checkable set even when gnu-ld gives it CFI; lld doesn't) or into
-genuinely uncovered code — and at every `ret`, where there is no "target FDE"
-in the first place. Three things must hold at that point: rsp back at
-`CFA-8`, every callee-saved register still holding its entry value, and the
-return-address slot at `[CFA-8]` still holding what the call originally put
-there. A `ret` that fails any of these is a `MISMATCH` — the ABI is not
-optional. A tail-call jump is softer: rsp not being back at `CFA-8` is only a
-`REVIEW`, because the jump might be an ordinary branch into a noreturn call
-or other uncovered code rather than a real tail call, and in that ambiguous
-case the frame legitimately is not torn down yet. When that ambiguity fires,
-the callee-saved and return-address checks are skipped entirely rather than
-compared against a CFA that may not mean "the frame is gone" here. All three
-checks also degrade to a named `REVIEW` (never silence) when the relevant
-value is untracked rather than concretely wrong, matching the rest of this
-tool's "say why, don't guess" rule.
+**Fallback: the x86-64 return convention.** `CheckExitState` runs only when no checkable FDE
+covers the target (a PLT stub, or genuinely uncovered code), and at every `ret`. Three things must
+hold: rsp back at `CFA-8`, every callee-saved register still at its entry value, and the
+return-address slot at `[CFA-8]` unchanged — a failing `ret` is a non-optional `MISMATCH`. A
+tail-call jump is softer: rsp not back at `CFA-8` is only a `REVIEW` (might be a branch into a
+noreturn call rather than a real tail call), and then the other two checks are skipped entirely.
+All three degrade to a named `REVIEW`, never silence, when the value is untracked rather than
+concretely wrong. Only runs when the FDE's first row was canonical (§4.3) — otherwise there's no
+"should be `CFA-8`" to check, and one review says so instead.
 
-This only runs when the FDE's first row was canonical (see `is_canonical_entry`
-in §4.3) — otherwise there is no "should be `CFA-8`" to check against, and the
-FDE gets one review saying so instead.
-
-**Indirect tail calls.** An unresolved indirect jump (`jmp *%rax`) — one that
-doesn't resolve to a switch table (§4.3, §4.4, §6) — is ordinarily a named
-`REVIEW`. But if the
-state at that jump already looks like a clean exit (rsp at `CFA-8`, every
-callee-saved register at its entry value — see `IsExitState`), it is blessed
-instead, on the theory that this is a virtual call or function-pointer tail
-call rather than an in-function jump table, and whatever it jumps to is
-somebody else's FDE, checked on its own. This is a heuristic, not a proof: a
-small dispatcher function that hasn't touched the stack yet can have exactly
-this shape at a genuine jump-table dispatch, and its case targets would then
-go unwalked without a word at that PC. The safety net is
-`--report_coverage_gaps` (on by default): bytes inside the FDE the walk never
-reached still surface as a `REVIEW` naming the gap, so this can turn a
-specific "unresolved indirect jump" diagnostic into a vaguer "N bytes not
-reached" one, but it cannot turn into a silent, fully wrong `BLESSED` unless
-that flag is turned off, or every one of the jump's real targets happens to
-be reached some other way regardless.
+**Indirect tail calls.** An unresolved indirect jump (`jmp *%rax`) that doesn't resolve to a
+switch table (§4.3/§4.4/§6) is ordinarily a named `REVIEW`. But if the state already looks like a
+clean exit (rsp at `CFA-8`, every callee-saved register at entry value — `IsExitState`), it's
+blessed instead, on the theory that this is a virtual/function-pointer tail call whose target is
+somebody else's FDE, checked on its own. Heuristic, not proof — a dispatcher that hasn't touched
+the stack yet could have this shape at a genuine jump-table dispatch — but
+`--report_coverage_gaps` (on by default) still surfaces unreached bytes as a `REVIEW`, so this
+degrades to a vaguer diagnostic rather than a silent wrong `BLESSED`, unless that flag is off.
 
 ### 4.7 Symbolization
 
-Names come from `.symtab`, or `.dynsym` when there is no `.symtab`, and always
-work. Source lines come from a single batched `addr2line` run over every address
-the report is about to print.
-
-Two things worth knowing. `auto` mode enables addr2line when the binary has
-`.debug_line` **or** `.gnu_debuglink`: a stripped system library has only the
-latter, and following it is how a finding in libc gets reported against
-`sysdeps/x86_64/addmul_1.S:36`. And addr2line's `-f` name is only believed when a
-source line came with it — given no debug info at all it still answers `-f` by
-naming the nearest preceding dynamic symbol, size be damned, which is how every
-one of gcc's 2448 FDEs comes back as `_obstack_newchunk`.
+Names from `.symtab`, or `.dynsym` if absent, always work. Source lines come from one batched
+`addr2line` run over every address about to be printed. `auto` mode enables addr2line when the
+binary has `.debug_line` **or** `.gnu_debuglink` — a stripped system library has only the latter,
+which is how a libc finding gets reported against a real source line. addr2line's `-f` name is
+only trusted when a source line came with it — with no debug info at all it still answers `-f` by
+naming the nearest preceding dynamic symbol regardless of distance, so a bare name alone is not to
+be trusted.
 
 ### 4.8 Structural checks
 
-Before any disassembly, in `unwind-check.cc`: `.eh_frame` must exist; each FDE range
-must be non-empty and inside one executable PT_LOAD; ranges must not overlap.
-Nothing else available reports any of this.
+Before any disassembly, in `unwind-check.cc`: `.eh_frame` must exist; each FDE range must be
+non-empty and inside one executable PT_LOAD; ranges must not overlap. Nothing else available
+reports any of this.
 
-Poor-man's PLT handling lives in the same pass: `ELFImage::InPLT` (`elf-image.{h,cc}`)
-records the vaddr range of every section whose name starts with `.plt` --
-`.plt`, `.plt.got`, `.plt.sec` (the IBT variant), and whatever else a linker
-invents under that prefix -- and any FDE falling entirely inside one is
-skipped and reported blessed without ever reaching `FDEChecker`. These are
-linker-generated stubs, not compiler output with CFI worth second-guessing.
-Sections are optional and this degrades to finding nothing, same as the rest
-of §4.7's symbol handling; a plain `jmp` *into* a PLT stub from ordinary code
-still goes through the regular tail-call exit-state check, unweakened.
+Poor-man's PLT handling in the same pass: `ELFImage::InPLT` records the vaddr range of every
+section named `.plt*`; an FDE falling entirely inside one is skipped and reported blessed without
+reaching `FDEChecker` — linker-generated stubs, not compiler output worth second-guessing. A plain
+`jmp` *into* a PLT stub from ordinary code still goes through the regular tail-call check.
 
 ### 4.9 The light checker
 
-`light-checker.{h,cc}` is a second, much smaller checker behind `LightCheck`,
-selected by default (`--full` switches back to `FDEChecker`/`Check`). It
-exists because two things drove most of what was left of the review count
-and the rare false mismatch on real binaries: switch-table REVIEWs (even
-after §4.3's guessing recovery, a genuinely unbounded or shape-unrecognised
-dispatch is still a REVIEW) and `FallThroughIsReal` mis-guessing a call's
-fallthrough. Rather than tighten those heuristics further, the light checker
-sidesteps the whole machinery that makes them necessary: it runs no
-worklist, no dataflow, resolves no switch table, and follows no LSDA.
+`light-checker.{h,cc}` (`LightCheck`) is a second, much smaller checker, selected by default
+(`--full` switches to `FDEChecker`). Switch-table REVIEWs and `FallThroughIsReal` mis-guesses
+drove most of the remaining review/false-mismatch count; rather than tighten those heuristics
+further, this sidesteps the machinery entirely — no worklist, no dataflow, no switch-table
+resolution, no LSDA.
 
-**The idea, in its current (second) form: reseed completely fresh at every
-single instruction, and give up on the rest of the FDE the moment the CFA
-can no longer be confirmed, rather than try to carry state carefully enough
-to tell a real bug apart from an artifact.** This checker went through an
-earlier, more careful design that carried an `AbsState` forward across
-instructions (within one CFI row, and later within one maximal fallthrough
-run) specifically so a "before" and "after" pair could distinguish a real
-target bug from decoding artifacts. That design worked, but it earned its
-complexity by trying to keep going *through* points where verification had
-genuinely become impossible. The current design instead asks a narrower
-question at every stack-affecting instruction and its target: does
-`AbsState::SeedFromRow` (off the row governing *this* instruction's own
-address, run through exactly one `InsnSemantics::Transfer`) agree with the
-CFA rule at the next instruction (or, for an unconditional `jmp`'s target,
-that row -- possibly in a different FDE via `FDECheckerOptions::all_cfis`,
-the same lookup §4.6 uses)? If the CFA-defining register's value is
-concretely known and disagrees, that is a real, provable MISMATCH. If the
-CFA rule cannot be evaluated at all, or the register it names has gone
-untracked, this checker cannot tell a real bug from its own model's limits
--- so it emits exactly one REVIEW explaining why, and stops checking the
-rest of this FDE entirely (`CheckCFA`'s `bool` return, checked at both call
-sites in `LightCheck`'s loop). Nothing carries between instructions any
-more: there is no "before" to keep honest, because once the checker cannot
-verify something it never asks another question this FDE could get
-fabricated evidence to answer. Decoding itself is *not* gated by any of
-this -- the loop always continues in address order regardless of
-`falls_through` or a give-up, which is what still lets a switch-case body or
-a landing pad get checked at all without ever resolving the dispatch that
-reaches it; only *checking* stops. This is also why a `call`'s own
-fallthrough transition is exempted from the check entirely (documented at
-the exemption's call site) -- a call's `Transfer` never moves rsp, so
-comparing the row before it against the row after it is not "does this
-instruction match its CFI", it is "do two blocks' rows happen to agree",
-and a noreturn call followed by an unrelated fragment's own fresh prologue
+**The idea: reseed completely fresh at every instruction, and give up on the rest of the FDE the
+moment the CFA can no longer be confirmed**, rather than carry state carefully enough to tell a
+real bug from an artifact. At every stack-affecting instruction: does `SeedFromRow` (off the row
+governing *that* instruction, through one `Transfer`) agree with the CFA rule at the next
+instruction (or, for an unconditional `jmp`, the target row — possibly a different FDE via
+`all_cfis`, same lookup as §4.6)? Concretely known and disagreeing → real `MISMATCH`. CFA rule
+unevaluable, or its register gone untracked → one `REVIEW` explaining why, and stop checking the
+rest of this FDE (`CheckCFA`'s `bool` return). Decoding always continues in address order
+regardless — which is what still lets a switch-case body or landing pad get decoded without
+resolving the dispatch that reaches it; only *checking* stops. A call's own fall-through
+transition is exempt from the check entirely — `Transfer` never moves rsp across a call, so
+comparing rows before/after it is "do two blocks' rows happen to agree," not "does this
+instruction match its CFI," and a noreturn call followed by an unrelated fragment's fresh prologue
 is exactly the case where they need not.
 
-Straight-line decode turns out to need no CFG discovery, and to be strictly
-*more* complete than the full checker's walk in one respect: a landing pad
-or a switch case body is just more bytes in `[pc_begin, pc_end)`, so it gets
-decoded (though not necessarily *checked*, if an earlier give-up already
-ended this FDE's checking) without any LSDA parsing or table resolution at
-all -- the price is that the dispatch instruction itself (indirect jump, or
-a switch-table's `jmp *table(,%rax,8)`) is simply unchecked, silently,
-rather than resolved or reviewed.
+**Two narrow carve-outs on top of "give up":**
 
-**Two narrow carve-outs on top of "give up," both needed because giving up
-is too coarse in one specific, common place.** Once a function's CFA anchor
-switches from rsp to rbp (the standard `push %rbp; mov %rsp,%rbp` prologue),
-`AbsState::SeedFromRow` unconditionally sets rsp to untracked for every
-instruction governed by that row (`abs-state.cc`: rsp is reset to `Top()`
-whenever it is not itself the row's CFA register, before the CFA register's
-own value is pinned) -- DWARF genuinely does not say where rsp is once it
-stops being the CFA register, so this is not a modelling gap, it is a real
-limit of what CFI declares. That makes the transition back out of an
-rbp-based frame -- `pop %rbp` alone, or the equivalent single `leave` -- a
-guaranteed "give up" under the plain rule above, on essentially every
-frame-pointer function in existence. Checked directly against
-`insn-semantics.cc`: `leave` actually derives rsp correctly on its own (it
-copies rbp's already-known value into rsp before adjusting it, so it would
-have verified cleanly even without a carve-out); `pop %rbp` alone does not
-(`POP`'s `Transfer` only updates rsp when rsp's own *current* tracked value
-is already `kCFARel`, which it never is here), so it is the one genuinely
-unverifiable case. `LightCheck`'s loop special-cases exactly this
-transition (`row->cfa == RegOffset(rbp, 16) && next_row->cfa ==
-RegOffset(rsp, 8)`): blessed silently if the instruction is `pop %rbp` or
-`leave`, and a REVIEW -- without a give-up, since this is a narrow pattern
-mismatch rather than a genuine loss of tracking -- if it is neither, since a
-CFI update to this exact transition landing on some other instruction would
-be worth a look. A second, broader carve-out silently skips the check
-whenever the instruction is a `nop`, on the observation that a `nop` is
-sometimes where a compiler places what is really the effect of the previous
-`ret` becoming visible in the row table, a placement quirk rather than a
-provable bug; this one does not attempt to characterize *which* transition
-is happening the way the rbp/rsp carve-out does, so it is more permissive,
-and worth another look if it is ever found to be hiding something.
+* Once CFA anchor is rbp, `SeedFromRow` unconditionally sets rsp untracked for every instruction
+  under that row (DWARF genuinely doesn't say where rsp is once it stops being the CFA register).
+  That makes the transition back out of an rbp frame (`pop %rbp` alone, or `leave`) a guaranteed
+  give-up under the plain rule, on essentially every frame-pointer function. `leave` actually
+  derives rsp correctly on its own; bare `pop %rbp` doesn't (`POP`'s `Transfer` only updates rsp
+  if rsp is already `kCFARel`, never true here). So `LightCheck` special-cases exactly this
+  transition (`row->cfa == RegOffset(rbp,16) && next_row->cfa == RegOffset(rsp,8)`): silently
+  blessed for `pop %rbp` or `leave`, a `REVIEW` (a shape mismatch, not lost tracking) otherwise.
+* A `nop` is silently skipped — sometimes where a compiler places what's really the previous
+  `ret`'s effect becoming visible in the row table, a placement quirk rather than a provable bug.
 
-**Scope, deliberately narrow, and narrower than an earlier version of this
-checker.** This checker verifies exactly one thing: the CFA rule, as
-described above. A second check used to exist here -- a purely positional
-check (`CheckSavedRegisterSlots`) that a `push` or a memory-destination
-`mov` wrote the register the CFI newly attributes to an offset, reusing
-`insn-semantics.cc`'s existing slot-tracking with no new logic of its own --
-and it was removed. The reason is the same "give up rather than carry
-carefully" trade this section's redesign made everywhere else: compilers
-routinely group the CFI updates that declare *where* a callee-saved
-register is now recoverable well after the `push`/store that actually put
-it there (to avoid emitting an `advance_loc`/`offset` pair for every single
-save), so verifying a save correctly needs to remember what a register held
-several instructions -- sometimes across a whole prologue -- before the row
-that names it. That is dataflow, or at least state carried further than
-this design now carries anything, and doing it *without* dataflow risked
-exactly the false positive this checker's own history already produced once
-(see the "mov %reg,%rsp" idiom two paragraphs below) for a different check.
-Rather than rebuild carrying machinery to support one narrow, unproven
-check, it was dropped. (For context: across the 400-binary sweep this
-checker was validated against before removal, it never once caught a real
-bug -- its only observed firing on real code was itself a false positive,
-an artifact of a stray tag surviving a jump into unrelated code. It did
-catch `testdata/fixtures.S`'s `bad_wrong_register_saved` fixture, and was
-cheap, but its removal cost nothing this project has evidence for.)
+**Scope is deliberately narrow: only the CFA rule is checked.** No callee-saved-at-`ret`
+convention, no ABI tail-call fallback (§4.6), no `check_unmentioned_callee_saved`, no
+saved-register-slot verification. A positional check of *which* register a `push`/store wrote —
+matching what the CFI newly attributes to that offset — was tried and removed: compilers routinely
+group the CFI updates announcing a save well after the instruction that performed it, so verifying
+it needs remembering state across a whole prologue, i.e. dataflow, the exact complexity this
+design avoids. Across the 400-binary sweep it never caught a real bug (its one real-code firing
+was itself a false positive), so nothing was lost by dropping it. `Verdict::kReviewLight` is never
+produced here (no guessing recovery attempted, §6); `Verdict::kReview` covers an unevaluable CFA
+rule (`DW_CFA_def_cfa_expression` — DRAP, hand-realigned openssl asm — or none stated) and a
+CFA-defining register gone untracked.
 
-Nothing else is checked: no callee-saved-register-at-`ret` convention, no
-ABI-based tail-call fallback (§4.6's `CheckExitState`), no
-`check_unmentioned_callee_saved`, no saved-register-slot verification (see
-above). `Verdict::kReviewLight` is never produced
-(`FDEResult::guessable_jump_pc`/`guessed_jump_tables` are always left unset --
-this checker never attempts guessing recovery); `Verdict::kReview` covers
-both an unevaluable CFA rule (`DW_CFA_def_cfa_expression` -- DRAP, some
-hand-realigned openssl asm -- or no CFA rule stated) and a CFA-defining
-register whose value has gone untracked, both triggering the give-up
-described above.
-
-**The one binary in 400 that falsifies "alignment padding is always a nop or
-`int3`", still true under the current design and still being left alone
-rather than fixed.** `libffi.so.6.0.4`'s `ffi_closure_unix64` -- a
-hand-written libffi trampoline, not compiler output -- ends its dispatch
-with `jmp %r10` (an unresolved indirect branch, `outcome.falls_through =
-false` correctly, so nothing is checked at the `jmp` itself), immediately
-followed *in the same FDE, inline* by what is actually jump-table data, not
-padding. Decoding always continues in address order regardless of
-`falls_through` (see "the idea" above -- this is what still lets a
-switch-case body get checked without resolving its dispatch), so it walks
-straight into that data; some of it happens to disassemble as a
-plausible-looking `pop %rsi`, which `SeedFromRow` -- reseeding fresh, as it
-now always does, straight from the still-declared `cfa=rsp+8` row -- pins
-rsp to match before the "pop" then genuinely (if meaninglessly) moves it
-away, producing a real disagreement against the same unchanging row.
-Nothing about the give-up redesign changes this: there is no stray carried
-state to blame any more, only a row that is still correct about real code
-and wrong about the four bytes of jump-table data sitting where this
-checker expects the next instruction. A real fix -- stopping decode (or
-suppressing checks) after any `falls_through == false` instruction until
-the next declared row -- would also blind this checker to every
-switch-case body and cold fragment reached only by a jump, which is the
-design's whole reason to exist; the tradeoff is not worth one hand-written
-trampoline in 400 real binaries. Left as a known, accepted false positive.
-
-`--inspect` always runs the full checker regardless of `--full` -- it needs
-`CheckWithGuessing`'s `trace_out` for `--inspect_deep`, which `LightCheck`
-does not produce -- so inspecting a light-checker finding by address means
-comparing two different checkers' output for the same FDE. `unwind-check`
-says so on stderr when `--inspect` runs without `--full`.
+**Known accepted false positive:** `libffi.so.6.0.4`'s hand-written `ffi_closure_unix64`
+trampoline ends its dispatch with `jmp %r10` (correctly unchecked) immediately followed, in the
+same FDE, by jump-table data rather than padding. Decode always continues in address order (needed
+so switch-case bodies still get decoded), walks into that data, and some of it disassembles as a
+plausible `pop %rsi` that disagrees with the still-correct governing row. A real fix — stopping
+decode at any non-fallthrough instruction — would also blind this checker to switch-case bodies
+reached only by a jump, so it's left alone for one trampoline in 400 binaries.
 
 ## 5. Where it stands
 
-Measured with the tool itself (numbers drift a little with the toolchain
-versions installed on whatever machine runs this — treat the shape, not the
-exact digits, as durable): ***skipped***
+Numbers drift with toolchain versions; treat the shape, not exact digits, as durable. Most FDEs on
+a typical Debian sid system are `BLESSED`. Known exceptions: LLVM-compiled code (2 known issues to
+file), OCaml native code mismatches, hand-written asm that declares an FDE but never updates CFI,
+and some full-checker false positives from noreturn-call misrecognition cascading into
+tracked-value disagreements. Switch-table bound discovery is still the main gap; also common is
+`REVIEW` noise from unreached instructions where an incoming path into a `.cold` fragment wasn't
+registered.
 
-In general, as expected, most FDEs on a typical developer's Debian sid
-system are BLESSED. Some notable exceptions exist. Mainly for code
-compiled with LLVM (2 known issues to be filed). And plenty of
-mismatches for ocaml-compiled native code too. Some mismatches from
-asm codes that wrongly declare FDE and don't update CFI
-directives. Some false positives too, sadly (for the full
-checker). Caused by failures recognize noreturn calls and then despite
-all the intention causing mismatch due to disagrement over tracked
-values/slots.
+**Two traps when comparing two sweep runs** (both plausible-looking, not an obvious failure):
 
-There is still plenty of issue with discovering switch table
-bounds. Also somewhat common is REVIEW noise caused by "unreached
-instructions" caused by failing to register incoming paths into .cold
-function fragment.
-
-**Two traps when comparing two sweep runs**, both of which produce
-plausible-looking nonsense rather than an obvious failure:
-
-* `robustness-sweep.rb` resolves `./bazel-bin/unwind-check` on every
-  invocation, so a `bazel test` in another window mid-sweep silently swaps
-  it for the dbg build (§2). Copy each opt binary somewhere stable and pass
-  it via `BIN=`.
-* The 400-binary sample is a seeded shuffle (`SWEEP_SEED`, default 0) of
-  whatever `candidate_binaries` globs *at that moment*, so installing or
-  removing any package in `/usr/bin` or `/usr/lib/x86_64-linux-gnu`
-  reshuffles the entire selection -- a single `apt install` between two
-  runs changed the sampled corpus from 669,554 FDEs to 741,775 here, which
-  looks exactly like a huge behaviour change. Run both binaries
-  back-to-back, and treat a differing `fdes=` total as proof you compared
-  different corpora rather than as a result.
+* `robustness-sweep.rb` resolves `./bazel-bin/unwind-check` on every invocation — a `bazel test`
+  in another window mid-sweep silently swaps in the dbg build (§2). Copy the opt binary somewhere
+  stable and pass `BIN=`.
+* The 400-binary sample is a seeded shuffle (`SWEEP_SEED`, default 0) of whatever
+  `candidate_binaries` globs *at that moment* — installing or removing any package reshuffles the
+  whole selection (one `apt install` changed the sampled corpus from 669,554 to 741,775 FDEs
+  here). Run both binaries back-to-back; a differing `fdes=` total means you compared different
+  corpora, not a result.
 
 ## 6. Known gaps and what is next
 
-Testing gaps: the structural checks (overlapping ranges, non-executable FDE
-ranges) have no test — they are hard to produce with an assembler and are
-currently only exercised by real binaries.
+**Guessing recovery for unbounded jump tables** (full checker only; `fde-checker.{h,cc}`).
+`Check()` normally reports a `REVIEW` when an indirect jump's table shape (base, index register,
+entry width) is fully resolved but `table_bound == kBoundTop` (§4.3: no compiler-declared guard).
+If that was the FDE's *only* point of uncertainty, `CheckWithGuessing` retries once with guessing
+enabled: `ProbeJumpTable` reads successive entries straight out of `.rodata`, keeping each one
+only if it decodes, lands inside some known FDE, and that FDE's declared row there matches the
+state at the jump (the same rule `CheckCrossFDEEdge`, §4.6, applies to a *bounded* table) —
+stopping at the first entry that fails. The verdict downgrades to `REVIEW-LIGHT` only when the
+retry comes back fully `BLESSED`; any other outcome keeps the original `REVIEW`, since a guess is
+only worth reporting when it recovers a clean answer, never as a weaker partial one.
+
+Testing gaps: the structural checks (overlapping ranges, non-executable FDE ranges) have no test —
+hard to produce with an assembler, currently only exercised by real binaries.

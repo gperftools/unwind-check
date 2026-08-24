@@ -34,11 +34,10 @@ namespace unwind_analysis {
 //  - never resolves a switch table's dispatch (the unresolved indirect jmp
 //    itself goes unchecked; case bodies still get walked and checked, since
 //    they are just more bytes in the FDE's address range);
-//  - never verifies a register's save-*location* rule beyond a narrow,
-//    purely positional check at the exact instruction that writes it (see
-//    CheckSavedRegisterSlots in the .cc file) -- it does not attempt to
-//    verify that a value is later restored correctly, or track a slot's
-//    contents across more than one instruction;
+//  - never verifies a register's save-*location* rule at all -- a positional
+//    check at the instruction that writes it was tried and removed, since
+//    compilers routinely announce a save several instructions after the
+//    write, which this checker's no-carried-state design can't see;
 //  - does not check the x86-64 return convention at `ret`, or the ABI-based
 //    tail-call fallback FDEChecker::CheckExitState provides.
 //
