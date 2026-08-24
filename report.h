@@ -23,8 +23,8 @@ struct ReportOptions {
   // verdict category. Independent of each other: setting both lists the
   // union, i.e. everything but blessed (and blessed only if show_blessed
   // is also on).
-  bool only_mismatch = false;                    // list only kMismatch
-  bool only_review = false;                      // list only kReview / kReviewLight
+  bool only_mismatch = false;  // list only kMismatch
+  bool only_review = false;    // list only kReview / kReviewLight
 };
 
 // Optional: when given, each finding gets a few real instructions of

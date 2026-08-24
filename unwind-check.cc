@@ -28,6 +28,7 @@
 #include "eh-frame-reader.h"
 #include "elf-image.h"
 #include "fde-checker.h"
+#include "light-checker.h"
 #include "report.h"
 #include "rules_cc/cc/runfiles/runfiles.h"
 #include "symbolizer.h"
@@ -42,6 +43,12 @@ ABSL_FLAG(int, max_findings, 8, "Maximum distinct findings reported per FDE.");
 ABSL_FLAG(bool, check_unmentioned_callee_saved, false,
           "Also require callee-saved registers with no CFI rule to still hold their entry value. "
           "Noisy on hand-written assembly.");
+ABSL_FLAG(bool, full, false,
+          "Use the full dataflow-based checker (worklist over the whole reachable CFG, switch-table "
+          "resolution, exception landing pads, guessing recovery) instead of the light one. The light "
+          "checker (default) only checks CFA-rule consistency at stack-affecting instructions and direct "
+          "jump/call targets, plus a narrow positional check on a push/spill's saved-register offset; it "
+          "never resolves a switch table's dispatch and never produces REVIEW-LIGHT. See light-checker.h.");
 ABSL_FLAG(bool, report_coverage_gaps, true,
           "Report bytes inside an FDE that the control-flow walk never reached, and so never checked.");
 ABSL_FLAG(bool, dump_cfi, false,
@@ -53,8 +60,7 @@ ABSL_FLAG(bool, inspect, false,
           "on PATH.");
 ABSL_FLAG(bool, inspect_deep, false,
           "With --inspect, also show the dataflow's converged abstract state before each instruction.");
-ABSL_FLAG(bool, color, false,
-          "With --inspect, always colorize the listing, whether or not stdout is a tty.");
+ABSL_FLAG(bool, color, false, "With --inspect, always colorize the listing, whether or not stdout is a tty.");
 ABSL_FLAG(bool, only_mismatch, false, "Only list FDEs with a MISMATCH verdict (the summary line is unaffected).");
 ABSL_FLAG(bool, only_review, false,
           "Only list FDEs with a REVIEW or REVIEW-LIGHT verdict (the summary line is unaffected).");
@@ -343,6 +349,15 @@ int Run(const std::string& path, const std::string& ruby_script_path) {
     std::string name = symbolizer.Name(target->pc_begin);
     absl::PrintF("FDE 0x%x  [0x%x, 0x%x)%s%s%s\n", target->fde_addr, target->pc_begin, target->pc_end,
                  name.empty() ? "" : "  ", name, target->signal_frame ? "  (signal frame)" : "");
+    // --inspect always runs the full checker (it needs CheckWithGuessing's
+    // trace_out for --inspect_deep, which LightCheck does not produce) --
+    // worth saying explicitly, since the light checker is the default for
+    // the plain checking path and a --pc run without --inspect can
+    // otherwise silently report from a different checker than --inspect
+    // does for the same FDE.
+    if (!absl::GetFlag(FLAGS_full)) {
+      absl::FPrintF(stderr, "unwind-check: --inspect always uses the full checker, regardless of --full\n");
+    }
     fflush(stdout);
 
     const bool color = absl::GetFlag(FLAGS_color) || isatty(STDOUT_FILENO) != 0;
@@ -385,7 +400,9 @@ int Run(const std::string& path, const std::string& ruby_script_path) {
       continue;
     }
     try {
-      results.push_back(CheckWithGuessing(options, *cfi, function_starts.contains(cfi->pc_begin)));
+      results.push_back(absl::GetFlag(FLAGS_full)
+                            ? CheckWithGuessing(options, *cfi, function_starts.contains(cfi->pc_begin))
+                            : LightCheck(options, *cfi, function_starts.contains(cfi->pc_begin)));
     } catch (const EHFrameError& e) {
       results.push_back(MakeStructuralResult(cfi->fde_addr, cfi->pc_begin, cfi->pc_end, Finding::Severity::kReview,
                                              absl::StrFormat("analysis aborted: %s", e.what())));

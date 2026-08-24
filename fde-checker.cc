@@ -695,16 +695,15 @@ void FDEChecker::Propagate(uint64_t pc, const AbsState& state) {
   }
 }
 
-// Checks `edge_state` (the abstract state right before an unconditional
-// jump, or a resolved jump-table entry, at `edge_pc`) against the declared
-// CFI row at `target`, when some other checkable FDE covers it. This is
-// strictly more precise than guessing at tail-call-ABI compliance: a jump
-// into another FDE's `.cold` fragment or a shared switch-table case is
-// checked against what that FDE actually declares, the same way any other
-// CFI row is checked in this tool. Returns false when no FDE covers
-// `target` (a PLT stub is exactly this case, since RunStructuralChecks
-// excludes PLT-covered FDEs from what the caller hands us), so the caller
-// can fall back to the ABI-based check.
+// Checks `edge_state` (the abstract state right before jump, at
+// `edge_pc`) against the declared CFI row at `target`, when some
+// other checkable FDE covers it. This is strictly more precise than
+// guessing at tail-call-ABI compliance: a jump into another FDE's
+// `.cold` fragment or a shared switch-table case is checked against
+// what that FDE actually declares, the same way any other CFI row is
+// checked in this tool. Returns false when no FDE covers `target`
+// (e.g.  PLT stub), so the caller can fall back to the ABI-based
+// check.
 bool FDEChecker::CheckCrossFDEEdge(uint64_t edge_pc, uint64_t target, const AbsState& edge_state) {
   const CFI* target_cfi = CFIContaining(target);
   if (target_cfi == nullptr) {
@@ -961,7 +960,7 @@ void FDEChecker::VerifyPass() {
       }
     } else if (outcome.is_return) {
       CheckExitState(pc, state, /*is_tail_call=*/false);
-    } else if (!outcome.falls_through && outcome.has_direct_target &&
+    } else if (outcome.has_direct_target &&
                (outcome.direct_target < cfi_.pc_begin || outcome.direct_target >= cfi_.pc_end)) {
       if (!CheckCrossFDEEdge(pc, outcome.direct_target, state)) {
         CheckExitState(pc, state, /*is_tail_call=*/true);

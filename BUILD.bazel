@@ -152,6 +152,24 @@ cc_library(
 )
 
 cc_library(
+    name = "light-checker",
+    srcs = ["light-checker.cc"],
+    hdrs = ["light-checker.h"],
+    copts = DEFAULT_COPTS,
+    deps = [
+        ":abs-state",
+        ":cfi-table",
+        ":disasm",
+        ":fde-checker",
+        ":insn-semantics",
+        "@abseil-cpp//absl/algorithm:container",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
     name = "symbolizer",
     srcs = ["symbolizer.cc"],
     hdrs = ["symbolizer.h"],
@@ -220,6 +238,7 @@ cc_binary(
         ":eh-frame-reader",
         ":elf-image",
         ":fde-checker",
+        ":light-checker",
         ":report",
         ":symbolizer",
         "@abseil-cpp//absl/algorithm:container",
@@ -271,6 +290,30 @@ cc_test(
         ":eh-frame-reader",
         ":elf-image",
         ":fde-checker",
+        ":symbolizer",
+        "@abseil-cpp//absl/algorithm:container",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "light-checker-test",
+    srcs = ["light-checker-test.cc"],
+    copts = DEFAULT_COPTS,
+    data = ["testdata/libfixtures.so"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    deps = [
+        ":cfi-table",
+        ":disasm",
+        ":eh-frame-reader",
+        ":elf-image",
+        ":fde-checker",
+        ":light-checker",
         ":symbolizer",
         "@abseil-cpp//absl/algorithm:container",
         "@abseil-cpp//absl/container:flat_hash_set",

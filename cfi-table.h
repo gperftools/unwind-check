@@ -41,6 +41,10 @@ struct CFARule {
   uint8_t reg = 0;
   int64_t offset = 0;
 
+  static CFARule RegOffset(uint8_t reg, int64_t offset) {
+    return CFARule{.kind = Kind::kRegOffset, .reg = reg, .offset = offset};
+  }
+
   bool operator==(const CFARule&) const = default;
 
   template <typename Sink>

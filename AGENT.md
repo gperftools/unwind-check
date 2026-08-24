@@ -85,6 +85,9 @@ check.
 * C++20, 2-space, 120 cols, `BasedOnStyle: Google`. Emacs mode line on every
   file; keep them on new ones. Everything is in `namespace unwind_analysis`.
 
+The light checker (§4.9) runs by default; `--full` switches to the
+dataflow-based `FDEChecker` this section otherwise describes.
+
 Useful flags: `--show_blessed` (list blessed FDEs too), `--summary_only`,
 `--function=<regex>`, `--pc=<hex>`, `--dump_cfi` (print the decoded row table
 instead of checking; compare against `readelf --debug-dump=frames-interp`),
@@ -121,6 +124,7 @@ recognize, is a hard error naming what went wrong.
 | `insn-semantics.{h,cc}` | the *computed* side: what each instruction does to the stack (§4.4) |
 | `lsda-reader.{h,cc}` | parses `.gcc_except_table`'s call-site table for exception landing pads (§4.5) |
 | `fde-checker.{h,cc}` | CFG walk, worklist dataflow, and the comparison (§4.5) |
+| `light-checker.{h,cc}` | the second, no-dataflow checker (§4.9); `--full` switches back to `fde-checker` |
 | `symbolizer.{h,cc}` | symbol names and source lines (§4.7) |
 | `subprocess.{h,cc}` | `posix_spawn`-based child-process helper, no shell involved |
 | `report.{h,cc}`, `unwind-check.cc` | flags, structural checks, output |
@@ -569,11 +573,9 @@ did, and is the simpler fix besides.)
 Everything above checks the declared CFI against the code within one FDE.
 This section is about the edge itself: what happens when an *unconditional*
 direct jump, or a resolved switch-table entry, leaves `[pc_begin, pc_end)`.
-(Conditional jumps out of the FDE, `jne .Lcold`, are left alone — a taken
-branch out is normal control flow this tool was never trying to follow.)
 
 **The primary path: check against the target's own declared row.**
-`check_cross_fde_edge` (in `fde-checker.cc`, inside `Check()`) looks
+`CheckCrossFDEEdge` (in `fde-checker.cc`) looks
 up whichever checkable FDE covers the jump target and, if one does, compares
 the abstract state at the jump against *that* FDE's declared CFI row at that
 exact PC — the same `RowChecker::Check` used for every ordinary in-FDE
@@ -666,6 +668,273 @@ linker-generated stubs, not compiler output with CFI worth second-guessing.
 Sections are optional and this degrades to finding nothing, same as the rest
 of §4.7's symbol handling; a plain `jmp` *into* a PLT stub from ordinary code
 still goes through the regular tail-call exit-state check, unweakened.
+
+### 4.9 The light checker
+
+`light-checker.{h,cc}` is a second, much smaller checker behind `LightCheck`,
+selected by default (`--full` switches back to `FDEChecker`/`Check`). It
+exists because two things drove most of what was left of the review count
+and the rare false mismatch on real binaries: switch-table REVIEWs (even
+after §4.3's guessing recovery, a genuinely unbounded or shape-unrecognised
+dispatch is still a REVIEW) and `FallThroughIsReal` mis-guessing a call's
+fallthrough. Rather than tighten those heuristics further, the light checker
+sidesteps the whole machinery that makes them necessary: it runs no
+worklist, no dataflow, resolves no switch table, and follows no LSDA.
+
+**The idea, in its current (second) form: reseed completely fresh at every
+single instruction, and give up on the rest of the FDE the moment the CFA
+can no longer be confirmed, rather than try to carry state carefully enough
+to tell a real bug apart from an artifact.** This checker went through an
+earlier, more careful design that carried an `AbsState` forward across
+instructions (within one CFI row, and later within one maximal fallthrough
+run) specifically so a "before" and "after" pair could distinguish a real
+target bug from decoding artifacts. That design worked, but it earned its
+complexity by trying to keep going *through* points where verification had
+genuinely become impossible. The current design instead asks a narrower
+question at every stack-affecting instruction and its target: does
+`AbsState::SeedFromRow` (off the row governing *this* instruction's own
+address, run through exactly one `InsnSemantics::Transfer`) agree with the
+CFA rule at the next instruction (or, for an unconditional `jmp`'s target,
+that row -- possibly in a different FDE via `FDECheckerOptions::all_cfis`,
+the same lookup §4.6 uses)? If the CFA-defining register's value is
+concretely known and disagrees, that is a real, provable MISMATCH. If the
+CFA rule cannot be evaluated at all, or the register it names has gone
+untracked, this checker cannot tell a real bug from its own model's limits
+-- so it emits exactly one REVIEW explaining why, and stops checking the
+rest of this FDE entirely (`CheckCFA`'s `bool` return, checked at both call
+sites in `LightCheck`'s loop). Nothing carries between instructions any
+more: there is no "before" to keep honest, because once the checker cannot
+verify something it never asks another question this FDE could get
+fabricated evidence to answer. Decoding itself is *not* gated by any of
+this -- the loop always continues in address order regardless of
+`falls_through` or a give-up, which is what still lets a switch-case body or
+a landing pad get checked at all without ever resolving the dispatch that
+reaches it; only *checking* stops. This is also why a `call`'s own
+fallthrough transition is exempted from the check entirely (documented at
+the exemption's call site) -- a call's `Transfer` never moves rsp, so
+comparing the row before it against the row after it is not "does this
+instruction match its CFI", it is "do two blocks' rows happen to agree",
+and a noreturn call followed by an unrelated fragment's own fresh prologue
+is exactly the case where they need not.
+
+Straight-line decode turns out to need no CFG discovery, and to be strictly
+*more* complete than the full checker's walk in one respect: a landing pad
+or a switch case body is just more bytes in `[pc_begin, pc_end)`, so it gets
+decoded (though not necessarily *checked*, if an earlier give-up already
+ended this FDE's checking) without any LSDA parsing or table resolution at
+all -- the price is that the dispatch instruction itself (indirect jump, or
+a switch-table's `jmp *table(,%rax,8)`) is simply unchecked, silently,
+rather than resolved or reviewed.
+
+**Two narrow carve-outs on top of "give up," both needed because giving up
+is too coarse in one specific, common place.** Once a function's CFA anchor
+switches from rsp to rbp (the standard `push %rbp; mov %rsp,%rbp` prologue),
+`AbsState::SeedFromRow` unconditionally sets rsp to untracked for every
+instruction governed by that row (`abs-state.cc`: rsp is reset to `Top()`
+whenever it is not itself the row's CFA register, before the CFA register's
+own value is pinned) -- DWARF genuinely does not say where rsp is once it
+stops being the CFA register, so this is not a modelling gap, it is a real
+limit of what CFI declares. That makes the transition back out of an
+rbp-based frame -- `pop %rbp` alone, or the equivalent single `leave` -- a
+guaranteed "give up" under the plain rule above, on essentially every
+frame-pointer function in existence. Checked directly against
+`insn-semantics.cc`: `leave` actually derives rsp correctly on its own (it
+copies rbp's already-known value into rsp before adjusting it, so it would
+have verified cleanly even without a carve-out); `pop %rbp` alone does not
+(`POP`'s `Transfer` only updates rsp when rsp's own *current* tracked value
+is already `kCFARel`, which it never is here), so it is the one genuinely
+unverifiable case. `LightCheck`'s loop special-cases exactly this
+transition (`row->cfa == RegOffset(rbp, 16) && next_row->cfa ==
+RegOffset(rsp, 8)`): blessed silently if the instruction is `pop %rbp` or
+`leave`, and a REVIEW -- without a give-up, since this is a narrow pattern
+mismatch rather than a genuine loss of tracking -- if it is neither, since a
+CFI update to this exact transition landing on some other instruction would
+be worth a look. A second, broader carve-out silently skips the check
+whenever the instruction is a `nop`, on the observation that a `nop` is
+sometimes where a compiler places what is really the effect of the previous
+`ret` becoming visible in the row table, a placement quirk rather than a
+provable bug; this one does not attempt to characterize *which* transition
+is happening the way the rbp/rsp carve-out does, so it is more permissive,
+and worth another look if it is ever found to be hiding something.
+
+**Scope, deliberately narrow, and narrower than an earlier version of this
+checker.** This checker verifies exactly one thing: the CFA rule, as
+described above. A second check used to exist here -- a purely positional
+check (`CheckSavedRegisterSlots`) that a `push` or a memory-destination
+`mov` wrote the register the CFI newly attributes to an offset, reusing
+`insn-semantics.cc`'s existing slot-tracking with no new logic of its own --
+and it was removed. The reason is the same "give up rather than carry
+carefully" trade this section's redesign made everywhere else: compilers
+routinely group the CFI updates that declare *where* a callee-saved
+register is now recoverable well after the `push`/store that actually put
+it there (to avoid emitting an `advance_loc`/`offset` pair for every single
+save), so verifying a save correctly needs to remember what a register held
+several instructions -- sometimes across a whole prologue -- before the row
+that names it. That is dataflow, or at least state carried further than
+this design now carries anything, and doing it *without* dataflow risked
+exactly the false positive this checker's own history already produced once
+(see the "mov %reg,%rsp" idiom two paragraphs below) for a different check.
+Rather than rebuild carrying machinery to support one narrow, unproven
+check, it was dropped. (For context: across the 400-binary sweep this
+checker was validated against before removal, it never once caught a real
+bug -- its only observed firing on real code was itself a false positive,
+an artifact of a stray tag surviving a jump into unrelated code. It did
+catch `testdata/fixtures.S`'s `bad_wrong_register_saved` fixture, and was
+cheap, but its removal cost nothing this project has evidence for.)
+
+Nothing else is checked: no callee-saved-register-at-`ret` convention, no
+ABI-based tail-call fallback (§4.6's `CheckExitState`), no
+`check_unmentioned_callee_saved`, no saved-register-slot verification (see
+above). `Verdict::kReviewLight` is never produced
+(`FDEResult::guessable_jump_pc`/`guessed_jump_tables` are always left unset --
+this checker never attempts guessing recovery); `Verdict::kReview` covers
+both an unevaluable CFA rule (`DW_CFA_def_cfa_expression` -- DRAP, some
+hand-realigned openssl asm -- or no CFA rule stated) and a CFA-defining
+register whose value has gone untracked, both triggering the give-up
+described above.
+
+Measured on this machine (§5's caveat about drift applies here too; §5's own
+per-binary numbers were *not* re-measured in this pass, so a difference
+between a count below and a count in §5 may just mean the system's copy of
+that binary moved on, not that either checker regressed):
+
+| binary | FDEs | light: blessed/review/mismatch | light runtime | full runtime |
+| --- | --- | --- | --- | --- |
+| `/bin/ls` | 341 | 341 / 0 / 0 | <0.01s | ~0.04s |
+| `libc.so.6` | 3919 | 3910 / 7 / 2 | ~0.08s | ~0.6s |
+| `libstdc++.so.6` | 5332 | 5332 / 0 / 0 | ~0.08s | ~0.4s |
+| `/usr/bin/gcc` | 2448 | 2444 / 4 / 0 | ~0.03s | ~0.13s |
+
+These four are all modest-sized inputs, and the full-runtime column
+undersells how much larger the gap gets on a big one: the same 400-binary
+sweep discussed below timed the full checker at 17.5s on `libLLVM-17.so.1`
+(107k FDEs) against the light checker's ~2.7s on the same binary, and at
+10.1s on `cpack`, both far past the roughly 5-10x this table's small
+binaries would suggest -- full's cost grows much more steeply with FDE
+count and function size (dataflow worklist, LSDA, switch-table resolution)
+than light's straight-line pass does. Use the sweep totals, not this table,
+to reason about large binaries.
+
+`libc.so.6`'s 2 mismatches are exactly the ones §5 already discusses
+(`__mpn_addmul_1`, `__mpn_submul_1`), matching the full checker's own output
+address-for-address today. `_start` and `__clone` are blessed via the same
+"RA declared undefined at entry means no unwind from here, so the rest of
+the row does not matter" special case `FDEChecker::Run()` already applies
+(`LightCheck` checks `first_row->regs[kDWARFRip].kind ==
+RegRule::Kind::kUndefined` up front and returns `kBlessed` immediately,
+mirroring `fde-checker.cc`) -- unaffected by the give-up redesign, since
+this check runs before the main loop even starts. Both `/bin/ls` and
+`/usr/bin/gcc` show 0 mismatches for *both* checkers as of this measurement;
+§5 previously documented a mismatch on each of these, which is more likely a
+toolchain/package update moving those binaries out from under an old
+observation than a regression, since the full checker's own output
+(untouched by anything in this section) shows the same 0.
+
+**The review count is not near zero, and should not be described that way
+-- own up to what is actually driving it.** An earlier measurement of this
+checker (before the give-up redesign) found the review count collapsing to
+near zero, and that description no longer holds: a full 400-binary sweep
+now finds 518 REVIEW findings (against 258 MISMATCH, and the same 0
+abnormal exits as before). Sampling the highest-review binaries
+(`libLLVM-17.so.1`, `git`, `openSeaChest_Configure`, `libfreerdp-client2`,
+`tkgate`) and categorizing every review message found roughly 85% are the
+"register holds entry `<reg>`, cannot be verified" give-up, another 15% are
+the rbp/rsp carve-out's "not on pop/leave" fallback, and a small remainder
+are unevaluable CFA rules. The dominant shape, concretely: a function
+captures its own rsp (or a frame offset) into a callee-saved register
+*before* a dynamically-sized stack allocation, does the allocation, and
+later restores rsp with a plain `mov %reg,%rsp` -- the standard
+alloca/VLA-cleanup idiom, and not remotely rare in real, unexceptional C and
+C++ code. The compiler's own CFI is exact about this (it declares the exact
+CFA delta the restore produces), but this checker, having no memory of the
+earlier instruction that made that register CFA-relative, sees the restore
+with the register carrying only its own untouched entry-value tag and
+cannot confirm it -- a direct, load-bearing cost of dropping all state
+carrying, not a rare edge case like `swapcontext` below. This is the
+central trade this second design makes: giving up early instead of trying
+to carry state far enough to verify this idiom keeps the checker's logic to
+one small function anyone can read start to finish, at the price of a
+REVIEW on a genuinely common, provably-correct pattern the previous design
+could sometimes verify. Worth knowing before leaning on the review count as
+a signal of anything beyond "this checker's simple model stopped being able
+to follow the code here."
+
+**`swapcontext`, the case that originally motivated the (now-removed)
+carrying machinery, resolved more simply by giving up instead.** glibc's
+`swapcontext` loads a brand-new rsp mid-function from a `ucontext_t` field
+(`mov 0xa0(%rdx),%rsp`), under a CFA row that never changes across the whole
+function -- genuinely unverifiable from that point on, and `FDEChecker`
+itself only ever produces a REVIEW here ("CFA is declared as rsp+8, but rsp
+holds unknown here, so the rule cannot be verified" --
+`RowChecker::CheckCFA`, `fde-checker.cc`), never a MISMATCH, since it
+treats any non-`kCFARel` register value as unverifiable rather than
+guessing at it. An earlier version of this checker, seeding fresh from
+every instruction's own row with no memory of anything earlier, could not
+reproduce that REVIEW at all: it stayed completely silent on the clobbering
+instruction (an untracked value was simply not checked against anything),
+and then, several unrelated instructions later, misread an ordinary `push`
+as a false MISMATCH, because reseeding fresh from the still-unchanged row
+made that push's "before" state trivially restate a row that had already
+stopped describing reality. The carrying machinery built to fix that (see
+this file's git history) is gone now, replaced by something that resolves
+the same case more directly: `CheckCFA` reports the exact same REVIEW
+`RowChecker::CheckCFA` does, right at the clobbering instruction (verified
+directly: `unwind-check --pc=<swapcontext> libc.so.6` now reports `REVIEW`
+with that message at `0x53ed8`), and then gives up on the rest of the FDE --
+so the later `push` is never reached, and the false MISMATCH it used to
+produce cannot occur, without any carrying at all. What carrying used to
+buy -- letting the walk continue *past* an unverifiable point without
+fabricating false certainty -- turned out to be worth less than simply not
+continuing.
+
+**The one binary in 400 that falsifies "alignment padding is always a nop or
+`int3`", still true under the current design and still being left alone
+rather than fixed.** `libffi.so.6.0.4`'s `ffi_closure_unix64` -- a
+hand-written libffi trampoline, not compiler output -- ends its dispatch
+with `jmp %r10` (an unresolved indirect branch, `outcome.falls_through =
+false` correctly, so nothing is checked at the `jmp` itself), immediately
+followed *in the same FDE, inline* by what is actually jump-table data, not
+padding. Decoding always continues in address order regardless of
+`falls_through` (see "the idea" above -- this is what still lets a
+switch-case body get checked without resolving its dispatch), so it walks
+straight into that data; some of it happens to disassemble as a
+plausible-looking `pop %rsi`, which `SeedFromRow` -- reseeding fresh, as it
+now always does, straight from the still-declared `cfa=rsp+8` row -- pins
+rsp to match before the "pop" then genuinely (if meaninglessly) moves it
+away, producing a real disagreement against the same unchanging row.
+Nothing about the give-up redesign changes this: there is no stray carried
+state to blame any more, only a row that is still correct about real code
+and wrong about the four bytes of jump-table data sitting where this
+checker expects the next instruction. A real fix -- stopping decode (or
+suppressing checks) after any `falls_through == false` instruction until
+the next declared row -- would also blind this checker to every
+switch-case body and cold fragment reached only by a jump, which is the
+design's whole reason to exist; the tradeoff is not worth one hand-written
+trampoline in 400 real binaries. Left as a known, accepted false positive.
+
+`--inspect` always runs the full checker regardless of `--full` -- it needs
+`CheckWithGuessing`'s `trace_out` for `--inspect_deep`, which `LightCheck`
+does not produce -- so inspecting a light-checker finding by address means
+comparing two different checkers' output for the same FDE. `unwind-check`
+says so on stderr when `--inspect` runs without `--full`.
+
+**A `CHECK` in the loop that looks fragile and is not.** The fallthrough
+branch asserts `CHECK(next_row != nullptr)` immediately after looking up
+the row governing `next_pc`, rather than handling `nullptr` gracefully the
+way the loop's *first* row lookup for a given `pc` does a few lines above
+(`if (row == nullptr) { break; }`). These look like the same defensive
+situation but are not: by the time the `next_row` lookup runs, `row =
+cfi.RowAt(pc)` has already succeeded for this iteration's `pc`, and
+`CFI::RowAt` (`cfi-table.cc`) returns `nullptr` only when `rows` is empty or
+no row's `pc_start` is `<= pc` -- both already disproven by that same
+successful lookup, since the row that covered `pc` necessarily has
+`pc_start <= pc < next_pc` too, and `next_pc < cfi.pc_end` is already
+required to reach this code. So `next_row` cannot be `nullptr` here as a
+matter of `RowAt`'s own logic, not as an assumption about how well-formed
+real CFI data tends to be -- unlike the first lookup, which has no such
+preceding guarantee (a genuinely empty-rows FDE is real and handled
+elsewhere in this file). Confirmed empirically too: a full 400-binary sweep
+against this code produced 0 abnormal exits.
 
 ## 5. Where it stands
 
@@ -772,7 +1041,9 @@ fall back to the ABI-based tail-call heuristic (§4.6).
 
 In rough order of value. Most of these remain deliberately out of scope;
 jump tables are the exception — implemented, with one traced-but-unresolved
-correctness question called out below rather than left silent.
+correctness question called out below rather than left silent. The first
+entry below is a different kind of item from the rest: not a deliberate
+scope boundary, but a confirmed miss.
 
 * **Jump tables are resolved** (§4.3, §4.4: `AbsVal::table_bound`/`last_cmp`
   track the `cmp $imm,%r; ja default` guard, `insn-semantics.cc`'s `movslq`/`add` rules
