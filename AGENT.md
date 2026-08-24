@@ -85,7 +85,7 @@ check.
 * C++20, 2-space, 120 cols, `BasedOnStyle: Google`. Emacs mode line on every
   file; keep them on new ones. Everything is in `namespace unwind_analysis`.
 
-Useful flags: `--verbose` (list blessed FDEs too), `--summary_only`,
+Useful flags: `--show_blessed` (list blessed FDEs too), `--summary_only`,
 `--function=<regex>`, `--pc=<hex>`, `--dump_cfi` (print the decoded row table
 instead of checking; compare against `readelf --debug-dump=frames-interp`),
 `--addr2line=auto|off|<path>`, `--check_unmentioned_callee_saved`,
@@ -483,19 +483,40 @@ bytes are the alignment nop before a cold fragment. Carrying our state into
 those manufactures contradictions that are not in the binary.
 
 The CFI itself settles it, with no list of noreturn functions and no care for
-what the callee is named. An edge is dropped only when **both**:
+what the callee is named. An edge is dropped when a new CFI row starts at the
+next address — unrelated code never begins in the middle of a row, and a
+stale-CFI bug can span several instructions, so within one row we must keep
+walking — **and** either of two signals says that row belongs to a different
+block:
 
-* a new CFI row starts at the next address — unrelated code never begins in the
-  middle of a row, and a stale-CFI bug can span several instructions, so within
-  one row we must keep walking; **and**
-* that row's CFA rule is satisfied by neither the state before this instruction
-  nor the state after it. Satisfied by the state *after* is an ordinary edge.
-  Satisfied by the state *before* means the CFI is describing things one
-  instruction late — which is the bug we exist to find, so that edge is taken
-  and reported.
+* **The CFA rule.** Satisfied by neither the state before this instruction nor
+  the state after it means the rule describes something unrelated to this
+  instruction. Satisfied by the state *after* is an ordinary edge. Satisfied by
+  the state *before* means the CFI is describing things one instruction late —
+  which is the bug we exist to find, so that edge is taken and reported.
+* **The row's shape, right after a call.** The CFA test alone is blind to the
+  common case: a call never moves `rsp`, so an `rsp`-based CFA rule is
+  trivially satisfied on both sides of any call whether or not the callee
+  returns — `call __cxa_throw` included. A row that carries no register-save
+  rule at all beyond `ra` is the shape of a block that hasn't executed any
+  prologue yet, the same shape a real block start has. Seeing that shape
+  appear immediately after a call, when the row being left had accumulated
+  real rules, means the compiler is declaring a fresh block here rather than
+  continuing this one — e.g. two `.cold` throw-sites concatenated back to
+  back, where the second's prologue-shaped row is only reachable by (falsely)
+  falling out of the first's `call __cxa_throw`. This check only fires right
+  after a call and only when the row being left was *not* itself already
+  bare, so it cannot mistake a genuinely reachable, register-light block for
+  a fresh one.
 
 Cost: a doubly-wrong CFI could be pruned rather than reported. It then shows up
-as an unchecked coverage gap, not as a silent pass.
+as an unchecked coverage gap, not as a silent pass. Validated against the
+400-binary sweep (`robustness-sweep.rb`): across a 200-binary sample the shape
+check never changed a binary's mismatch count, only reclassified a handful of
+FDEs from `BLESSED` to `REVIEW` — cases (all in GCC-family binaries, calling
+into `internal_error`/`fancy_abort`-style helpers) where the walk had
+previously been silently blessing dead fallthrough code because nothing in it
+happened to conflict with the stale propagated state.
 
 Merge conflicts are reported as `REVIEW`, not `MISMATCH`, and only when the row
 at that address actually consults the register or slot that disagreed. A

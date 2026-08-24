@@ -325,11 +325,42 @@ bool CFASatisfiedBy(const CFARule& cfa, const AbsVal& v) {
 // callee is named. It does mean a doubly-wrong CFI could be pruned
 // instead of reported; the region then shows up as an unchecked
 // coverage gap rather than silently passing.
+//
+// The CFA rule alone is blind to the common case: a call never moves rsp,
+// so an rsp-based CFA rule is trivially "satisfied" on both sides of any
+// call, whether or not the callee returns. A second, narrower signal
+// catches that case without naming any callee: a row that carries no
+// register-save rule at all beyond `ra` is the shape of a block that
+// hasn't executed any prologue yet -- the same shape real block starts
+// have. Seeing that shape appear immediately after a call, when the
+// row we are leaving had accumulated real rules, means the compiler is
+// declaring a fresh block here, not continuing this one -- e.g. two
+// `.cold` throw-sites concatenated back to back, where the second's
+// prologue-shaped row is never reached except by (falsely) falling out
+// of the first's `call __cxa_throw`. Gated on `after_call` because that
+// is the one place this tool already reasons about "might be a branch
+// into a noreturn call, might be an ordinary edge" (see the tail-call
+// REVIEW below).
+bool RowLooksLikeFreshBlockStart(const CFIRow& row) {
+  for (int r = 0; r < kNumDWARFRegs; r++) {
+    if (r == kDWARFRip) {
+      continue;  // the ra rule is expected everywhere, including real entries
+    }
+    if (row.regs[r].kind != RegRule::Kind::kUnset) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool FallThroughIsReal(const CFI& cfi, const CFIRow* here, uint64_t next, const AbsVal (&before)[kNumGPRs],
-                       const AbsState& after) {
+                       const AbsState& after, bool after_call) {
   const CFIRow* row = cfi.RowAt(next);
   if (row == nullptr || row == here) {
     return true;  // still inside the same row, so certainly the same block
+  }
+  if (after_call && RowLooksLikeFreshBlockStart(*row) && !RowLooksLikeFreshBlockStart(*here)) {
+    return false;
   }
   if (row->cfa.kind != CFARule::Kind::kRegOffset || row->cfa.reg >= kNumGPRs) {
     return true;
@@ -733,7 +764,7 @@ void FDEChecker::Drain() {
 
     if (outcome.falls_through) {
       uint64_t next = pc + insn.size;
-      if (next < cfi_.pc_end && FallThroughIsReal(cfi_, row, next, before, state)) {
+      if (next < cfi_.pc_end && FallThroughIsReal(cfi_, row, next, before, state, outcome.is_call)) {
         // A guard branch proves something about the value it compared on
         // exactly one of its two edges, and which one depends on the
         // branch; InsnSemantics owns that question. For everything else
