@@ -23,6 +23,7 @@
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_format.h"
 #include "cfi-table.h"
+#include "coverage-check.h"
 #include "diagnostics.h"
 #include "disasm.h"
 #include "eh-frame-reader.h"
@@ -51,6 +52,9 @@ ABSL_FLAG(bool, full, false,
           "never resolves a switch table's dispatch and never produces REVIEW-LIGHT. See light-checker.h.");
 ABSL_FLAG(bool, report_coverage_gaps, true,
           "Report bytes inside an FDE that the control-flow walk never reached, and so never checked.");
+ABSL_FLAG(bool, report_uncovered_symbols, true,
+          "Report, as REVIEW, symbols in executable memory that no FDE covers at all -- e.g. hand-written "
+          "assembly that never got a .cfi_startproc.");
 ABSL_FLAG(bool, dump_cfi, false,
           "Print the decoded CFI row table for each selected FDE instead of checking anything. "
           "Compare against `readelf --debug-dump=frames-interp`.");
@@ -254,6 +258,16 @@ int Run(const std::string& path, const std::string& ruby_script_path) {
   std::vector<FDEResult> results;
   std::vector<const CFI*> checkable;
   RunStructuralChecks(image, fdes, &results, &checkable);
+  if (absl::GetFlag(FLAGS_report_uncovered_symbols)) {
+    std::vector<std::pair<uint64_t, uint64_t>> fde_ranges;
+    for (const RawFDE& raw : fdes) {
+      if (raw.cfi.has_value() && raw.cfi->pc_end > raw.cfi->pc_begin) {
+        fde_ranges.emplace_back(raw.cfi->pc_begin, raw.cfi->pc_end);
+      }
+    }
+    std::vector<FDEResult> uncovered = CheckUncoveredSymbols(image, fde_ranges);
+    results.insert(results.end(), std::make_move_iterator(uncovered.begin()), std::make_move_iterator(uncovered.end()));
+  }
 
   std::string tool_path;
   Symbolizer symbolizer{image, ParseAddr2LineMode(absl::GetFlag(FLAGS_addr2line), &tool_path), tool_path};

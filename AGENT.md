@@ -32,7 +32,7 @@ Exit codes: 0 all blessed, 1 a mismatch, 2 review only, 3 the run failed.
 ## 2. Build and test
 
 ```
-bazel test :all                              # six test targets, all hermetic
+bazel test :all                              # seven test targets, all hermetic
 bazel build -c opt :unwind-check && ./bazel-bin/unwind-check --summary_only /bin/ls
 ```
 
@@ -60,9 +60,9 @@ The light checker (§4.9) runs by default; `--full` switches to the dataflow-bas
 Useful flags: `--show_blessed`, `--summary_only`, `--function=<regex>`, `--pc=<hex>`, `--dump_cfi`
 (print the decoded row table instead of checking; compare against `readelf
 --debug-dump=frames-interp`), `--addr2line=auto|off|<path>`, `--check_unmentioned_callee_saved`,
-`--report_coverage_gaps`, `--inspect` (requires `--pc`; disasm+CFI listing of one FDE instead of
-the summary), `--inspect_deep` (with `--inspect`, also shows the dataflow's converged abstract
-state before each instruction).
+`--report_coverage_gaps`, `--report_uncovered_symbols` (§4.8), `--inspect` (requires `--pc`;
+disasm+CFI listing of one FDE instead of the summary), `--inspect_deep` (with `--inspect`, also
+shows the dataflow's converged abstract state before each instruction).
 
 `--inspect` serializes declared CFI rows/findings/(deep mode) state as JSON (`diagnostics.cc`) and
 pipes it into `inspect.rb`, which runs `objdump -d --visualize-jumps` over the range and splices
@@ -86,6 +86,7 @@ which `LightCheck` doesn't produce) — a stderr warning says so.
 | `insn-semantics.{h,cc}` | the *computed* side: what each instruction does to the stack (§4.4) |
 | `lsda-reader.{h,cc}` | parses `.gcc_except_table`'s call-site table for landing pads (§4.5) |
 | `fde-checker.{h,cc}` | CFG walk, worklist dataflow, and the comparison (§4.5) |
+| `coverage-check.{h,cc}` | symbols in executable memory with no FDE at all (§4.8) |
 | `light-checker.{h,cc}` | the second, no-dataflow checker (§4.9); default, `--full` switches back |
 | `symbolizer.{h,cc}` | symbol names and source lines (§4.7) |
 | `subprocess.{h,cc}` | `posix_spawn`-based child-process helper, no shell |
@@ -340,6 +341,19 @@ section named `.plt*`; an FDE falling entirely inside one is skipped and reporte
 reaching `FDEChecker` — linker-generated stubs, not compiler output worth second-guessing. A plain
 `jmp` *into* a PLT stub from ordinary code still goes through the regular tail-call check.
 
+**Symbols with no FDE at all.** Everything above assumes an FDE exists to be checked; nothing so
+far catches the case where one never was declared, which is exactly the silence the contract in
+§1 rules out. `coverage-check.{h,cc}` (`CheckUncoveredSymbols`, `--report_uncovered_symbols`,
+default on) merges every FDE's `[pc_begin, pc_end)` and walks `ELFImage::func_symbols()` looking
+for a symbol in executable memory (skipping `.plt*`, per `InPLT` above) whose range isn't fully
+covered. Any gap is a `REVIEW` naming how many bytes are uncovered — typically hand-written
+assembly that never got a `.cfi_startproc`/`.cfi_endproc` pair, e.g. glibc's `__clone` trampoline
+(`sysdeps/unix/sysv/linux/x86_64/clone.S`), found this way on a stock `libc.so.6`. One finding per
+distinct start address, since the report resolves the printed name from `Symbolizer::Name`, not
+from anything this check stores — two aliases at the same address would otherwise repeat an
+identical line. Unlike `--report_coverage_gaps` (bytes *inside* a declared FDE the walk never
+reached), this is bytes with no FDE to walk in the first place.
+
 ### 4.9 The light checker
 
 `light-checker.{h,cc}` (`LightCheck`) is a second, much smaller checker, selected by default
@@ -430,5 +444,8 @@ stopping at the first entry that fails. The verdict downgrades to `REVIEW-LIGHT`
 retry comes back fully `BLESSED`; any other outcome keeps the original `REVIEW`, since a guess is
 only worth reporting when it recovers a clean answer, never as a weaker partial one.
 
-Testing gaps: the structural checks (overlapping ranges, non-executable FDE ranges) have no test —
-hard to produce with an assembler, currently only exercised by real binaries.
+Testing gaps: most structural checks (overlapping ranges, non-executable FDE ranges) have no test —
+hard to produce with an assembler, currently only exercised by real binaries. The one exception is
+`CheckUncoveredSymbols` (§4.8): a symbol with no FDE is trivial to produce on purpose (just omit
+`.cfi_startproc`), so `testdata/fixtures.S`'s `uncovered_no_cfi` and `coverage-check-test.cc` cover
+it directly rather than only via real binaries.

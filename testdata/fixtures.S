@@ -760,3 +760,19 @@ bad_switch_table_into_cold:
         ret
         .cfi_endproc
         .size   bad_switch_table_into_cold, .-bad_switch_table_into_cold
+
+/* ---------------------------------------------------------------- */
+/* No .cfi_startproc/.cfi_endproc at all, so the assembler emits no FDE
+ * for this range -- exactly what coverage-check.h's CheckUncoveredSymbols
+ * exists to flag. Not named good_/bad_/review_: fixtures-test.cc's
+ * NamesMatchVerdicts only walks FDEs it decoded, and this one has none,
+ * so it stays invisible there; coverage-check-test.cc checks it instead. */
+        .globl  uncovered_no_cfi
+        .type   uncovered_no_cfi, @function
+uncovered_no_cfi:
+        pushq   %rbp
+        movq    %rsp, %rbp
+        movl    %edi, %eax
+        popq    %rbp
+        ret
+        .size   uncovered_no_cfi, .-uncovered_no_cfi

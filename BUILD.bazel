@@ -152,6 +152,20 @@ cc_library(
 )
 
 cc_library(
+    name = "coverage-check",
+    srcs = ["coverage-check.cc"],
+    hdrs = ["coverage-check.h"],
+    copts = DEFAULT_COPTS,
+    deps = [
+        ":elf-image",
+        ":fde-checker",
+        "@abseil-cpp//absl/algorithm:container",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings:str_format",
+    ],
+)
+
+cc_library(
     name = "light-checker",
     srcs = ["light-checker.cc"],
     hdrs = ["light-checker.h"],
@@ -233,6 +247,7 @@ cc_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":cfi-table",
+        ":coverage-check",
         ":diagnostics",
         ":disasm",
         ":eh-frame-reader",
@@ -293,6 +308,26 @@ cc_test(
         ":symbolizer",
         "@abseil-cpp//absl/algorithm:container",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "coverage-check-test",
+    srcs = ["coverage-check-test.cc"],
+    copts = DEFAULT_COPTS,
+    data = ["testdata/libfixtures.so"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    deps = [
+        ":coverage-check",
+        ":eh-frame-reader",
+        ":elf-image",
+        ":fde-checker",
+        ":symbolizer",
         "@abseil-cpp//absl/strings",
         "@googletest//:gtest_main",
     ],
