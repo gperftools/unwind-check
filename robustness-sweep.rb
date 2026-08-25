@@ -34,6 +34,7 @@ end
 $count = 400
 $jobs = Etc.nprocessors
 $verbose = false
+$sort = false
 $full = false
 
 def parse_args(argv)
@@ -41,7 +42,8 @@ def parse_args(argv)
     case arg
     when /\A-j(\d+)\z/ then $jobs = $1.to_i
     when '-v' then $verbose = true
-    when "--full" then $full = true
+    when '--sort' then $sort = true
+    when '--full' then $full = true
     when /\A\d+\z/ then $count = arg.to_i
     else die "unrecognized argument: #{arg}"
     end
@@ -90,6 +92,12 @@ def check_binary(path)
   Result.new(path, rc, elapsed_ms, totals, false)
 end
 
+def puts_totals(r)
+  t = r.totals
+  puts "#{r.elapsed_ms}ms fdes=#{t.fdes} blessed=#{t.blessed} " \
+       "review_light=#{t.review_light} review=#{t.review} mismatch=#{t.mismatch}  #{r.path}"
+end
+
 # Runs `$jobs` concurrent checks, driven by a pipe-of-tokens: `$jobs` bytes
 # are written to a pipe up front (assumed to fit in one write -- true for
 # any sane N against the kernel's default 64KiB pipe capacity). The main
@@ -102,6 +110,9 @@ def run_sweep(binaries)
   token_read, token_write = IO.pipe
   token_write.write("\0" * $jobs)
 
+  spinner = Time.now.to_i
+  spinner_pos = -1
+
   print_mutex = Mutex.new
   results = Array.new(binaries.size)
   threads = binaries.each_with_index.map do |path, i|
@@ -113,10 +124,19 @@ def run_sweep(binaries)
         if r.abnormal
           print_mutex.synchronize { puts "ABNORMAL rc=#{r.rc} #{r.elapsed_ms}ms #{path}" }
         elsif $verbose
-          t = r.totals
           print_mutex.synchronize do
-            puts "#{r.elapsed_ms}ms fdes=#{t.fdes} blessed=#{t.blessed} " \
-                 "review_light=#{t.review_light} review=#{t.review} mismatch=#{t.mismatch}  #{path}"
+            puts_totals r
+          end
+        elsif $sort
+          print_mutex.synchronize do
+            new_spinner_pos = Time.now.to_i - spinner
+            if new_spinner_pos != spinner_pos
+              spinner_pos = new_spinner_pos
+              s = '/-\|'
+              ch = s[spinner_pos % s.size]
+              STDOUT << ch << "\r"
+              STDOUT.flush
+            end
           end
         end
       ensure
@@ -144,10 +164,18 @@ def main
                 .select { |r| r.elapsed_ms > SLOW_MS }
                 .map { |r| "#{r.elapsed_ms}ms:#{File.basename(r.path)}" }
 
+  if $sort
+    results = results.sort_by {|r| t = r.totals; [t.mismatch, t.review, t.review_light, t.fdes]}
+    results.each do |r|
+      puts_totals r
+    end
+  end
+
   puts "binaries=#{results.size} abnormal_exits=#{abnormal}"
   puts "totals: fdes=#{totals.fdes} blessed=#{totals.blessed} " \
        "review_light=#{totals.review_light} review=#{totals.review} mismatch=#{totals.mismatch}"
   puts "slow_over_5s:#{slow.map { |s| " #{s}" }.join}"
+
 
   exit(abnormal.zero? ? 0 : 1)
 end
