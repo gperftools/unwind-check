@@ -52,7 +52,7 @@ end
 # Candidate binaries, deduped by realpath so the many .so.N -> .so.N.N.N
 # symlinks in /usr/lib don't make us check the same file repeatedly.
 def candidate_binaries
-  paths = Dir.glob('/usr/lib/x86_64-linux-gnu/*.so.*') + Dir.glob('/usr/bin/*')
+  paths = Dir.glob('/usr/lib/x86_64-linux-gnu/*.so.*') + Dir.glob('/usr/bin/*') + Dir.glob("/usr/lib64/*")
   paths.filter_map { |p| File.realpath(p) rescue nil }
        .uniq
        .select { |p| File.file?(p) && elf?(p) }
