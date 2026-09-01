@@ -1,6 +1,10 @@
 * so vaddr and bias stuff is currently borked when pointer encoding
   (e.g. for LSDA) is absolute (e.g. u4 without pcrel). Keep testing
-  with pic/pie for now.
+  with pic/pie for now. Specifically current when -fno-pie -no-pie
+  binary is analyzed we see LSDA and personality pointers to be
+  encoded without pcrel. Which is incompatible with "biasing"
+  logic. Fix after better getting addressing abstraction of
+  eh-frame-reader in aw-backtrace.
 
 * _start seems to be always wrong. Bad unwind info. Report upstream?
   The issue is us or at least some of it, we should more correctly
@@ -15,7 +19,7 @@
   AGENT.md §6: a table resolved from a not-yet-final bound is not itself
   reported as order-dependent.
 
-* replace <Various>::ToString() with AbslStringify
+* [done] replace <Various>::ToString() with AbslStringify
 
 * IsFileBackedNonExecutable logic for table jumps might be a bit too
   pessimistic. I think I've seen binaries that for various reasons
