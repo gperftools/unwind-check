@@ -25,7 +25,7 @@
 // rows mean, which registers matter, which unsupported constructs may
 // be pattern-matched anyways -- lives in the visitor.
 //
-// Adapted from backtrace-test's runtime unwinder. Two changes, both
+// Adapted from aw-backtrace's runtime unwinder. Two changes, both
 // enabled by this tool being offline rather than async-signal-safe:
 //
 //  * failures throw EHFrameError instead of taking a non-local exit

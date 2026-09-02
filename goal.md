@@ -1,6 +1,6 @@
 # Binary .eh_unwind checker
 
-See ../backtrace-test/AGENT.md and ../backtrace-test/doc/binary-unwind-analysis.adoc
+See ../aw-backtrace/AGENT.md and ../aw-backtrace/doc/binary-unwind-analysis.adoc
 
 ## Goal for first iteration
 
@@ -8,9 +8,9 @@ See ../backtrace-test/AGENT.md and ../backtrace-test/doc/binary-unwind-analysis.
 * using bazel
 * using capstone-engine (https://www.capstone-engine.org/)
 **  use libcapstone-dev installed locally. No need to invent special bazel integration, yet
-* C++ 20; with abseil-cpp; modified Google c++ style (like in the backtrace-test project referred above)
+* C++ 20; with abseil-cpp; modified Google c++ style (like in the aw-backtrace project referred above)
 ** use abseil-cpp via bazel central repo stuff
-* "stealing" i.e. copying code from backtrace-test is allowed (e.g. for eh-frame-reader perhaps). But prefer abseil bits for e.g. stuff like FunctionRef or CHECK. Yes copying is suboptimal (code divergence), but okay for now.
+* "stealing" i.e. copying code from aw-backtrace is allowed (e.g. for eh-frame-reader perhaps). But prefer abseil bits for e.g. stuff like FunctionRef or CHECK. Yes copying is suboptimal (code divergence), but okay for now.
 ** in any case don't make _any_ modifications outside of this directory or /tmp
 
 Main philosophy: bless all easy cases. Flag anything wrong or beyond available heuristics for human to review (with light diagnostics why we're failing to bless)

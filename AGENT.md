@@ -10,7 +10,7 @@ does to the stack.
 
 Nothing else does this. `llvm-dwarfdump --verify` never looks at `.eh_frame`; `readelf -wf` /
 `llvm-readelf --unwind` are pure dumpers with no verify mode and won't even tell you two FDEs
-overlap. The bugs this targets are catalogued in `../backtrace-test/spec/README`: two confirmed
+overlap. The bugs this targets are catalogued in `../aw-backtrace/spec/README`: two confirmed
 clang CFI bugs (a stack adjustment moved but its CFI annotation didn't) plus a long tail of
 hand-written assembly with missing or wrong `.cfi_*`.
 
@@ -78,8 +78,8 @@ which `LightCheck` doesn't produce) — a stderr warning says so.
 | file | what it holds |
 | --- | --- |
 | `elf-image.{h,cc}` | opening the ELF and the "fake load" (§4.1); sections, PT_LOADs, symbols |
-| `eh-frame-reader.{h,cc}` | copied from backtrace-test, with two deliberate edits (§4.2) |
-| `dwarf-constants.h` | copied verbatim from backtrace-test |
+| `eh-frame-reader.{h,cc}` | copied from aw-backtrace, with two deliberate edits (§4.2) |
+| `dwarf-constants.h` | copied verbatim from aw-backtrace |
 | `cfi-table.{h,cc}` | the *declared* side: a visitor turning one FDE into a row table |
 | `disasm.{h,cc}` | thin wrapper over a Zydis decoder and AT&T-style formatter |
 | `abs-state.{h,cc}` | the two lattices (CFI and switch-table) and their joins (§4.3) |
@@ -111,7 +111,7 @@ converts back to link-time vaddrs for the report. Checked by `elf-image-test.cc`
 
 ### 4.2 The copied reader
 
-`eh-frame-reader.h` is `../backtrace-test/eh-frame-reader.h` with two changes, both enabled by
+`eh-frame-reader.h` is `../aw-backtrace/eh-frame-reader.h` with two changes, both enabled by
 being offline — everything else byte-identical, deliberately, so the two can still be diffed:
 
 1. **`Fail` throws `EHFrameError`** instead of the `WithExit` non-local exit that skips
