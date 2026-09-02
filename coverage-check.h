@@ -1,4 +1,5 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
+// SPDX-License-Identifier: 0BSD
 #ifndef COVERAGE_CHECK_H_
 #define COVERAGE_CHECK_H_
 

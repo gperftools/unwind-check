@@ -1,4 +1,5 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
+// SPDX-License-Identifier: 0BSD
 //
 // Decodes the fixture binary's .eh_frame and checks the rows against the
 // .cfi_* directives that were written by hand in testdata/fixtures.S.

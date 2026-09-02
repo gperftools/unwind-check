@@ -1,4 +1,5 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
+// SPDX-License-Identifier: 0BSD
 #ifndef EH_FRAME_READER_H_
 #define EH_FRAME_READER_H_
 #include <stdarg.h>

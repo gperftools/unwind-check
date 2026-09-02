@@ -1,4 +1,5 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
+// SPDX-License-Identifier: 0BSD
 #ifndef SUBPROCESS_H_
 #define SUBPROCESS_H_
 

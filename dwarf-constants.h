@@ -1,4 +1,5 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
+// SPDX-License-Identifier: 0BSD
 #ifndef DWARF_CONSTANTS_H_
 #define DWARF_CONSTANTS_H_
 

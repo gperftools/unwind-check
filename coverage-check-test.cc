@@ -1,4 +1,5 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
+// SPDX-License-Identifier: 0BSD
 //
 // Exercises CheckUncoveredSymbols against testdata/libfixtures.so, whose
 // uncovered_no_cfi fixture (testdata/fixtures.S) is deliberately built

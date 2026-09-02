@@ -1,4 +1,5 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
+// SPDX-License-Identifier: 0BSD
 //
 // End-to-end test for LightCheck over the same hand-written fixtures
 // fixtures-test.cc uses for FDEChecker. The light checker's scope is

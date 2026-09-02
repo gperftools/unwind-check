@@ -1,4 +1,5 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
+// SPDX-License-Identifier: 0BSD
 //
 // End-to-end test: run the checker over testdata/fixtures.S, whose CFI
 // is hand-written so that the right answer is fixed by the fixture and

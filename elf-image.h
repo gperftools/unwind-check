@@ -1,4 +1,5 @@
 /* -*- Mode: C++; c-basic-offset: 2; indent-tabs-mode: nil -*- */
+// SPDX-License-Identifier: 0BSD
 #ifndef ELF_IMAGE_H_
 #define ELF_IMAGE_H_
 
