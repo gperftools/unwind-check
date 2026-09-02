@@ -269,8 +269,6 @@ cc_binary(
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
-        "@gperftools//:cpu_profiler",
-        "@gperftools//:tcmalloc",
         "@rules_cc//cc/runfiles",
     ],
 )
