@@ -7,7 +7,7 @@ actually match what the code does to the stack and to the callee-saved
 registers?
 
 It is the offline, "prove it" sibling of
-[aw-backtrace](../aw-backtrace/README.md). aw-backtrace has to unwind
+[aw-backtrace](https://github.com/gperftools/aw-backtrace). aw-backtrace has to unwind
 real stacks at runtime, quickly and without crashing, whatever the
 compiler emitted. unwind-check has all the time in the world and no
 signal-safety constraints, so it goes the other way: disassemble the
