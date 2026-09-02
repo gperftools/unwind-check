@@ -4,7 +4,7 @@ c++
 -Wall
 -Wextra
 -Wsign-compare
--Ibazel-unwind-analysis/external/googletest+/googletest/include
--Ibazel-unwind-analysis/external/googletest+/googlemock/include
--Ibazel-unwind-analysis/external/abseil-cpp+/
--Ibazel-unwind-analysis/external/nlohmann_json+/include
+-Ibazel-unwind-check/external/googletest+/googletest/include
+-Ibazel-unwind-check/external/googletest+/googlemock/include
+-Ibazel-unwind-check/external/abseil-cpp+/
+-Ibazel-unwind-check/external/nlohmann_json+/include
